@@ -419,9 +419,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        # FIX: Use full file_path, not just last segment
-        file_url = f"https://atlas-bot-proxy.hamza818483.workers.dev/file/bot{BOT_TOKEN}/{file.file_path}"
-        image_bytes = await download_image(file_url, BOT_TOKEN)
+        image_bytes = bytes(await file.download_as_bytearray())
         if not image_bytes:
             await processing_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
             return
