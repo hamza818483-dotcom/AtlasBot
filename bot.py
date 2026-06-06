@@ -78,7 +78,6 @@ async def setup_bot():
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .base_url("https://atlas-bot-proxy.hamza818483.workers.dev/bot")
-        .base_file_url("https://atlas-bot-proxy.hamza818483.workers.dev")
         .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(60)
