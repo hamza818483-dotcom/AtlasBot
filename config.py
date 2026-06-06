@@ -32,6 +32,9 @@ MIN_MCQ = 15
 # ============ BANGLADESH TIME ============
 BD_TZ = pytz.timezone("Asia/Dhaka")
 
+# ============ FLASK SERVER ============
+FLASK_PORT = 7860
+FLASK_HOST = "0.0.0.0"
 # ============ EXAM LINK EXPIRY ============
 EXAM_EXPIRY_SECONDS = None  # 1 hour
 
