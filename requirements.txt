@@ -1,0 +1,137 @@
+# ATLAS MCQ BOT - requirements.txt
+# All Python dependencies with pinned versions
+
+# ============================================
+# CORE DEPENDENCIES
+# ============================================
+
+# Telegram Bot Framework
+python-telegram-bot==20.7
+
+# Supabase Database Client
+supabase==2.7.1
+
+# HTTP Client (for Gemini API + Telegram file downloads)
+httpx==0.27.2
+httpcore==1.0.7
+
+# Google Generative AI (Gemini)
+google-generativeai==0.8.3
+google-ai-generativelanguage==0.6.10
+google-api-core==2.24.0
+google-auth==2.36.0
+googleapis-common-protos==1.66.0
+grpcio==1.68.1
+grpcio-status==1.68.1
+proto-plus==1.25.0
+protobuf==5.29.1
+
+# ============================================
+# IMAGE PROCESSING
+# ============================================
+
+# Image handling
+Pillow==11.0.0
+
+# ============================================
+# WEB SERVER (Flask for Exam Page)
+# ============================================
+
+Flask==3.1.0
+Werkzeug==3.1.3
+Jinja2==3.1.4
+itsdangerous==2.2.0
+MarkupSafe==3.0.2
+click==8.1.7
+blinker==1.9.0
+
+# ============================================
+# PDF GENERATION
+# ============================================
+
+# Playwright for Chromium PDF generation
+playwright==1.49.1
+
+# Alternative: WeasyPrint for CSS-based PDF
+weasyprint==63.1
+
+# PDF manipulation
+PyPDF2==3.0.1
+reportlab==4.2.5
+
+# ============================================
+# DATA PROCESSING
+# ============================================
+
+# JSON handling
+orjson==3.10.12
+
+# Date/Time handling
+pytz==2024.2
+python-dateutil==2.9.0.post0
+
+# ============================================
+# ASYNC SUPPORT
+# ============================================
+
+# Async utilities
+aiofiles==24.1.0
+aiohttp==3.11.10
+aiosignal==1.3.2
+frozenlist==1.5.0
+multidict==6.1.0
+yarl==1.18.3
+async-timeout==5.0.1
+asyncio-throttle==1.0.2
+
+# ============================================
+# UTILITIES
+# ============================================
+
+# Environment variable handling
+python-dotenv==1.0.1
+
+# UUID generation
+uuid7==0.1.0
+
+# Logging
+loguru==0.7.3
+
+# Terminal colors
+colorama==0.4.6
+
+# Progress bars (for CLI)
+tqdm==4.67.1
+
+# ============================================
+# SECURITY & ENCRYPTION
+# ============================================
+
+# Cryptography support
+cryptography==44.0.0
+pyOpenSSL==24.3.0
+certifi==2024.12.14
+charset-normalizer==3.4.1
+idna==3.10
+urllib3==2.3.0
+requests==2.32.3
+
+# ============================================
+# MISCELLANEOUS
+# ============================================
+
+# Six (Python 2/3 compatibility)
+six==1.17.0
+
+# Typing extensions
+typing_extensions==4.12.2
+
+# Attrs
+attrs==24.3.0
+
+# ============================================
+# NOTE:
+# - All versions are pinned for reproducible builds
+# - Some packages are auto-installed as dependencies
+# - Update versions periodically for security patches
+# ============================================
