@@ -22,6 +22,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 # ============ DEFAULTS ============
 DEFAULT_TIMER = 35  # seconds per question
+NEW_PRACTICE_COUNT = 15
 DEFAULT_FREE_LIMIT = 5
 DEFAULT_DAILY_LIMIT = 50
 DEFAULT_NEGATIVE_MARK = -0.25
