@@ -11,7 +11,7 @@ GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.s
 GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_MAX_TOKENS = 8192      # ADD THIS
 GEMINI_TEMPERATURE = 0.5       # ADD THIS
-Y
+
 # ============ CF WORKER PROXY ============
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev")
 BASE_URL = f"{CF_WORKER_URL}/bot{BOT_TOKEN}"
@@ -32,7 +32,7 @@ MIN_MCQ = 15
 BD_TZ = pytz.timezone("Asia/Dhaka")
 
 # ============ EXAM LINK EXPIRY ============
-EXAM_EXPIRY_SECONDS = none  # 1 hour
+EXAM_EXPIRY_SECONDS = None  # 1 hour
 
 # ============ POLL DELAY ============
 POLL_DELAY = 1.5  # seconds between polls
