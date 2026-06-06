@@ -14,8 +14,7 @@ GEMINI_TEMPERATURE = 0.5       # ADD THIS
 
 # ============ CF WORKER PROXY ============
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev")
-BASE_URL = f"{CF_WORKER_URL}/bot{BOT_TOKEN}"
-
+BASE_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 # ============ SUPABASE CONFIG ============
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wbdyjpjbczfunyhhmtry.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
