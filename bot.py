@@ -496,7 +496,11 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        image_bytes = bytes(await file.download_as_bytearray())
+        file_url = file.file_path
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(file_url)
+            image_bytes = resp.content
         if not image_bytes:
             await processing_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
             return
