@@ -805,37 +805,80 @@ async def handle_new_practice(query, user, mode='poll'):
     await query.answer("15 new MCQs coming!")
 
 # ============================================
-# MAIN — FIX: Flask in thread BEFORE polling
+# WEBHOOK HANDLER
+# ============================================
+# Global event loop reference for webhook
+_bot_loop = None
+
+def setup_webhook_route(flask_app):
+    """Add /webhook route to Flask app"""
+    from flask import request as flask_request
+
+    @flask_app.route('/webhook', methods=['POST'])
+    def webhook():
+        token = flask_request.headers.get('X-Bot-Token', '')
+        if token != BOT_TOKEN:
+            return 'Unauthorized', 401
+        data = flask_request.get_json(force=True)
+        if data and application and _bot_loop:
+            update = Update.de_json(data, application.bot)
+            asyncio.run_coroutine_threadsafe(
+                application.process_update(update),
+                _bot_loop
+            )
+        return 'OK', 200
+
+# ============================================
+# MAIN — Webhook mode (no polling conflict)
 # ============================================
 async def main():
     """Main entry point"""
+    global _bot_loop
+    _bot_loop = asyncio.get_event_loop()
+
     log("=" * 60)
-    log("🚀 ATLAS MCQ BOT STARTING")
+    log("🚀 ATLAS MCQ BOT STARTING (WEBHOOK MODE)")
     log("=" * 60)
 
     # Initialize database
     log("📦 Initializing database...")
     init_database()
 
-    # Start Flask in separate thread FIRST
-    log("🌐 Starting exam server...")
-    flask_thread = threading.Thread(target=run_exam_server, daemon=True)
-    flask_thread.start()
-
     # Setup bot (handlers, commands)
     log("🤖 Setting up bot...")
     await setup_bot()
 
-    # Start polling — this blocks until stopped
-    log("📡 Starting polling...")
-    async with application:
-        await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True
+    # Initialize application
+    await application.initialize()
+    await application.start()
+
+    # Set webhook with Telegram
+    webhook_url = f"https://atlas-bot-proxy.hamza818483.workers.dev/webhook/{BOT_TOKEN}"
+    try:
+        await application.bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+        log(f"✅ Webhook set: {webhook_url}")
+    except Exception as e:
+        log_error(f"Webhook set failed: {e}")
+
+    # Add webhook route to Flask
+    from exam_server import app as flask_app
+    setup_webhook_route(flask_app)
+
+    # Start Flask in thread (non-blocking)
+    log("🌐 Starting exam+webhook server on port 7860...")
+    flask_thread = threading.Thread(
+        target=lambda: flask_app.run(host="0.0.0.0", port=7860, debug=False),
+        daemon=False
     )
-        log("✅ Bot is running!")
-        # Keep running forever
-        await asyncio.Event().wait()
+    flask_thread.start()
+
+    log("✅ Bot is running in webhook mode!")
+    # Keep asyncio loop alive
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
