@@ -962,8 +962,8 @@ async def main():
     try:
         await application.bot.set_webhook(
             url=webhook_url,
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
+            allowed_updates=["message", "callback_query", "poll_answer", "poll"],
+            drop_pending_updates=False
         )
         log(f"✅ Webhook set: {webhook_url}")
     except Exception as e:
