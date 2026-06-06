@@ -311,6 +311,7 @@ class GeminiMCQGenerator:
             "generationConfig": {
                 "temperature": 0.3,
                 "maxOutputTokens": 4096,
+                "thinkingConfig": {"thinkingBudget": 1024},
                 "topP": 0.95,
                 "topK": 40
             },
