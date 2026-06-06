@@ -539,7 +539,7 @@ def generate_exam_html(quiz_id, mcqs, total):
                         <button class="icon-btn bookmark${{bmClass}}" id="bmBtn${{i}}" title="বুকমার্ক" onclick="toggleBookmark(${{i}})">🔖</button>
                     </div>
                 </div>
-                <div class="q-text">${{q.question}}</div>`;
+                ${{q._tag ? `<div style="font-size:11px;font-weight:700;color:#5A5FE0;margin-bottom:6px">[${q._tag}]</div>` : ''}}<div class="q-text">${{q.question}}</div>`;
             
             const labels = ['ক', 'খ', 'গ', 'ঘ'];
             q.options.forEach((opt, oi) => {{
@@ -880,7 +880,18 @@ def generate_exam_html(quiz_id, mcqs, total):
 # ============================================
 def create_exam_link(quiz_id, mcqs):
     """Store exam and return URL"""
-    store_exam(quiz_id, mcqs)
+    from database import get_setting
+    tag = get_setting('quiz_tag', '')
+    exp = get_setting('quiz_exp', '')
+    tagged_mcqs = []
+    for mcq in mcqs:
+        m = dict(mcq)
+        if tag:
+            m['_tag'] = tag
+        if exp:
+            m['_exp'] = exp
+        tagged_mcqs.append(m)
+    store_exam(quiz_id, tagged_mcqs)
     return f"https://hamzaHF1-atlasbot.hf.space/exam/{quiz_id}"
 
 # ============================================
