@@ -7,6 +7,25 @@ import os
 import json
 import random
 import string
+import time
+# ============================================
+# IN-MEMORY CACHE
+# ============================================
+_user_cache = {}  # {user_id: user_data}
+_settings_cache = {}  # {key: value}
+CACHE_TTL = 300  # 5 minutes
+
+def _cache_get(cache, key):
+    entry = cache.get(key)
+    if entry and (time.time() - entry['t']) < CACHE_TTL:
+        return entry['v']
+    return None
+
+def _cache_set(cache, key, value):
+    cache[key] = {'v': value, 't': time.time()}
+
+def _cache_del(cache, key):
+    cache.pop(key, None)
 from datetime import datetime, date
 from supabase import create_client, Client
 from config import (
@@ -230,13 +249,14 @@ def create_user(user_id, first_name="", username=""):
 
 def get_user(user_id):
     """Get user by ID"""
-    log(f"🔍 Fetching user: {user_id}")
+    cached = _cache_get(_user_cache, user_id)
+    if cached:
+        return cached
     try:
         result = supabase.table('atlas_users').select('*').eq('user_id', user_id).execute()
         if result.data and len(result.data) > 0:
-            log(f"✅ User found: {user_id}")
+            _cache_set(_user_cache, user_id, result.data[0])
             return result.data[0]
-        log(f"⚠️ User not found: {user_id}")
         return None
     except Exception as e:
         log_error(f"❌ User fetch error: {user_id} - {str(e)}")
@@ -244,10 +264,9 @@ def get_user(user_id):
 
 def update_user(user_id, data):
     """Update user fields"""
-    log(f"📝 Updating user: {user_id} with {data}")
     try:
         supabase.table('atlas_users').update(data).eq('user_id', user_id).execute()
-        log(f"✅ User updated: {user_id}")
+        _cache_del(_user_cache, user_id)  # invalidate cache
         return True
     except Exception as e:
         log_error(f"❌ User update error: {user_id} - {str(e)}")
