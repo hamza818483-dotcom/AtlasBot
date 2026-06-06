@@ -336,7 +336,7 @@ class GeminiMCQGenerator:
         }
         
         # Make API call with timeout
-        timeout = httpx.Timeout(120.0, connect=15.0)
+        timeout = httpx.Timeout(180.0, connect=30.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{url}?key={api_key}",
@@ -533,7 +533,7 @@ async def download_image(file_url: str, bot_token: str) -> Optional[bytes]:
     """Download image from Telegram server"""
     log(f"📥 Downloading image from Telegram")
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(file_url)
             if response.status_code == 200:
                 log(f"✅ Image downloaded: {len(response.content)} bytes")
@@ -549,7 +549,7 @@ async def get_file_url(file_id: str, bot_token: str) -> Optional[str]:
     """Get file download URL from Telegram"""
     try:
         url = f"https://api.telegram.org/bot{bot_token}/getFile"
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, json={"file_id": file_id})
             data = response.json()
             
