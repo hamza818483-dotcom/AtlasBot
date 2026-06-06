@@ -287,7 +287,7 @@ class GeminiMCQGenerator:
                 "parts": [
                     {
                         "inline_data": {
-                            "mime_type": "image/jpeg",
+                        "mime_type": self._detect_mime(image_data),  
                             "data": image_base64
                         }
                     },
@@ -336,7 +336,7 @@ class GeminiMCQGenerator:
         }
         
         # Make API call with timeout
-        timeout = httpx.Timeout(60.0, connect=10.0)
+        timeout = httpx.Timeout(120.0, connect=15.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{url}?key={api_key}",
@@ -522,7 +522,10 @@ class GeminiMCQGenerator:
         except Exception as e:
             log_error(f"❌ MCQ validation error: {str(e)}")
             return None
-
+    def _detect_mime(self, data: bytes) -> str:
+        if data[:4] == b'\x89PNG': return "image/png"
+        if data[:4] == b'RIFF': return "image/webp"
+        return "image/jpeg"
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
