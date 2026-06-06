@@ -420,7 +420,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         # FIX: Use full file_path, not just last segment
-        file_url = f"{CF_WORKER_URL}/file/bot{BOT_TOKEN}/{file.file_path}"
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
         image_bytes = await download_image(file_url, BOT_TOKEN)
         if not image_bytes:
             await processing_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
