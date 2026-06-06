@@ -549,8 +549,8 @@ def generate_exam_html(quiz_id, mcqs, total):
                         <button class="icon-btn bookmark${{bmClass}}" id="bmBtn${{i}}" title="বুকমার্ক" onclick="toggleBookmark(${{i}})">🔖</button>
                     </div>
                 </div>
-                ${{q._tag ? '<div style="font-size:11px;font-weight:700;color:#5A5FE0;margin-bottom:6px">[' + q._tag + ']</div>' : ''}}<div class="q-text">${{q.question}}</div>`;
-            
+                <div class="q-text">${{q.question}}</div>`;
+
             const labels = ['ক', 'খ', 'গ', 'ঘ'];
             q.options.forEach((opt, oi) => {{
                 html += `<div class="option-item" id="opt${{i}}_${{oi}}" onclick="selectOption(${{i}},${{oi}})" data-qindex="${{i}}">
