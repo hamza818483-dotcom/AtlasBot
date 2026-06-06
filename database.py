@@ -307,14 +307,15 @@ def get_all_users():
 # ============================================
 def get_setting(key, default=None):
     """Get a setting value"""
-    log(f"⚙️ Getting setting: {key}")
+    cached = _cache_get(_settings_cache, key)
+    if cached is not None:
+        return cached
     try:
         result = supabase.table('atlas_settings').select('value').eq('key', key).execute()
         if result.data and len(result.data) > 0:
             value = result.data[0]['value']
-            log(f"✅ Setting {key} = {value}")
+            _cache_set(_settings_cache, key, value)
             return value
-        log(f"⚠️ Setting not found: {key}, using default: {default}")
         return default
     except Exception as e:
         log_error(f"❌ Setting fetch error: {key} - {str(e)}")
@@ -336,7 +337,7 @@ def set_setting(key, value):
                 'key': key,
                 'value': str(value)
             }).execute()
-        
+        _cache_del(_settings_cache, key)	 
         log(f"✅ Setting saved: {key} = {value}")
         return True
     except Exception as e:
