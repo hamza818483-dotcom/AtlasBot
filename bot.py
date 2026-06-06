@@ -496,8 +496,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        file_url = file.file_path
         import httpx
+        file_url = file.file_path
+        if not file_url.startswith('http'):
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_url}"
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(file_url)
             image_bytes = resp.content
