@@ -830,7 +830,9 @@ async def main():
     log("📡 Starting polling...")
     async with application:
         await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
         log("✅ Bot is running!")
         # Keep running forever
         await asyncio.Event().wait()
