@@ -640,7 +640,6 @@ async def handle_poll_solve(query, quiz_id, user):
                 correct_option_id=correct_id,
                 explanation=exp_text,
                 is_anonymous=True,
-                open_period=timer,
             )
             if i < total - 1:
                 await asyncio.sleep(POLL_DELAY)

@@ -43,8 +43,18 @@ def store_exam(quiz_id, mcqs):
     log(f"Exam stored: {quiz_id} with {len(mcqs)} questions")
 
 def get_exam(quiz_id):
-    """Get exam data"""
-    return exam_store.get(quiz_id)
+    """Get exam data — memory first, then Supabase"""
+    if quiz_id in exam_store:
+        return exam_store[quiz_id]
+    try:
+        from database import get_mcq
+        mcq_data = get_mcq(quiz_id)
+        if mcq_data:
+            exam_store[quiz_id] = {'mcqs': mcq_data['mcqs'], 'created_at': None}
+            return exam_store[quiz_id]
+    except:
+        pass
+    return None
 
 # ============================================
 # ROUTES
@@ -539,7 +549,7 @@ def generate_exam_html(quiz_id, mcqs, total):
                         <button class="icon-btn bookmark${{bmClass}}" id="bmBtn${{i}}" title="বুকমার্ক" onclick="toggleBookmark(${{i}})">🔖</button>
                     </div>
                 </div>
-                ${{q._tag ? `<div style="font-size:11px;font-weight:700;color:#5A5FE0;margin-bottom:6px">[${q._tag}]</div>` : ''}}<div class="q-text">${{q.question}}</div>`;
+                ${{q._tag ? '<div style="font-size:11px;font-weight:700;color:#5A5FE0;margin-bottom:6px">[' + q._tag + ']</div>' : ''}}<div class="q-text">${{q.question}}</div>`;
             
             const labels = ['ক', 'খ', 'গ', 'ঘ'];
             q.options.forEach((opt, oi) => {{
