@@ -309,8 +309,9 @@ class GeminiMCQGenerator:
         payload = {
             "contents": contents,
             "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": self.max_tokens,
+                "temperature": 0.3,
+                "maxOutputTokens": 4096,
+                "thinkingConfig": {"thinkingBudget": 0},
                 "topP": 0.95,
                 "topK": 40
             },
