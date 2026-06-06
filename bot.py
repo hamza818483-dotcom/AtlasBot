@@ -1005,9 +1005,11 @@ async def main():
     log("🤖 Setting up bot...")
     await setup_bot()
     
-    # Start exam server in background
+    # Start Flask in separate thread
     log("🌐 Starting exam server...")
-    asyncio.create_task(asyncio.to_thread(run_exam_server))
+    import threading
+    flask_thread = threading.Thread(target=run_exam_server, daemon=True)
+    flask_thread.start()
     
     # Start polling
     log("📡 Starting polling...")
