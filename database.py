@@ -46,6 +46,30 @@ except Exception as e:
     log_error(f"❌ Supabase client initialization failed: {str(e)}")
     raise
 
+
+# ============================================
+# IN-MEMORY CACHE (for fast responses)
+# ============================================
+_user_cache = {}        # user_id -> user data
+_usage_cache = {}       # user_id -> {date, count}
+_settings_cache = {}    # key -> value
+_limit_cache = {}       # user_id -> limit
+_CACHE_TTL = 300        # 5 minutes
+
+import time as _time
+
+def _cache_get(cache, key):
+    entry = cache.get(key)
+    if entry and (_time.time() - entry['ts'] < _CACHE_TTL):
+        return entry['val']
+    return None
+
+def _cache_set(cache, key, val):
+    cache[key] = {'val': val, 'ts': _time.time()}
+
+def _cache_del(cache, key):
+    cache.pop(key, None)
+
 # ============================================
 # TABLE CREATION
 # ============================================
@@ -230,13 +254,15 @@ def create_user(user_id, first_name="", username=""):
 
 def get_user(user_id):
     """Get user by ID"""
+    cached = _cache_get(_user_cache, user_id)
+    if cached is not None:
+        return cached
     log(f"🔍 Fetching user: {user_id}")
     try:
         result = supabase.table('atlas_users').select('*').eq('user_id', user_id).execute()
         if result.data and len(result.data) > 0:
-            log(f"✅ User found: {user_id}")
+            _cache_set(_user_cache, user_id, result.data[0])
             return result.data[0]
-        log(f"⚠️ User not found: {user_id}")
         return None
     except Exception as e:
         log_error(f"❌ User fetch error: {user_id} - {str(e)}")
@@ -247,7 +273,7 @@ def update_user(user_id, data):
     log(f"📝 Updating user: {user_id} with {data}")
     try:
         supabase.table('atlas_users').update(data).eq('user_id', user_id).execute()
-        log(f"✅ User updated: {user_id}")
+        _cache_del(_user_cache, user_id)  # invalidate cache
         return True
     except Exception as e:
         log_error(f"❌ User update error: {user_id} - {str(e)}")
@@ -288,14 +314,15 @@ def get_all_users():
 # ============================================
 def get_setting(key, default=None):
     """Get a setting value"""
-    log(f"⚙️ Getting setting: {key}")
+    cached = _cache_get(_settings_cache, key)
+    if cached is not None:
+        return cached
     try:
         result = supabase.table('atlas_settings').select('value').eq('key', key).execute()
         if result.data and len(result.data) > 0:
             value = result.data[0]['value']
-            log(f"✅ Setting {key} = {value}")
+            _cache_set(_settings_cache, key, value)
             return value
-        log(f"⚠️ Setting not found: {key}, using default: {default}")
         return default
     except Exception as e:
         log_error(f"❌ Setting fetch error: {key} - {str(e)}")
@@ -318,7 +345,7 @@ def set_setting(key, value):
                 'value': str(value)
             }).execute()
         
-        log(f"✅ Setting saved: {key} = {value}")
+        _cache_del(_settings_cache, key)  # invalidate cache
         return True
     except Exception as e:
         log_error(f"❌ Setting save error: {key} - {str(e)}")
@@ -355,18 +382,17 @@ def get_all_settings():
 # ============================================
 def get_user_limit(user_id):
     """Get user's daily limit"""
-    log(f"🔍 Getting limit for user: {user_id}")
+    cached = _cache_get(_limit_cache, user_id)
+    if cached is not None:
+        return cached
     try:
-        # Check custom limit
         result = supabase.table('atlas_limits').select('custom_limit').eq('user_id', user_id).execute()
         if result.data and len(result.data) > 0 and result.data[0]['custom_limit']:
             limit = result.data[0]['custom_limit']
-            log(f"✅ Custom limit: {user_id} = {limit}")
+            _cache_set(_limit_cache, user_id, limit)
             return limit
-        
-        # Return default daily limit
         default = int(get_setting('daily_limit', DEFAULT_DAILY_LIMIT))
-        log(f"✅ Default limit: {user_id} = {default}")
+        _cache_set(_limit_cache, user_id, default)
         return default
     except Exception as e:
         log_error(f"❌ Limit fetch error: {user_id} - {str(e)}")
@@ -536,14 +562,16 @@ def delete_bookmark(bookmark_id, phone):
 def get_today_usage(user_id):
     """Get today's usage count"""
     today = get_bd_date()
-    log(f"📊 Getting today usage: user={user_id}, date={today}")
+    cache_key = f"{user_id}_{today}"
+    cached = _cache_get(_usage_cache, cache_key)
+    if cached is not None:
+        return cached
     try:
         result = supabase.table('atlas_usage_logs').select('usage_count').eq('user_id', user_id).eq('usage_date', str(today)).execute()
         if result.data and len(result.data) > 0:
             count = result.data[0]['usage_count']
-            log(f"✅ Today usage: {user_id} = {count}")
+            _cache_set(_usage_cache, cache_key, count)
             return count
-        log(f"⚠️ No usage today: {user_id}")
         return 0
     except Exception as e:
         log_error(f"❌ Usage fetch error: {user_id} - {str(e)}")
@@ -576,7 +604,7 @@ def increment_usage(user_id):
         # Also update atlas_users
         update_user(user_id, {'daily_usage': new_count})
         
-        log(f"✅ Usage incremented: {user_id} = {new_count}")
+        _cache_set(_usage_cache, f"{user_id}_{today}", new_count)  # update cache
         return new_count
     except Exception as e:
         log_error(f"❌ Usage increment error: {user_id} - {str(e)}")
