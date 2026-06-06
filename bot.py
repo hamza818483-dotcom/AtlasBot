@@ -81,6 +81,7 @@ async def setup_bot():
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .base_url("https://atlas-bot-proxy.hamza818483.workers.dev/bot")
+        .base_file_url("https://atlas-bot-proxy.hamza818483.workers.dev/file/bot")
         .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(60)
@@ -960,10 +961,10 @@ async def main():
 
     webhook_url = f"https://atlas-bot-proxy.hamza818483.workers.dev/webhook/{BOT_TOKEN}"
     try:
-        await application.bot.set_webhook(
+        await application.bot.set_webhook(max_connections=40,
             url=webhook_url,
             allowed_updates=["message", "callback_query", "poll_answer", "poll"],
-            drop_pending_updates=False
+            drop_pending_updates=True
         )
         log(f"✅ Webhook set: {webhook_url}")
     except Exception as e:
