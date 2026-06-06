@@ -28,6 +28,7 @@ def _cache_del(cache, key):
     cache.pop(key, None)
 from datetime import datetime, date
 from supabase import create_client, Client
+from config import OWNER_ID
 from config import (
     SUPABASE_URL, SUPABASE_KEY, BD_TZ, 
     DEFAULT_FREE_LIMIT, DEFAULT_DAILY_LIMIT, DEFAULT_NEGATIVE_MARK,
@@ -661,7 +662,11 @@ def check_access(user_id):
     Returns: (allowed, current_usage, limit, is_permitted)
     """
     log(f"🔐 Checking access for: {user_id}")
-    
+
+    # Owner unlimited
+    if user_id == OWNER_ID:
+        return (True, 0, 999999, True)
+
     # Ensure user exists
     user = get_user(user_id)
     if not user:
