@@ -1196,20 +1196,22 @@ async def handle_new_practice(query, user, mode='poll'):
 _bot_loop = None
 
 
-def setup_webhook_route(flask_app):
-    from flask import request as flask_request
+def setup_webhook_route(fastapi_app):
+    from fastapi import Request
+    from fastapi.responses import PlainTextResponse
 
-    @flask_app.route('/webhook', methods=['POST'])
-    def webhook():
-        token = flask_request.headers.get('X-Bot-Token', '')
+    @fastapi_app.post('/webhook')
+    async def webhook(request: Request):
+        token = request.headers.get('X-Bot-Token', '')
         if token != BOT_TOKEN:
-            return 'Unauthorized', 401
-        data = flask_request.get_json(force=True)
+            return PlainTextResponse('Unauthorized', status_code=401)
+        data = await request.json()
         if data and application and _bot_loop:
             update = Update.de_json(data, application.bot)
-            asyncio.run_coroutine_threadsafe(application.process_update(update), _bot_loop)
-        return 'OK', 200
-
+            asyncio.run_coroutine_threadsafe(
+                application.process_update(update), _bot_loop
+            )
+        return PlainTextResponse('OK')
 
 # ============================================
 # MAIN
