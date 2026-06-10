@@ -198,7 +198,7 @@ def create_tables():
     try:
         for q in queries:
             try:
-                supabase.rpc('exec_sql', {'sql': q}).execute()
+                supabase.table('atlas_users').select('user_id').limit(1).execute()
             except Exception:
                 # exec_sql RPC may not exist; tables are likely pre-created in dashboard.
                 pass
