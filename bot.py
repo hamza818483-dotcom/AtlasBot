@@ -1252,11 +1252,8 @@ async def main():
 
     log("🌐 Starting exam+webhook server on port 7860...")
     import uvicorn
-    server_thread = threading.Thread(
-        target=lambda: uvicorn.run(fastapi_app, host="0.0.0.0", port=7860, log_level="warning"),
-        daemon=False,
-    )
-    server_thread.start()
-
+    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=7860, log_level="warning")
+    server = uvicorn.Server(config)
+    
     log("✅ Bot is running in webhook mode!")
-    await asyncio.Event().wait()
+    await server.serve()  # ← asyncio.Event().wait() বাদ দাও, এটাই block করবে
