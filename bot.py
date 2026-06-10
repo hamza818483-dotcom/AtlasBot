@@ -970,18 +970,16 @@ async def main():
     except Exception as e:
         log_error(f"Webhook set failed: {e}")
 
-    from exam_server import app as flask_app
-    setup_webhook_route(flask_app)
+    from exam_server import app as fastapi_app
+    setup_webhook_route(fastapi_app)
 
     log("🌐 Starting exam+webhook server on port 7860...")
-    flask_thread = threading.Thread(
-        target=lambda: flask_app.run(host="0.0.0.0", port=7860, debug=False),
-        daemon=False
-    )
-    flask_thread.start()
+    import uvicorn
+    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=7860, log_level="warning")
+    server = uvicorn.Server(config)
 
     log("✅ Bot is running in webhook mode!")
-    await asyncio.Event().wait()
+    await server.serve()
 
 if __name__ == "__main__":
     asyncio.run(main())
