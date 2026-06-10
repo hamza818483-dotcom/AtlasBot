@@ -43,7 +43,7 @@ from database import (
     save_active_quiz, get_active_quiz, remove_active_quiz
 )
 from gemini_mcq import mcq_generator, download_image, get_file_url
-from exam_server import create_exam_link, run_exam_server
+from exam_server import create_exam_link
 
 import os
 
