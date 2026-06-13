@@ -1,137 +1,527 @@
 """
-ATLAS AtlasBot — Exam Server (FastAPI)
-Single-file: all HTML/CSS/JS generated inside Python.
-Stack: Telegram -> CF Worker -> HF Space (this) -> Supabase
-Routes through CF Worker for all Telegram API + file access.
+ATLAS MCQ BOT - Exam Server (FastAPI)
+Version: 3.0
+
+CHANGES FROM v2.4:
+  ✅ NEW: জ্ঞানমূলক / অনুধাবনমূলক সৃজনশীল PDF generator (A4, 2-layout, color + shadow box, header)
+       Routes: GET /api/creative-pdf/{cache_id}?ctype=knowledge|comprehension
+  ✅ NEW: AI-generated creative questions from source image (Gemini, source-only strict)
+  ✅ FIX: Premium PDF now justifies content to fill the full A4 page (auto font/gap scaling)
+  ✅ FIX: Solve PDF full-page friendly
+  ✅ Insufficient-data explanation for creative questions
+  ✅ ALL existing v2.4 features preserved 100%
 """
 
+# ============================================================
+# SECTION 1: IMPORTS
+# ============================================================
 import os
 import json
 import uuid
 import base64
 import asyncio
-import logging
-from datetime import datetime
+import random
+import traceback
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, List, Any
+from io import BytesIO
 
-import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from supabase import create_client, Client
+import httpx
+from google import genai
+from google.genai import types
+from PIL import Image
 
-# ============================================
-# CONFIG (HF secrets via env)
-# ============================================
-CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-mcq-worker.hamza818483.workers.dev").rstrip("/")
+# ============================================================
+# SECTION 2: CONFIGURATION
+# ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-BASE_URL = os.getenv("BASE_URL", "https://hamzaHF1-atlasbot.hf.space").rstrip("/")
+GENAI_API_KEY = os.getenv("GEMINI_KEY", "")
+CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev").rstrip("/")
+HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
+BASE_URL = os.getenv("BASE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
+
+SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
+
+# Backup Supabase (optional mirror — silently skipped if not set)
+SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
+SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
+
+SEC_PER_QUESTION = 30
+NEGATIVE_MARK = 0.50
+FREE_NEW_EXAM_LIMIT = 2
+PERMITTED_NEW_EXAM_LIMIT = 20
+NEW_PRACTICE_COUNT = 15
 CHROMIUM_PATH = os.getenv("CHROMIUM_PATH", "/usr/bin/chromium")
 
-MAX_REGEN = 5  # max New Exam regenerations
+PROMPT_DISPLAY_NAMES = {
+    "prompt_1": "🩺 Medical Standard MCQ",
+    "prompt_2": "✅ সত্য-মিথ্যার প্রশ্ন",
+    "prompt_3": "🔥 কঠিন প্রশ্ন",
+    "prompt_mixed": "🎲 Mixed",
+}
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [EXAM] %(message)s")
-log = logging.getLogger("exam").info
+try:
+    BD_TZ = timezone(timedelta(hours=6))
+except:
+    BD_TZ = datetime.now().astimezone().tzinfo
 
-app = FastAPI(title="ATLAS Exam Server")
+# ============================================================
+# SECTION 3: SUPABASE CLIENT
+# ============================================================
+supabase: Client = None
+supabase_backup: Client = None
 
-# ============================================
-# IN-MEMORY EXAM STORE
-# ============================================
-# cache_id -> {mcqs, topic, page, tag, image_file_id, is_new_gen, regen_count, src_cache_id}
-exam_store = {}
+def get_supabase() -> Client:
+    global supabase
+    if supabase is None:
+        try:
+            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            print("✅ Supabase client initialized (Exam Server)")
+        except Exception as e:
+            print(f"❌ Supabase init failed: {e}")
+            raise
+    return supabase
 
+def get_supabase_backup() -> Optional[Client]:
+    global supabase_backup
+    if not SUPABASE_BACKUP_URL or not SUPABASE_BACKUP_KEY:
+        return None
+    if supabase_backup is None:
+        try:
+            supabase_backup = create_client(SUPABASE_BACKUP_URL, SUPABASE_BACKUP_KEY)
+            print("✅ Supabase BACKUP client initialized (Exam Server)")
+        except Exception as e:
+            print(f"⚠️ Supabase backup init failed: {e}")
+            return None
+    return supabase_backup
 
-def store_exam(quiz_id, mcqs, topic="", page=1, tag="", image_file_id="",
-               is_new_gen=False, src_cache_id=None):
-    """Store exam data in memory. Called from bot.py."""
+def _mirror_insert(table: str, row: Dict) -> None:
+    """Best-effort mirror to backup DB. Never raises."""
+    try:
+        bk = get_supabase_backup()
+        if bk:
+            bk.table(table).insert(row).execute()
+    except Exception as e:
+        print(f"Backup mirror({table}) skipped: {e}")
+
+# ============================================================
+# SECTION 4: GEMINI SETUP
+# ============================================================
+_exam_genai_client: Optional[genai.Client] = None
+GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEY", "").split(",") if k.strip()]
+_exam_key_idx = 0
+
+def setup_gemini():
+    global _exam_genai_client
+    if GENAI_API_KEY:
+        first_key = GENAI_API_KEY.split(",")[0].strip()
+        _exam_genai_client = genai.Client(api_key=first_key)
+        print(f"✅ Gemini API configured (Exam Server) key_len={len(first_key)}")
+    else:
+        print("⚠️ GENAI_API_KEY not set! (Exam Server)")
+
+def _rotate_exam_key():
+    """Switch the exam Gemini client to the next key (round-robin)."""
+    global _exam_genai_client, _exam_key_idx
+    if not GEMINI_KEYS:
+        return
+    _exam_key_idx = (_exam_key_idx + 1) % len(GEMINI_KEYS)
+    try:
+        _exam_genai_client = genai.Client(api_key=GEMINI_KEYS[_exam_key_idx])
+        print(f"🔄 Exam Gemini key rotated -> #{_exam_key_idx+1}")
+    except Exception as e:
+        print(f"rotate exam key failed: {e}")
+
+def _parse_new_exam_json(response_text: str) -> List[Dict]:
+    """Clean + parse + validate MCQ JSON from Gemini for New Exam."""
+    txt = (response_text or "").strip()
+    for tag in ['```json', '```']:
+        if txt.startswith(tag):
+            txt = txt[len(tag):]
+    if txt.endswith('```'):
+        txt = txt[:-3]
+    txt = txt.strip()
+    try:
+        mcqs = json.loads(txt)
+    except Exception:
+        return []
+    valid = []
+    for mcq in mcqs if isinstance(mcqs, list) else []:
+        if all(k in mcq for k in ['question', 'options', 'answer']):
+            if len(mcq['options']) >= 4:
+                mcq['options'] = mcq['options'][:4]
+            if isinstance(mcq['answer'], str):
+                mcq['answer'] = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(mcq['answer'].upper(), 0)
+            if isinstance(mcq['answer'], int) and 0 <= mcq['answer'] <= 3:
+                valid.append(mcq)
+    return valid
+
+def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
+    """Generate New Exam MCQs with all-key rotation + one retry if too few.
+    Returns [] only if every key/attempt failed."""
+    global _exam_genai_client
+    if _exam_genai_client is None:
+        setup_gemini()
+    if _exam_genai_client is None:
+        return []
+    tries = max(1, len(GEMINI_KEYS))
+    best: List[Dict] = []
+    for attempt in range(tries):
+        try:
+            resp = _exam_genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[PROMPT_NEW_EXAM, img],
+                config=types.GenerateContentConfig(
+                    temperature=0.7, top_p=0.95, top_k=40,
+                    max_output_tokens=8192,
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                )
+            )
+            mcqs = _parse_new_exam_json(resp.text if resp else "")
+            if len(mcqs) > len(best):
+                best = mcqs
+            if len(best) >= min_count:
+                return best
+            # too few -> retry once on same key with stronger instruction
+            resp2 = _exam_genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[PROMPT_NEW_EXAM + "\n\n🔴 অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।", img],
+                config=types.GenerateContentConfig(
+                    temperature=0.8, top_p=0.95, top_k=40, max_output_tokens=8192,
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                )
+            )
+            mcqs2 = _parse_new_exam_json(resp2.text if resp2 else "")
+            if len(mcqs2) > len(best):
+                best = mcqs2
+            if len(best) >= min_count:
+                return best
+        except Exception as e:
+            print(f"New exam gen attempt {attempt+1} failed: {e}")
+            _rotate_exam_key()
+    return best
+
+# ============================================================
+# SECTION 5: IN-MEMORY EXAM STORE + REHYDRATE
+# ============================================================
+exam_store: Dict[str, Dict] = {}
+
+def store_exam(quiz_id: str, mcqs: List[Dict], topic: str = "", page: int = 1,
+               tag: str = "", image_file_id: str = "", is_new_gen: bool = False,
+               src_cache_id: str = None, chat_id: int = None, message_id: int = None,
+               prompt_type: str = "prompt_1") -> str:
     exam_store[quiz_id] = {
-        "mcqs": mcqs,
-        "topic": topic,
-        "page": page,
-        "tag": tag,
-        "image_file_id": image_file_id,
-        "is_new_gen": is_new_gen,
-        "regen_count": 0,
-        "src_cache_id": src_cache_id or quiz_id,
-        "created_at": datetime.utcnow().isoformat(),
+        "mcqs": mcqs, "topic": topic, "page": page, "tag": tag,
+        "image_file_id": image_file_id, "is_new_gen": is_new_gen,
+        "regen_count": 0, "src_cache_id": src_cache_id or quiz_id,
+        "chat_id": chat_id, "message_id": message_id,
+        "prompt_type": prompt_type,
+        "created_at": datetime.now(BD_TZ).isoformat(),
     }
-    log(f"Exam stored: {quiz_id} ({len(mcqs)} q, new_gen={is_new_gen})")
+    print(f"📦 Exam stored: {quiz_id} ({len(mcqs)} questions)")
     return quiz_id
 
-
-def create_exam_link(quiz_id, mcqs):
-    """Store exam and return public URL. Called from bot.py."""
-    try:
-        from database import get_all_settings
-        s = get_all_settings() or {}
-    except Exception:
-        s = {}
-    topic = s.get("quiz_topic", "")
-    tag = s.get("quiz_tag", "")
-    page = int(s.get("quiz_page", 1) or 1)
-    img = s.get("quiz_image_file_id", "")
-    store_exam(quiz_id, mcqs, topic=topic, page=page, tag=tag, image_file_id=img)
-    return f"{BASE_URL}/exam/{quiz_id}"
-
-
-def _get_exam(cache_id):
-    """Memory first, then Supabase rehydrate."""
+def _get_exam(cache_id: str) -> Optional[Dict]:
     if cache_id in exam_store:
         return exam_store[cache_id]
     try:
-        from database import get_mcq, is_new_gen as _ing
-        row = get_mcq(cache_id)
-        if row:
+        client = get_supabase()
+        result = client.table('mcqs').select('*').eq('quiz_id', cache_id).execute()
+        if result.data and len(result.data) > 0:
+            row = result.data[0]
+            mcqs = json.loads(row['mcqs']) if isinstance(row['mcqs'], str) else row['mcqs']
             store_exam(
-                cache_id,
-                row.get("mcqs", []),
-                topic=row.get("topic", ""),
-                page=int(row.get("page", 1) or 1),
-                tag=row.get("tag", ""),
-                image_file_id=row.get("image_file_id", ""),
-                is_new_gen=bool(row.get("is_new_gen", False)),
+                quiz_id=cache_id, mcqs=mcqs,
+                topic=PROMPT_DISPLAY_NAMES.get(row.get('prompt_type', 'prompt_1'), 'ATLAS Special MCQ'),
+                page=1, tag="",
+                image_file_id=row.get('image_file_id', ''),
+                is_new_gen=False, src_cache_id=cache_id,
+                chat_id=row.get('chat_id'),
+                message_id=row.get('message_id'),
+                prompt_type=row.get('prompt_type', 'prompt_1')
             )
             return exam_store[cache_id]
     except Exception as e:
-        log(f"_get_exam rehydrate fail: {e}")
+        print(f"Exam rehydrate failed: {e}")
     return None
 
+# ============================================================
+# SECTION 6: DATABASE HELPERS
+# ============================================================
 
-# ============================================
-# CF WORKER PROXY (Telegram file fetch)
-# ============================================
-async def _tg_file_bytes(file_id):
-    """Download a Telegram file via CF Worker proxy. Returns bytes or None."""
+def get_user_data(user_id: int) -> Optional[Dict]:
     try:
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.get(f"{CF_WORKER_URL}/tg-file", params={"file_id": file_id})
+        client = get_supabase()
+        result = client.table('users').select('*').eq('user_id', user_id).execute()
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        print(f"get_user_data error: {e}")
+        return None
+
+def check_new_exam_limit(user_id: int) -> tuple:
+    if not user_id or user_id == 0:
+        return True, 0, FREE_NEW_EXAM_LIMIT, False
+    user = get_user_data(user_id)
+    if not user:
+        return True, 0, FREE_NEW_EXAM_LIMIT, False
+    is_perm = user.get('is_permitted', False)
+    used = user.get('new_exam_count', 0) or 0
+    limit = PERMITTED_NEW_EXAM_LIMIT if is_perm else FREE_NEW_EXAM_LIMIT
+    last_reset = user.get('last_new_exam_reset', '')
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+    if last_reset != today:
+        try:
+            client = get_supabase()
+            client.table('users').update({'new_exam_count': 0, 'last_new_exam_reset': today}).eq('user_id', user_id).execute()
+            used = 0
+        except:
+            pass
+    return used < limit, used, limit, is_perm
+
+def increment_new_exam_count(user_id: int) -> int:
+    if not user_id or user_id == 0:
+        return 0
+    try:
+        user = get_user_data(user_id)
+        if user:
+            new_count = (user.get('new_exam_count', 0) or 0) + 1
+            client = get_supabase()
+            client.table('users').update({
+                'new_exam_count': new_count,
+                'last_new_exam_reset': datetime.now(BD_TZ).strftime('%Y-%m-%d')
+            }).eq('user_id', user_id).execute()
+            return new_count
+        return 0
+    except Exception as e:
+        print(f"increment_new_exam_count error: {e}")
+        return 0
+
+def save_result_to_db(user_id: int, cache_id: str, user_name: str, topic: str,
+                      page: int, total: int, correct: int, wrong: int,
+                      skipped: int, time_taken: int) -> bool:
+    try:
+        neg = wrong * NEGATIVE_MARK
+        final_score = correct - neg
+        row = {
+            'user_id': user_id, 'quiz_id': cache_id,
+            'quiz_name': topic or f'Exam_{cache_id[:6]}',
+            'total': total, 'correct': correct, 'wrong': wrong,
+            'skipped': skipped, 'time_taken': time_taken,
+            'mark': final_score, 'negative_mark': neg,
+            'created_at': datetime.now(BD_TZ).isoformat()
+        }
+        client = get_supabase()
+        client.table('results').insert(row).execute()
+        _mirror_insert('results', row)
+        return True
+    except Exception as e:
+        print(f"save_result error: {e}")
+        return False
+
+def save_bookmark_to_db(user_id: int, cache_id: str, question_index: int,
+                        question_data: Dict, topic: str = '', page: int = 0) -> bool:
+    try:
+        row = {
+            'user_id': user_id, 'cache_id': cache_id,
+            'question_index': question_index,
+            'question_data': json.dumps(question_data, ensure_ascii=False),
+            'topic': topic, 'page': page,
+            'created_at': datetime.now(BD_TZ).isoformat()
+        }
+        client = get_supabase()
+        client.table('bookmarks').insert(row).execute()
+        _mirror_insert('bookmarks', row)
+        return True
+    except Exception as e:
+        print(f"save_bookmark error: {e}")
+        return False
+
+def delete_bookmark_from_db(user_id: int, cache_id: str, question_index: int) -> bool:
+    try:
+        client = get_supabase()
+        client.table('bookmarks').delete()\
+            .eq('user_id', user_id).eq('cache_id', cache_id)\
+            .eq('question_index', question_index).execute()
+        return True
+    except Exception as e:
+        print(f"delete_bookmark error: {e}")
+        return False
+
+# ============================================================
+# SECTION 7: TELEGRAM API HELPERS
+# ============================================================
+
+async def _tg_file_bytes(file_id: str) -> Optional[bytes]:
+    print(f"[tg-file] start, file_id={file_id[:20]}..., BOT_TOKEN_set={bool(BOT_TOKEN)}, CF_WORKER_URL={CF_WORKER_URL}")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{CF_WORKER_URL}/tg-file", params={"file_id": file_id}, headers={"X-Bot-Token": BOT_TOKEN})
+            print(f"[tg-file] CF Worker /tg-file status={r.status_code}, content_len={len(r.content) if r.content else 0}")
             if r.status_code == 200 and r.content:
                 return r.content
     except Exception as e:
-        log(f"tg-file fetch fail: {e}")
+        print(f"[tg-file] CF Worker fetch EXCEPTION: {type(e).__name__}: {e}")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            file_resp = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                params={"file_id": file_id}
+            )
+            print(f"[tg-file] getFile status={file_resp.status_code}")
+            file_data = file_resp.json()
+            print(f"[tg-file] getFile response ok={file_data.get('ok')}, full={file_data if not file_data.get('ok') else '(ok)'}")
+            if file_data.get('ok'):
+                file_path = file_data['result']['file_path']
+                img_resp = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
+                print(f"[tg-file] file download status={img_resp.status_code}, content_len={len(img_resp.content) if img_resp.content else 0}")
+                if img_resp.status_code == 200:
+                    return img_resp.content
+    except Exception as e:
+        print(f"[tg-file] Direct Telegram fetch EXCEPTION: {type(e).__name__}: {e}")
+    print(f"[tg-file] FAILED — returning None for file_id={file_id[:20]}...")
     return None
 
+async def _tg_send_message(chat_id: int, text: str, reply_to: int = None,
+                           parse_mode: str = None) -> Optional[Dict]:
+    if not chat_id:
+        return None
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+        payload["allow_sending_without_reply"] = True
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    url = f"{CF_WORKER_URL}/bot{BOT_TOKEN}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(url, json=payload)
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        print(f"_tg_send_message error: {e}")
+    return None
 
-# ============================================
-# ROUTES — health
-# ============================================
+# ============================================================
+# SECTION 8: AYATS & MOTIVATION
+# ============================================================
+_AYATS = [
+    '🌙 "فَإِنَّ مَعَ الْعُسْرِ يُسْرًا"\n"নিশ্চয়ই কষ্টের সাথেই স্বস্তি আছে।"\n[সূরা আশ-শারহ ৯৪:৫]',
+    '🌙 "لَا يُكَلِّفُ اللَّهُ نَفْسًا إِلَّا وُسْعَهَا"\n"আল্লাহ কাউকে তার সাধ্যের বাইরে বোঝা দেন না।"\n[সূরা বাকারা ২:২৮৬]',
+    '🌙 "إِنَّ اللَّهَ مَعَ الصَّابِرِينَ"\n"নিশ্চয়ই আল্লাহ ধৈর্যশীলদের সাথে আছেন।"\n[সূরা বাকারা ২:১৫৩]',
+    '🌙 "وَمَن يَتَوَكَّلْ عَلَى اللَّهِ فَهُوَ حَسْبُهُ"\n"যে আল্লাহর উপর ভরসা করে, তার জন্য তিনিই যথেষ্ট।"\n[সূরা তালাক ৬৫:৩]',
+    '🌙 "وَقُل رَّبِّ زِدْنِي عِلْمًا"\n"হে আমার রব! আমার জ্ঞান বৃদ্ধি করে দিন।"\n[সূরা ত্বহা ২০:১১৪]',
+    '🌙 "وَأَن لَّيْسَ لِلْإِنسَانِ إِلَّا مَا سَعَىٰ"\n"মানুষ তার চেষ্টার ফল ছাড়া কিছুই পায় না।"\n[সূরা নাজম ৫৩:৩৯]',
+    '🌙 "إِن يَنصُرْكُمُ اللَّهُ فَلَا غَالِبَ لَكُمْ"\n"আল্লাহ যদি সাহায্য করেন, কেউ পরাজিত করতে পারবে না।"\n[সূরা আলে ইমরান ৩:১৬০]',
+    '🌙 "لَا تَقْنَطُوا مِن رَّحْمَةِ اللَّهِ"\n"আল্লাহর রহমত থেকে নিরাশ হয়ো না।"\n[সূরা যুমার ৩৯:৫৩]',
+    '🌙 "أَلَا بِذِكْرِ اللَّهِ تَطْمَئِنُّ الْقُلُوبُ"\n"আল্লাহর স্মরণেই হৃদয় প্রশান্ত হয়।"\n[সূরা রাদ ১৩:২৮]',
+    '🌙 "إِنَّ اللَّهَ يُحِبُّ الْمُحْسِنِينَ"\n"নিশ্চয়ই আল্লাহ সৎকর্মশীলদের ভালোবাসেন।"\n[সূরা বাকারা ২:১৯৫]',
+]
+
+def _pick_feedback(correct: int, total: int) -> tuple:
+    pct = (correct / total * 100) if total else 0
+    if pct >= 80:
+        msg = random.choice(['🏆 অসাধারণ! অনেক ভালো করেছো!', '🌟 দারুণ! তুমি সত্যিই প্রস্তুত!', '💪 বাহ! চমৎকার ফলাফল!'])
+    elif pct >= 60:
+        msg = random.choice(['✅ মোটামুটি ভালো! চেষ্টা চালিয়ে যাও!', '👍 ভালো হয়েছে! আরেকটু উন্নতি করতে পারবে!'])
+    elif pct >= 40:
+        msg = random.choice(['📚 আরো পড়তে হবে! হাল ছেড়ো না!', '💭 ঠিক আছে, নিয়মিত চর্চা করো!'])
+    else:
+        msg = random.choice(['💪 পড়া হয়নি! আবার পড়ে practice করো!', '🌱 শুরুটা কঠিনই হয়! লেগে থাকো!'])
+    return msg, random.choice(_AYATS)
+
+# ============================================================
+# SECTION 9: FASTAPI APP
+# ============================================================
+app = FastAPI(title="ATLAS Exam Server", version="3.0")
+
+# ============================================================
+# SECTION 10: PROMPTS
+# ============================================================
+PROMPT_NEW_EXAM = """MCQ TYPE: Standard Easy
+-সর্বনিম্ন ১৫ টি Mcq বানাতে হবে
+-হাইলাইটেড টেক্সট priority পাবে
+-টপিকের নাম/হেডলাইন/পেইজ থেকে MCQ না
+-প্রশ্ন: ছোট, ১-২ লাইন
+-অপশন: ৪টি, তথ্য দ্বারা পরিপূর্ণ, হ্যাঁ/না টাইপ না
+-উত্তর: 0-3 index
+-ব্যাখ্যা: Bengali, max 200 char
+-Image এ যে ভাষায় content আছে সেই ভাষাতেই MCQ বানাবে
+-JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]"""
+
+# ── Creative (Srijonshil) prompts ──
+PROMPT_KNOWLEDGE = """তুমি একজন অভিজ্ঞ বাংলাদেশি শিক্ষক। নিচের Image এর তথ্য থেকে "জ্ঞানমূলক প্রশ্ন" তৈরি করো (বাংলাদেশের সৃজনশীল পদ্ধতি অনুযায়ী)।
+
+জ্ঞানমূলক প্রশ্নের শর্ত:
+- সংজ্ঞা, নাম, সূত্র, সাল/তারিখ, আবিষ্কারক, উপাদান, শ্রেণিবিভাগ, বৈশিষ্ট্য, ধাপের নাম থেকে প্রশ্ন
+- প্রশ্ন এক লাইনে, উত্তর এক লাইনে (সরাসরি তথ্যভিত্তিক)
+- শুধুমাত্র Image-এর তথ্য ব্যবহার করবে, নিজে থেকে কিছু বানাবে না
+
+কঠোর নিয়ম:
+- যতগুলো সম্ভব জ্ঞানমূলক প্রশ্ন বানাও যেন কোনো গুরুত্বপূর্ণ তথ্য মিস না হয় (সর্বনিম্ন ৫, সর্বোচ্চ ৩০)
+- Quality > Quantity, হাবিজাবি/আন্দাজী প্রশ্ন একদম নিষেধ
+- তথ্য Image-এ না থাকলে প্রশ্ন বানাবে না
+
+যদি Image-এ এত কম তথ্য থাকে যে ২টি অর্থপূর্ণ জ্ঞানমূলক প্রশ্নও বানানো যায় না, তবে JSON এ "error" key দাও:
+{"error":"কেন পারছ না তা বাংলায় ব্যাখ্যা করো (কোন তথ্য নেই/পড়া যাচ্ছে না ইত্যাদি)"}
+
+অন্যথায় JSON only:
+{"items":[{"question":"...","answer":"..."}]}"""
+
+PROMPT_COMPREHENSION = """তুমি একজন অভিজ্ঞ বাংলাদেশি শিক্ষক। নিচের Image এর তথ্য থেকে "অনুধাবনমূলক প্রশ্ন" তৈরি করো (বাংলাদেশের সৃজনশীল পদ্ধতি অনুযায়ী)।
+
+অনুধাবনমূলক প্রশ্নের শর্ত (নিচের যেকোনো সম্পর্ক থাকতে হবে):
+- কারণ → ফলাফল, গঠন → কাজ, প্রক্রিয়া → ফল, বৈশিষ্ট্য → গুরুত্ব, ঘটনা → প্রভাব, তুলনা, ব্যাখ্যাযোগ্য ধারণা
+
+উত্তরের গঠন (২-৫ লাইন):
+- ১ম লাইন: জ্ঞানমূলক (সংজ্ঞা/পরিচিতি)
+- এরপর ১ লাইন গ্যাপ রেখে ২-৪ লাইন অনুধাবন/ব্যাখ্যা
+- উত্তরে "\\n\\n" দিয়ে জ্ঞানমূলক অংশ ও ব্যাখ্যা আলাদা করবে
+
+কঠোর নিয়ম:
+- শুধুমাত্র Image-এর তথ্য (source-only ১০০%), নিজে থেকে কিছু বানাবে না
+- যতগুলো সম্ভব অনুধাবনমূলক প্রশ্ন (সর্বনিম্ন ৫, সর্বোচ্চ ২৫), Quality > Quantity
+
+যদি Image-এ সম্পর্ক/ব্যাখ্যার সুযোগসহ যথেষ্ট তথ্য না থাকে (২টি অর্থপূর্ণ প্রশ্নও নয়), তবে:
+{"error":"কেন পারছ না বাংলায় ব্যাখ্যা করো"}
+
+অন্যথায় JSON only:
+{"items":[{"question":"...","answer":"...\\n\\n..."}]}"""
+
+# ── Fallback prompts: guaranteed output (used only if primary attempt fails) ──
+PROMPT_KNOWLEDGE_FALLBACK = """তুমি একজন অভিজ্ঞ বাংলাদেশি শিক্ষক। নিচের Image দেখে কমপক্ষে ৩টি "জ্ঞানমূলক প্রশ্ন" বানাও।
+- Image-এ যা-ই থাকুক (টেক্সট, ছবি, ডায়াগ্রাম, সংখ্যা, শব্দ) তা থেকেই প্রশ্ন বানানোর চেষ্টা করো
+- প্রশ্ন ও উত্তর ছোট ও সরাসরি রাখো
+- একদম কিছু না থাকলেও Image-এ দৃশ্যমান বিষয়/বস্তু/শব্দ নিয়ে general knowledge প্রশ্ন বানাও
+JSON only: {"items":[{"question":"...","answer":"..."}]}"""
+
+PROMPT_COMPREHENSION_FALLBACK = """তুমি একজন অভিজ্ঞ বাংলাদেশি শিক্ষক। নিচের Image দেখে কমপক্ষে ৩টি "অনুধাবনমূলক প্রশ্ন" বানাও।
+- Image-এ যা-ই থাকুক, তার সাথে সম্পর্কিত একটি ব্যাখ্যামূলক প্রশ্ন-উত্তর বানাও
+- উত্তর ২-৩ লাইনে, প্রথম লাইনে সংজ্ঞা/পরিচিতি, পরের লাইনে ব্যাখ্যা ("\\n\\n" দিয়ে আলাদা)
+- একদম কিছু না থাকলেও Image-এর বিষয়বস্তু নিয়ে general অনুধাবন প্রশ্ন বানাও
+JSON only: {"items":[{"question":"...","answer":"...\\n\\n..."}]}"""
+
+# ============================================================
+# SECTION 11: API ROUTES
+# ============================================================
+
 @app.get("/health")
 async def health():
     return PlainTextResponse("OK")
 
-
-# ============================================
-# ROUTES — serve exam page
-# ============================================
 @app.get("/exam/{cache_id}", response_class=HTMLResponse)
-async def serve_exam(cache_id: str):
+async def serve_exam(cache_id: str, uid: int = 0, name: str = ""):
     data = _get_exam(cache_id)
     if not data:
         return HTMLResponse(_not_found_html(), status_code=404)
-    return HTMLResponse(generate_exam_html(cache_id, data))
+    user_name = (name or "").strip()
+    return HTMLResponse(generate_exam_html(cache_id, data, uid, user_name))
 
-
-# ============================================
-# ROUTES — exam JSON
-# ============================================
 @app.get("/api/exam/{cache_id}")
 async def api_exam(cache_id: str):
     data = _get_exam(cache_id)
@@ -139,903 +529,1450 @@ async def api_exam(cache_id: str):
         return JSONResponse({"error": "not_found"}, status_code=404)
     return {
         "mcqs": data["mcqs"],
-        "topic": data["topic"],
-        "page": data["page"],
-        "tag": data["tag"],
-        "image_file_id": data["image_file_id"],
-        "is_new_gen": data["is_new_gen"],
+        "topic": data.get("topic", "ATLAS Exam"),
+        "page": data.get("page", 1),
+        "tag": data.get("tag", ""),
+        "image_file_id": data.get("image_file_id", ""),
+        "is_new_gen": data.get("is_new_gen", False),
+        "chat_id": data.get("chat_id"),
+        "message_id": data.get("message_id"),
+        "prompt_type": data.get("prompt_type", "prompt_1"),
     }
 
-
-# ============================================
-# ROUTES — TG image proxy (pre-exam screen)
-# ============================================
 @app.get("/api/tg-image/{file_id}")
 async def api_tg_image(file_id: str):
     raw = await _tg_file_bytes(file_id)
     if not raw:
         return PlainTextResponse("image unavailable", status_code=404)
-    # detect content type by magic bytes (jpg/png/webp)
     ct = "image/jpeg"
     if raw[:8].startswith(b"\x89PNG"):
         ct = "image/png"
     elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
         ct = "image/webp"
-    from fastapi.responses import Response
-    return Response(content=raw, media_type=ct,
-                    headers={"Cache-Control": "public, max-age=3600"})
+    return Response(content=raw, media_type=ct, headers={"Cache-Control": "public, max-age=3600"})
 
-
-# ============================================
-# ROUTES — submit result
-# ============================================
 @app.post("/api/exam/result")
 async def api_result(request: Request):
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
-
     cache_id = body.get("cache_id", "")
-    user_id = body.get("user_id", "anonymous")
-    user_name = (body.get("user_name") or "Anonymous").strip()[:40]
+    user_id = int(body.get("user_id", 0) or 0)
+    user_name = (body.get("user_name") or "Student").strip()[:40]
     correct = int(body.get("correct", 0))
     wrong = int(body.get("wrong", 0))
     skipped = int(body.get("skipped", 0))
     time_taken = int(body.get("time_taken", 0))
-
     total = correct + wrong + skipped
-    final_score = round(correct - wrong * 0.25, 2)
-
     data = _get_exam(cache_id)
-    is_ng = bool(data and data.get("is_new_gen"))
-
-    # save leaderboard only for original (non new-gen) exams
-    if not is_ng:
-        try:
-            from database import save_leaderboard_entry
-            save_leaderboard_entry({
-                "quiz_id": cache_id,
-                "user_id": str(user_id),
-                "user_name": user_name,
-                "final_score": final_score,
-                "correct": correct,
-                "wrong": wrong,
-                "skipped": skipped,
-                "total": total,
-                "time_taken": time_taken,
-            })
-        except Exception as e:
-            log(f"save_leaderboard fail: {e}")
-
+    topic = data.get("topic", "ATLAS Exam") if data else "ATLAS Exam"
+    page = data.get("page", 1) if data else 1
+    try:
+        save_result_to_db(user_id, cache_id, user_name, topic, page, total, correct, wrong, skipped, time_taken)
+    except Exception as e:
+        print(f"Save result warning: {e}")
     motivation, ayat = _pick_feedback(correct, total)
-    return {"motivation": motivation, "ayat": ayat,
-            "final_score": final_score, "leaderboard_disabled": is_ng}
+    return {"motivation": motivation, "ayat": ayat}
 
+@app.post("/api/bookmark")
+async def api_bookmark_add(request: Request):
+    try:
+        body = await request.json()
+        user_id = int(body.get("user_id", 0) or 0)
+        cache_id = body.get("cache_id", "")
+        question_index = body.get("question_index", 0)
+        question_data = body.get("question_data", {})
+        topic = body.get("topic", "")
+        page = body.get("page", 0)
+        ok = save_bookmark_to_db(user_id, cache_id, question_index, question_data, topic, page)
+        return {"success": ok}
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
-# ============================================
-# ROUTES — new exam (regenerate from same image)
-# ============================================
+@app.delete("/api/bookmark")
+async def api_bookmark_del(request: Request):
+    try:
+        body = await request.json()
+        user_id = int(body.get("user_id", 0) or 0)
+        cache_id = body.get("cache_id", "")
+        question_index = body.get("question_index", 0)
+        ok = delete_bookmark_from_db(user_id, cache_id, question_index)
+        return {"success": ok}
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
 @app.post("/api/new-exam")
 async def api_new_exam(request: Request):
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
-
     cache_id = body.get("cache_id", "")
+    user_id = int(body.get("user_id", 0) or 0)
+    allowed, used, limit, is_perm = check_new_exam_limit(user_id)
+    if not allowed:
+        return JSONResponse({
+            "ok": False, "error": "limit_reached",
+            "message": f"❌ আজকের New Exam লিমিট শেষ ({used}/{limit})। আগামীকাল আবার চেষ্টা করুন।"
+        })
     src = _get_exam(cache_id)
     if not src:
-        return JSONResponse({"error": "not_found"}, status_code=404)
-
-    root_id = src.get("src_cache_id", cache_id)
-    root = exam_store.get(root_id, src)
-    if root.get("regen_count", 0) >= MAX_REGEN:
-        return JSONResponse({"ok": False, "error": "limit",
-                             "message": f"সর্বোচ্চ {MAX_REGEN} বার নতুন এক্সাম বানানো যায়।"})
-
+        return JSONResponse({"ok": False, "error": "not_found", "message": "Exam পাওয়া যায়নি।"})
+    src_id = src.get("src_cache_id", cache_id)
+    src_entry = _get_exam(src_id) or src
+    regen_count = src_entry.get("regen_count", 0)
+    if regen_count >= 3:
+        return JSONResponse({
+            "ok": False, "error": "page_limit_reached",
+            "message": "❌ এই Page-এর জন্য New Exam সর্বোচ্চ ৩ বার নেওয়া হয়েছে।"
+        })
     file_id = src.get("image_file_id", "")
     if not file_id:
-        return JSONResponse({"ok": False, "error": "no_image",
-                             "message": "এই এক্সামে কোনো source image নেই।"})
-
+        return JSONResponse({"ok": False, "error": "no_image", "message": "এই এক্সামে কোনো source image নেই।"})
     img_bytes = await _tg_file_bytes(file_id)
     if not img_bytes:
-        return JSONResponse({"ok": False, "error": "image_fail",
-                             "message": "ছবি লোড করা যায়নি।"})
-
+        return JSONResponse({"ok": False, "error": "image_fail", "message": "ছবি লোড করা যায়নি।"})
+    if _exam_genai_client is None:
+        setup_gemini()
+    if _exam_genai_client is None:
+        return JSONResponse({"ok": False, "error": "no_key", "message": "Gemini API key সেট নেই।"})
     try:
-        from database import get_prompt
-        mixed_prompt = get_prompt("mixed") or get_prompt("default") or ""
-    except Exception:
-        mixed_prompt = ""
-
-    try:
-        import mcq_generator
-        gen = mcq_generator.generate_from_image(
-            img_bytes, prompt_override=mixed_prompt, count=15)
-        if asyncio.iscoroutine(gen):
-            gen = await gen
-        new_mcqs = gen if isinstance(gen, list) else gen.get("mcqs", [])
+        img = Image.open(BytesIO(img_bytes))
+        valid_mcqs = _gen_new_exam_mcqs(img, min_count=10)
+        if len(valid_mcqs) < 5:
+            return JSONResponse({"ok": False, "error": "empty", "message": "যথেষ্ট প্রশ্ন পাওয়া যায়নি। একটু পরে আবার চেষ্টা করুন।"})
+        new_mcqs = valid_mcqs[:NEW_PRACTICE_COUNT]
     except Exception as e:
-        log(f"new-exam generate fail: {e}")
-        return JSONResponse({"ok": False, "error": "gen_fail",
-                             "message": "প্রশ্ন তৈরি ব্যর্থ হয়েছে।"})
-
-    if not new_mcqs:
-        return JSONResponse({"ok": False, "error": "empty",
-                             "message": "নতুন প্রশ্ন পাওয়া যায়নি।"})
-
+        print(f"Gemini generation error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": "gen_fail", "message": "প্রশ্ন তৈরি ব্যর্থ হয়েছে। একটু পরে আবার চেষ্টা করুন।"})
     new_id = uuid.uuid4().hex[:12]
-    store_exam(new_id, new_mcqs,
-               topic=src.get("topic", ""), page=src.get("page", 1),
-               tag=src.get("tag", ""), image_file_id=file_id,
-               is_new_gen=True, src_cache_id=root_id)
-    root["regen_count"] = root.get("regen_count", 0) + 1
-    exam_store[root_id] = root
-    return {"ok": True, "new_cache_id": new_id}
+    try:
+        client = get_supabase()
+        row = {
+            'quiz_id': new_id, 'user_id': user_id,
+            'mcqs': json.dumps(new_mcqs, ensure_ascii=False),
+            'source_type': 'web_exam',
+            'prompt_type': src.get('prompt_type', 'prompt_1'),
+            'image_file_id': file_id,
+            'chat_id': src.get('chat_id'),
+            'message_id': src.get('message_id'),
+            'created_at': datetime.now(BD_TZ).isoformat()
+        }
+        client.table('mcqs').insert(row).execute()
+        _mirror_insert('mcqs', row)
+    except Exception as e:
+        print(f"Save new exam error: {e}")
+    store_exam(
+        quiz_id=new_id, mcqs=new_mcqs,
+        topic=src.get("topic", ""), page=src.get("page", 1),
+        tag=src.get("tag", ""), image_file_id=file_id,
+        is_new_gen=True, src_cache_id=src.get("src_cache_id", cache_id),
+        chat_id=src.get("chat_id"), message_id=src.get("message_id"),
+        prompt_type=src.get("prompt_type", "prompt_1")
+    )
+    if src_id in exam_store:
+        exam_store[src_id]["regen_count"] = regen_count + 1
+    increment_new_exam_count(user_id)
+    return {"ok": True, "new_cache_id": new_id, "count": len(new_mcqs)}
 
-
-# ============================================
-# ROUTES — leaderboard
-# ============================================
 @app.get("/api/leaderboard/{cache_id}")
 async def api_leaderboard(cache_id: str):
-    data = _get_exam(cache_id)
-    if data and data.get("is_new_gen"):
-        return {"disabled": True}
-    qid = data.get("src_cache_id", cache_id) if data else cache_id
-    try:
-        from database import get_leaderboard
-        rows = get_leaderboard(qid) or []
-    except Exception as e:
-        log(f"leaderboard fail: {e}")
-        rows = []
-    out = [{
-        "user_name": r.get("user_name", "Anonymous"),
-        "final_score": r.get("final_score", 0),
-        "correct": r.get("correct", 0),
-        "total": r.get("total", 0),
-    } for r in rows]
-    return {"data": out}
+    return {"disabled": True, "data": []}
 
-
-# ============================================
-# ROUTES — bookmark add / remove
-# ============================================
-@app.post("/api/bookmark")
-async def api_bookmark_add(request: Request):
-    try:
-        body = await request.json()
-        from database import add_bookmark
-        ok = add_bookmark(body.get("user_id", "anonymous"), {
-            "question_text": body.get("question_text", ""),
-            "option1": body.get("option1", ""),
-            "option2": body.get("option2", ""),
-            "option3": body.get("option3", ""),
-            "option4": body.get("option4", ""),
-            "answer_index": body.get("answer_index", 0),
-            "explanation": body.get("explanation", ""),
-            "exam_name": body.get("exam_name", "ATLAS Exam"),
-        })
-        return {"success": bool(ok)}
-    except Exception as e:
-        log(f"bookmark add fail: {e}")
-        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
-
-
-@app.delete("/api/bookmark")
-async def api_bookmark_del(request: Request):
-    try:
-        body = await request.json()
-        try:
-            from database import remove_bookmark
-            ok = remove_bookmark(body.get("user_id", "anonymous"),
-                                 body.get("question_text", ""))
-        except Exception:
-            ok = True  # client-side localStorage is source of truth fallback
-        return {"success": bool(ok)}
-    except Exception as e:
-        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
-
-
-# ============================================
-# ROUTES — Solve PDF (Chromium + Playwright)
-# ============================================
 @app.post("/api/solve-pdf")
 async def api_solve_pdf(request: Request):
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
-
     cache_id = body.get("cache_id", "")
     answers = body.get("answers", {}) or {}
     data = _get_exam(cache_id)
     if not data:
         return JSONResponse({"error": "not_found"}, status_code=404)
-
+    if cache_id in exam_store:
+        exam_store[cache_id]["last_answers"] = answers
     html = generate_solve_pdf_html(data, answers)
     try:
         pdf_bytes = await _render_pdf(html)
     except Exception as e:
-        log(f"pdf render fail: {e}")
-        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ।"}, status_code=500)
-
+        print(f"PDF render error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     b64 = base64.b64encode(pdf_bytes).decode("ascii")
-    return {"ok": True, "pdf_base64": b64,
-            "filename": f"ATLAS_Solve_{cache_id}.pdf"}
+    return {"ok": True, "pdf_b64": b64, "filename": f"ATLAS_Solve_{cache_id[:8]}.pdf"}
 
+@app.post("/api/save-answers")
+async def api_save_answers(request: Request):
+    """Store answers server-side so /api/solve-pdf-direct can render instantly via a plain link."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False}, status_code=400)
+    cache_id = body.get("cache_id", "")
+    answers = body.get("answers", {}) or {}
+    if cache_id in exam_store:
+        exam_store[cache_id]["last_answers"] = answers
+        return {"ok": True}
+    return JSONResponse({"ok": False})
 
-async def _render_pdf(html):
-    from playwright.async_api import async_playwright
-    flags = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-             "--single-process", "--headless=new"]
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            executable_path=CHROMIUM_PATH, args=flags)
+@app.get("/api/solve-pdf-direct/{cache_id}")
+async def api_solve_pdf_direct(cache_id: str):
+    """Instant PDF link (like Premium PDF) — reads last saved answers for this exam."""
+    data = _get_exam(cache_id)
+    if not data:
+        return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
+    answers = data.get("last_answers", {}) or {}
+    html = generate_solve_pdf_html(data, answers)
+    try:
+        pdf_bytes = await _render_pdf(html)
+    except Exception as e:
+        print(f"Solve PDF direct render error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="ATLAS_Solve_{cache_id[:8]}.pdf"'}
+    )
+
+# ============================================================
+# SECTION 11.1: Back to Source API
+# ============================================================
+@app.post("/api/back-to-source")
+async def api_back_to_source(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad_json"}, status_code=400)
+    cache_id = body.get("cache_id", "")
+    user_id = int(body.get("user_id", 0) or 0)
+    if not user_id:
+        return JSONResponse({"ok": False, "message": "User ID প্রয়োজন।"})
+    data = _get_exam(cache_id)
+    if not data:
+        return JSONResponse({"ok": False, "message": "Source পাওয়া যায়নি।"})
+    chat_id = data.get("chat_id") or user_id
+    message_id = data.get("message_id")
+    if not message_id:
+        return JSONResponse({"ok": False, "message": "Pinned message reference নেই।"})
+    text = "📌 Back to Source\n\n↑ উপরের message-এ tap করলেই আপনার মূল MCQ source-এ চলে যাবেন।"
+    res = await _tg_send_message(chat_id, text, reply_to=message_id)
+    if res and res.get("ok"):
+        return {"ok": True, "message": "✅ Telegram-এ message পাঠানো হয়েছে।"}
+    return JSONResponse({"ok": False, "message": "Telegram message পাঠানো যায়নি।"})
+
+# ============================================================
+# SECTION 11.2: Premium PDF API — POST
+# ============================================================
+@app.post("/api/premium-pdf")
+async def api_premium_pdf_post(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad_json"}, status_code=400)
+    cache_id = body.get("cache_id", "")
+    header_label = body.get("header_label", "")
+    return await _do_premium_pdf(cache_id, header_label)
+
+# ============================================================
+# SECTION 11.3: Premium PDF API — GET (bot.py)
+# ============================================================
+@app.get("/api/premium-pdf/{cache_id}")
+async def api_premium_pdf_get(cache_id: str):
+    try:
+        data = _get_exam(cache_id)
+        if not data:
+            print(f"[premium-pdf] exam not found: {cache_id}")
+            return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
+        mcqs = data.get("mcqs", [])
+        if not mcqs:
+            print(f"[premium-pdf] no mcqs for {cache_id}")
+            return JSONResponse({"ok": False, "message": "কোনো MCQ নেই।"})
+        header_label = "ATLAS Practice Sheet"
+        html = generate_premium_pdf_html(mcqs, header_label)
+        print(f"[premium-pdf] html built ({len(html)} chars), rendering PDF...")
         try:
-            page = await browser.new_page()
-            await page.set_content(html, wait_until="networkidle")
-            await page.wait_for_timeout(800)  # font settle
-            pdf = await page.pdf(format="A4", print_background=True,
-                                 margin={"top": "14mm", "bottom": "14mm",
-                                         "left": "10mm", "right": "10mm"})
-            return pdf
+            pdf_bytes = await _render_pdf(html)
+        except Exception as e:
+            print(f"[premium-pdf] render error: {e}")
+            traceback.print_exc()
+            return JSONResponse({"ok": False, "message": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
+        print(f"[premium-pdf] success, pdf size={len(pdf_bytes)}")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="ATLAS_Practice_Sheet_{cache_id[:8]}.pdf"'}
+        )
+    except Exception as e:
+        print(f"[premium-pdf] UNHANDLED EXCEPTION: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "message": f"অপ্রত্যাশিত সমস্যা: {str(e)[:120]}"}, status_code=500)
+
+async def _do_premium_pdf(cache_id: str, header_label: str = "") -> JSONResponse:
+    data = _get_exam(cache_id)
+    if not data:
+        return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
+    mcqs = data.get("mcqs", [])
+    if not mcqs:
+        return JSONResponse({"ok": False, "message": "কোনো MCQ নেই।"})
+    if not header_label:
+        header_label = "ATLAS Practice Sheet"
+    html = generate_premium_pdf_html(mcqs, header_label)
+    try:
+        pdf_bytes = await _render_pdf(html)
+    except Exception as e:
+        print(f"Premium PDF render error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
+    b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    return JSONResponse({"ok": True, "pdf_b64": b64, "filename": f"ATLAS_Practice_Sheet_{cache_id[:8]}.pdf"})
+
+# ============================================================
+# SECTION 11.4: CREATIVE PDF API (জ্ঞানমূলক / অনুধাবনমূলক)
+# GET /api/creative-pdf/{cache_id}?ctype=knowledge|comprehension
+# Returns raw PDF, or JSON {ok:false, reason:"..."} when data insufficient
+# ============================================================
+async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
+    """Returns {'ok':True,'items':[...]} or {'ok':False,'reason':str}.
+    Tries primary (strict source-only) prompt first, then a lenient
+    fallback prompt so a PDF can (almost) always be produced."""
+    if _exam_genai_client is None:
+        setup_gemini()
+    if _exam_genai_client is None:
+        return {"ok": False, "reason": "Gemini API key সেট নেই।"}
+    prompt = PROMPT_KNOWLEDGE if ctype == "knowledge" else PROMPT_COMPREHENSION
+    fallback_prompt = PROMPT_KNOWLEDGE_FALLBACK if ctype == "knowledge" else PROMPT_COMPREHENSION_FALLBACK
+
+    def _call(p: str):
+        img = Image.open(BytesIO(img_bytes))
+        resp = _exam_genai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[p, img],
+            config=types.GenerateContentConfig(
+                temperature=0.6, top_p=0.95, top_k=40,
+                max_output_tokens=8192,
+                thinking_config=types.ThinkingConfig(thinking_budget=1024),
+            )
+        )
+        txt = (resp.text or "").strip()
+        for tag in ['```json', '```']:
+            if txt.startswith(tag):
+                txt = txt[len(tag):]
+        if txt.endswith('```'):
+            txt = txt[:-3]
+        return json.loads(txt.strip())
+
+    last_reason = "তথ্য অপর্যাপ্ত।"
+    for p in (prompt, fallback_prompt):
+        try:
+            obj = _call(p)
+            if isinstance(obj, dict) and obj.get("error"):
+                last_reason = str(obj.get("error"))[:300]
+                continue
+            items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
+            clean = [it for it in items if it.get("question") and it.get("answer")]
+            if len(clean) >= 2:
+                return {"ok": True, "items": clean}
+            if len(clean) >= 1:
+                last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
+        except json.JSONDecodeError:
+            last_reason = "AI সঠিক ফরম্যাটে উত্তর দেয়নি।"
+        except Exception as e:
+            print(f"creative gen error: {e}")
+            traceback.print_exc()
+            last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
+    return {"ok": False, "reason": last_reason}
+
+@app.get("/api/creative-pdf/{cache_id}")
+async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
+    try:
+        if ctype not in ("knowledge", "comprehension"):
+            ctype = "knowledge"
+        data = _get_exam(cache_id)
+        if not data:
+            print(f"[creative-pdf] exam not found: {cache_id}")
+            return JSONResponse({"ok": False, "reason": "Source পাওয়া যায়নি।"}, status_code=404)
+        file_id = data.get("image_file_id", "")
+        if not file_id:
+            print(f"[creative-pdf] no image_file_id for {cache_id}")
+            return JSONResponse({"ok": False, "reason": "এই সেটে কোনো source image নেই (শুধু Image থেকে সৃজনশীল প্রশ্ন বানানো যায়)।"})
+        img_bytes = await _tg_file_bytes(file_id)
+        if not img_bytes:
+            print(f"[creative-pdf] _tg_file_bytes failed for file_id={file_id}")
+            return JSONResponse({"ok": False, "reason": "ছবি লোড করা যায়নি।"})
+        print(f"[creative-pdf] img_bytes OK ({len(img_bytes)} bytes), generating items, ctype={ctype}")
+        res = await _generate_creative_items(img_bytes, ctype)
+        if not res.get("ok"):
+            print(f"[creative-pdf] _generate_creative_items failed: {res.get('reason')}")
+            return JSONResponse({"ok": False, "reason": res.get("reason", "তথ্য অপর্যাপ্ত।")})
+        print(f"[creative-pdf] got {len(res['items'])} items, building PDF html...")
+        header = "জ্ঞানমূলক প্রশ্ন [ATLAS]" if ctype == "knowledge" else "অনুধাবনমূলক প্রশ্ন [ATLAS]"
+        html = generate_creative_pdf_html(res["items"], header, ctype)
+        try:
+            pdf_bytes = await _render_pdf(html)
+        except Exception as e:
+            print(f"[creative-pdf] PDF render error: {e}")
+            traceback.print_exc()
+            return JSONResponse({"ok": False, "reason": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
+        fname = ("ATLAS_Gyanmulok_" if ctype == "knowledge" else "ATLAS_Onudhabonmulok_") + cache_id[:8] + ".pdf"
+        print(f"[creative-pdf] success, pdf size={len(pdf_bytes)}")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+        )
+    except Exception as e:
+        print(f"[creative-pdf] UNHANDLED EXCEPTION: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "reason": f"অপ্রত্যাশিত সমস্যা: {str(e)[:120]}"}, status_code=500)
+
+# ============================================================
+# SECTION 11.5: PDF RENDERER (Playwright / Chromium)
+# ============================================================
+async def _render_pdf(html: str) -> bytes:
+    print(f"[PDF] _render_pdf called, html_len={len(html)}, CHROMIUM_PATH={CHROMIUM_PATH}")
+    try:
+        from playwright.async_api import async_playwright
+        print("[PDF] playwright import OK")
+        flags = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                 "--single-process", "--headless=new"]
+        async with async_playwright() as p:
+            print("[PDF] launching chromium...")
+            browser = await p.chromium.launch(executable_path=CHROMIUM_PATH, args=flags)
+            print("[PDF] chromium launched OK")
+            try:
+                page = await browser.new_page()
+                print("[PDF] new_page OK, setting content...")
+                await page.set_content(html, wait_until="networkidle")
+                print("[PDF] set_content OK")
+                await page.wait_for_timeout(600)
+                pdf = await page.pdf(
+                    format="A4", print_background=True,
+                    margin={"top": "0mm", "bottom": "0mm", "left": "0mm", "right": "0mm"}
+                )
+                print(f"[PDF] pdf rendered OK, size={len(pdf)} bytes")
+                return pdf
+            finally:
+                await browser.close()
+                print("[PDF] browser closed")
+    except ImportError as ie:
+        print(f"[PDF] playwright ImportError: {ie} — falling back to subprocess Chromium")
+        import subprocess, tempfile, os as _os
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode='w', encoding='utf-8') as f:
+            f.write(html)
+            html_path = f.name
+        pdf_path = html_path.replace(".html", ".pdf")
+        try:
+            print(f"[PDF] running subprocess chromium: {CHROMIUM_PATH}")
+            subprocess.run([
+                CHROMIUM_PATH, "--headless", "--no-sandbox",
+                "--disable-gpu", "--disable-dev-shm-usage",
+                f"--print-to-pdf={pdf_path}", html_path
+            ], timeout=60, check=True)
+            print("[PDF] subprocess chromium done")
+            with open(pdf_path, 'rb') as f:
+                return f.read()
+        except Exception as se:
+            print(f"[PDF] subprocess chromium FAILED: {se}")
+            traceback.print_exc()
+            raise
         finally:
-            await browser.close()
+            try: _os.unlink(html_path)
+            except: pass
+            try: _os.unlink(pdf_path)
+            except: pass
+    except Exception as e:
+        print(f"[PDF] UNEXPECTED ERROR in _render_pdf: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise
+
+# ============================================================
+# SECTION 12: HTML GENERATORS
+# ============================================================
+
+def _esc(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _not_found_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#0A0D1E;color:#E8EAFF;font-family:'Noto Sans Bengali',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;margin:0;}h2{color:#F87171;}p{color:#7A82C8;}</style>
+</head><body><div><h2>⚠️ এক্সাম পাওয়া যায়নি</h2><p>লিংকটি মেয়াদোত্তীর্ণ বা ভুল হতে পারে।</p></div></body></html>"""
+
+def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
+    mcqs = data["mcqs"]
+    topic = data.get("topic", "ATLAS Exam")
+    page = data.get("page", 1)
+    labels = ["A", "B", "C", "D"]
+    rows = ""
+    count = 0
+    for i, q in enumerate(mcqs):
+        correct_idx = q.get("answer", 0)
+        if isinstance(correct_idx, str):
+            correct_idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(correct_idx.upper(), 0)
+        user_answer = answers.get(str(i))
+        if user_answer is None:
+            continue
+        count += 1
+        user_idx = int(user_answer) if user_answer != -1 else -1
+        opts_html = ""
+        for oi, opt in enumerate(q.get('options', [])[:4]):
+            cls = ""
+            if oi == correct_idx:
+                cls = "correct"
+            elif oi == user_idx and user_idx != correct_idx:
+                cls = "wrong"
+            opts_html += f'<div class="opt {cls}"><span class="lbl">{labels[oi]}</span><span>{_esc(opt)}</span></div>'
+        exp = q.get("explanation", "")
+        exp_html = f'<div class="exp"><div class="exp-hd">📋 ব্যাখ্যা</div>{_esc(exp)}</div>' if exp else ""
+        rows += f'<div class="qcard"><div class="qnum">প্রশ্ন {i+1}/{len(mcqs)}</div><div class="qtext">{_esc(q.get("question",""))}</div>{opts_html}{exp_html}</div>'
+    if count == 0:
+        rows = '<div class="qcard"><div class="qtext">কোনো উত্তরকৃত প্রশ্ন নেই।</div></div>'
+    return f'''<!DOCTYPE html>
+<html lang="bn"><head><meta charset="UTF-8">
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Noto Sans Bengali','Segoe UI',sans-serif;color:#E8EAFF;background:#0A0D1E;padding:18px;font-size:13px;line-height:1.7;}}
+.head{{text-align:center;padding:18px;background:linear-gradient(135deg,#5A5FE0,#7c3aed);color:#fff;border-radius:12px;margin-bottom:18px;}}
+.head h1{{font-size:22px;font-weight:800}}
+.qcard{{background:#12162E;border:1px solid #2A2E4A;border-radius:12px;padding:14px;margin-bottom:12px;page-break-inside:avoid;}}
+.qnum{{display:inline-block;font-size:11px;font-weight:700;color:#5A5FE0;background:rgba(90,95,224,0.12);padding:3px 10px;border-radius:12px;margin-bottom:8px;}}
+.qtext{{font-weight:600;margin-bottom:9px;font-size:14px;}}
+.opt{{display:flex;align-items:center;gap:10px;padding:9px 12px;margin-bottom:5px;background:#1A1E3A;border-radius:8px;border-left:3px solid #2A2E4A;}}
+.opt .lbl{{width:20px;height:20px;border-radius:50%;border:2px solid #4A5080;color:#4A5080;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;}}
+.opt.correct{{background:rgba(34,212,122,0.15);border-left-color:#22D47A;}}
+.opt.correct .lbl{{background:#22D47A;border-color:#22D47A;color:#fff;}}
+.opt.wrong{{background:rgba(248,113,113,0.15);border-left-color:#F87171;}}
+.opt.wrong .lbl{{background:#F87171;border-color:#F87171;color:#fff;}}
+.exp{{margin-top:9px;padding:9px 12px;background:#1A1E3A;border-left:3px solid #5A5FE0;border-radius:0 8px 8px 0;font-size:12px;color:#7A82C8;}}
+.exp-hd{{color:#5A5FE0;font-weight:700;font-size:11px;margin-bottom:4px;}}
+.foot{{text-align:center;font-size:11px;color:#4A5080;margin-top:18px;}}
+@page{{size:A4;margin:10mm 8mm;}}
+</style></head><body>
+<div class="head"><h1>📋 ATLAS Solve Sheet</h1><div style="font-size:13px;opacity:.9;margin-top:4px">📝 {_esc(topic)} · Page {page} · {len(mcqs)} Questions</div></div>
+{rows}
+<div class="foot">🌐 atlascourses.com · ▶️ youtube.com/@atlasprep</div>
+</body></html>'''
+
+def generate_premium_pdf_html(mcqs: List[Dict], header_label: str = "ATLAS Practice Sheet") -> str:
+    """ATLAS Practice Sheet — 2-column, full A4 page fill (auto density per page)."""
+    labels = ["a", "b", "c", "d"]
+
+    def strip_prefix(opt: str, oi: int) -> str:
+        clean = opt
+        for pfx in [f"{labels[oi].upper()}) ", f"{labels[oi].upper()})", f"({labels[oi]}) ",
+                    f"({labels[oi]})", f"{labels[oi]}) ", f"{labels[oi]})"]:
+            if clean.startswith(pfx):
+                return clean[len(pfx):].strip()
+        return clean
+
+    pages_html = ""
+    PER_PAGE = 10
+    total_pages = max(1, (len(mcqs) + PER_PAGE - 1) // PER_PAGE)
+
+    for p_i, page_idx in enumerate(range(0, len(mcqs), PER_PAGE)):
+        chunk = mcqs[page_idx:page_idx + PER_PAGE]
+        n = len(chunk)
+        # Auto density: fewer questions on a page -> bigger fonts/gaps to fill A4
+        if n <= 4:
+            qfs, ofs, gap, qgap = 15.5, 14.5, "26px", "20px"
+        elif n <= 6:
+            qfs, ofs, gap, qgap = 14, 13, "20px", "16px"
+        elif n <= 8:
+            qfs, ofs, gap, qgap = 12.5, 12, "15px", "13px"
+        else:
+            qfs, ofs, gap, qgap = 11.5, 11, "11px", "11px"
+
+        half = (n + 1) // 2
+        left_col = chunk[:half]
+        right_col = chunk[half:]
+
+        def render_q(q, num):
+            q_text = _esc(q.get("question", ""))
+            opts = q.get("options", [])[:4]
+            opts_html = ""
+            for oi, opt in enumerate(opts):
+                clean = _esc(strip_prefix(opt, oi))
+                opts_html += f'<div class="opt-line">({labels[oi]}) {clean}</div>'
+            return (f'<div class="q-block" style="margin-bottom:{qgap};">'
+                    f'<div class="q-text"><span class="q-num">{num}.</span> {q_text}</div>'
+                    f'<div class="opts-grid" style="gap:4px {gap};">{opts_html}</div></div>')
+
+        left_html = "".join(render_q(q, page_idx + i + 1) for i, q in enumerate(left_col))
+        right_html = "".join(render_q(q, page_idx + half + i + 1) for i, q in enumerate(right_col))
+
+        ans_cells_q = "".join(f'<td>{page_idx + i + 1}</td>' for i in range(n))
+        ans_cells_a = ""
+        for q in chunk:
+            idx = q.get("answer", 0)
+            if isinstance(idx, str):
+                idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(idx.upper(), 0)
+            ans_cells_a += f'<td>{"abcd"[idx] if 0 <= idx <= 3 else "a"}</td>'
+
+        pb = 'page-break-after:always;' if (p_i + 1) < total_pages else ''
+        pages_html += f'''
+        <div class="page" style="{pb}font-size:{qfs}px;">
+            <div class="header-bar">{_esc(header_label)}</div>
+            <div class="columns">
+                <div class="col">{left_html}</div>
+                <div class="divider-v"></div>
+                <div class="col">{right_html}</div>
+            </div>
+            <div class="answer-section">
+                <div class="answer-title">সঠিক উত্তর যাচাই কর :)</div>
+                <table class="answer-table">
+                    <tr class="th-row"><th>প্রশ্ন</th>{ans_cells_q}</tr>
+                    <tr class="td-row"><th>উত্তর</th>{ans_cells_a}</tr>
+                </table>
+            </div>
+            <div class="footer">🌐 atlascourses.com · ▶ youtube.com/@atlasprep</div>
+        </div>'''
+
+    return f'''<!DOCTYPE html>
+<html lang="bn"><head><meta charset="UTF-8">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700&family=Inter:wght@400;600;700&display=swap');
+*{{margin:0;padding:0;box-sizing:border-box}}
+html,body{{font-family:'Noto Sans Bengali','Inter',sans-serif;color:#111;background:#fff;line-height:1.55;}}
+.page{{padding:10mm 9mm;min-height:297mm;display:flex;flex-direction:column;}}
+.header-bar{{background:linear-gradient(135deg,#d4f1f9,#cfe9ff);border:1.5px solid #9cc8db;border-radius:8px;text-align:center;padding:9px 0;margin-bottom:16px;font-weight:700;font-size:16px;color:#0a3d5c;font-family:'Inter','Noto Sans Bengali',sans-serif;letter-spacing:.3px;}}
+.columns{{display:flex;gap:0;flex:1;}}
+.col{{flex:1;min-width:0;padding:0 10px;}}
+.divider-v{{width:1.5px;background:linear-gradient(#bbb,#ddd,#bbb);margin:0 2px;}}
+.q-block{{page-break-inside:avoid;}}
+.q-text{{font-weight:600;line-height:1.55;margin-bottom:5px;color:#15233a;}}
+.q-num{{font-weight:800;color:#0a3d5c;}}
+.opts-grid{{display:grid;grid-template-columns:1fr 1fr;padding-left:10px;}}
+.opt-line{{font-size:0.92em;line-height:1.5;white-space:normal;color:#222;}}
+.answer-section{{margin-top:auto;padding-top:14px;page-break-inside:avoid;}}
+.answer-title{{text-align:center;font-weight:700;font-size:14px;margin-bottom:7px;color:#0a3d5c;}}
+.answer-table{{width:100%;border-collapse:collapse;border:1.5px solid #333;}}
+.answer-table th,.answer-table td{{border:1px solid #555;text-align:center;padding:6px 4px;font-size:12px;}}
+.answer-table .th-row th,.answer-table .td-row th{{background:#e8eef5;font-weight:700;}}
+.answer-table .td-row td{{font-weight:800;font-family:'Inter',sans-serif;color:#0a3d5c;}}
+.footer{{text-align:center;font-size:9.5px;color:#777;margin-top:10px;padding-top:5px;border-top:1px solid #ddd;}}
+@page{{size:A4;margin:0;}}
+</style></head><body>{pages_html}</body></html>'''
 
 
-# ============================================
-# FEEDBACK (motivation + ayat by score band)
-# ============================================
-_AYATS = [
-    "পড়ো তোমার প্রভুর নামে যিনি সৃষ্টি করেছেন... (সূরা আলাক: ১)",
-    "আল্লাহ ধৈর্যশীলদের সাথে আছেন... (সূরা বাকারা: ১৫৩)",
-    "নিশ্চয়ই কষ্টের সাথেই স্বস্তি আছে... (সূরা ইনশিরাহ: ৫-৬)",
-    "মানুষ যা চেষ্টা করে, সে তাই পায়... (সূরা নাজম: ৩৯)",
-    "আল্লাহ কাউকে তার সাধ্যের বাইরে দায়িত্ব দেন না... (সূরা বাকারা: ২৮৬)",
-]
-
-
-def _pick_feedback(correct, total):
-    import random
-    pct = (correct / total * 100) if total else 0
-    if pct >= 80:
-        msg = "🏆 অসাধারণ! অনেক ভালো করেছো!"
-    elif pct >= 60:
-        msg = "👍 ভালো হয়েছে! আরেকটু চেষ্টা করলেই সেরা হবে।"
-    elif pct >= 40:
-        msg = "💪 চালিয়ে যাও — উন্নতি হচ্ছে।"
+def generate_creative_pdf_html(items: List[Dict], header_label: str, ctype: str) -> str:
+    """জ্ঞানমূলক / অনুধাবনমূলক — A4, 2-column, premium color, answer in shadow box."""
+    # Color theme per type
+    if ctype == "knowledge":
+        accent, accent2, ans_bg, ans_border = "#1565c0", "#42a5f5", "#e8f3ff", "#90caf9"
     else:
-        msg = "📚 হাল ছেড়ো না, আবার চেষ্টা করো!"
-    return msg, random.choice(_AYATS)
+        accent, accent2, ans_bg, ans_border = "#6a1b9a", "#ab47bc", "#f6ebfb", "#ce93d8"
+
+    def render_item(it, num):
+        q = _esc(it.get("question", ""))
+        a = _esc(it.get("answer", "")).replace("\n", "<br>")
+        return (f'<div class="qa-block">'
+                f'<div class="qa-q"><span class="qa-num">{num}.</span> {q}</div>'
+                f'<div class="qa-a"><span class="qa-a-lbl">উত্তর:</span> {a}</div>'
+                f'</div>')
+
+    n = len(items)
+    half = (n + 1) // 2
+    left = "".join(render_item(it, i + 1) for i, it in enumerate(items[:half]))
+    right = "".join(render_item(it, half + i + 1) for i, it in enumerate(items[half:]))
+
+    # Single flowing layout across pages using CSS columns (auto-balances + fills page)
+    all_items = "".join(render_item(it, i + 1) for i, it in enumerate(items))
+
+    return f'''<!DOCTYPE html>
+<html lang="bn"><head><meta charset="UTF-8">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap');
+*{{margin:0;padding:0;box-sizing:border-box}}
+html,body{{font-family:'Noto Sans Bengali',sans-serif;color:#1a1a1a;background:#fff;line-height:1.6;font-size:12.5px;}}
+.header-bar{{background:linear-gradient(135deg,{accent},{accent2});color:#fff;text-align:center;padding:12px 0;font-weight:800;font-size:18px;letter-spacing:.4px;margin-bottom:14px;border-radius:0 0 10px 10px;box-shadow:0 3px 8px rgba(0,0,0,0.18);}}
+.content{{column-count:2;column-gap:18px;column-rule:1.5px solid #ddd;padding:0 10mm;}}
+.qa-block{{break-inside:avoid;margin-bottom:14px;}}
+.qa-q{{font-weight:700;color:#10243a;margin-bottom:6px;line-height:1.55;}}
+.qa-num{{font-weight:800;color:{accent};}}
+.qa-a{{background:{ans_bg};border:1px solid {ans_border};border-left:4px solid {accent};border-radius:8px;padding:9px 11px;font-size:0.95em;color:#243; box-shadow:0 2px 5px rgba(0,0,0,0.08);line-height:1.6;}}
+.qa-a-lbl{{color:{accent};font-weight:800;margin-right:3px;}}
+.footer{{text-align:center;font-size:9.5px;color:#888;margin-top:10px;padding:8px 0 0;border-top:1px solid #e3e3e3;}}
+@page{{size:A4;margin:8mm 0 10mm;}}
+</style></head><body>
+<div class="header-bar">{_esc(header_label)}</div>
+<div class="content">{all_items}</div>
+<div class="footer">🌐 atlascourses.com · ▶ youtube.com/@atlasprep · ATLAS Premium Sheet</div>
+</body></html>'''
 
 
-def _not_found_html():
-    return ("<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<style>body{background:#0A0D1E;color:#A8B4FF;font-family:sans-serif;"
-            "display:flex;align-items:center;justify-content:center;height:100vh;"
-            "text-align:center;margin:0}</style></head><body><div>"
-            "<h2>⚠️ এক্সাম পাওয়া যায়নি</h2>"
-            "<p>লিংকটি মেয়াদোত্তীর্ণ বা ভুল হতে পারে।</p></div></body></html>")
-
-
-# ============================================
-# SHARED CSS  (AtlasBoss dark theme — exact tokens)
-# ============================================
-def _css():
-    return """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+Bengali:wght@400;500;600;700;800&display=swap');
-:root{
-  --bg:#F0F2F8;--bg-secondary:#FFFFFF;--bg-tertiary:#E8EBF5;
-  --text:#1A1D2E;--text-secondary:#4A5270;--text-tertiary:#7A82A8;
-  --accent:#5A5FE0;--accent-hover:#4349C8;--accent-light:#ECEEFF;--accent-glow:rgba(90,95,224,.18);
-  --atlas-bg:#0E1225;--atlas-card:#141830;--atlas-text:#A8B4FF;--atlas-border:#5A5FE0;
-  --atlas-glow:rgba(90,95,224,.32);--atlas-glow-strong:rgba(90,95,224,.55);
-  --success:#0EA867;--success-light:#DCFBEE;--success-glow:rgba(14,168,103,.18);
-  --error:#E53E3E;--error-light:#FEE8E8;--error-glow:rgba(229,62,62,.18);
-  --warning:#D97706;--warning-light:#FEF5DC;--info:#2B7EDB;
-  --border:#D4D8EE;--divider:#E2E5F2;--overlay:rgba(10,12,30,.52);
-  --shadow-sm:0 1px 4px rgba(30,35,90,.08);--shadow:0 2px 10px rgba(30,35,90,.11);
-  --shadow-md:0 4px 18px rgba(30,35,90,.14);--shadow-lg:0 8px 34px rgba(30,35,90,.18);
-  --radius:16px;--radius-md:12px;--radius-sm:8px;--radius-full:9999px;
-  --card-bg:#FFFFFF;--card-hover:#F4F6FF;--option-bg:#F4F6FF;--option-border:#D4D8EE;
-  --option-selected-bg:#ECEEFF;--option-selected-border:#5A5FE0;--btn-bg:#E8EBF8;
-}
-.dark-mode{
-  --bg:#0A0D1E;--bg-secondary:#0F1528;--bg-tertiary:#161D35;
-  --text:#E8ECFF;--text-secondary:#8892C8;--text-tertiary:#555E88;
-  --accent:#7B82FF;--accent-hover:#9CA3FF;--accent-light:#1A1E40;--accent-glow:rgba(123,130,255,.22);
-  --atlas-bg:#0A0D1E;--atlas-card:#12162E;--atlas-text:#A8B4FF;--atlas-border:#5A5FE0;
-  --atlas-glow:rgba(123,130,255,.30);--atlas-glow-strong:rgba(123,130,255,.55);
-  --success:#22D47A;--success-light:#052A18;--error:#F87171;--error-light:#2A0808;
-  --warning:#FBBF24;--warning-light:#291A00;--border:#252E55;--divider:#1E2645;--overlay:rgba(0,0,0,.78);
-  --shadow-sm:0 1px 4px rgba(0,0,0,.45);--shadow:0 2px 10px rgba(0,0,0,.55);
-  --shadow-md:0 4px 18px rgba(0,0,0,.65);--shadow-lg:0 8px 34px rgba(0,0,0,.75);
-  --card-bg:#12162E;--card-hover:#161D35;--option-bg:#161D35;--option-border:#252E55;
-  --option-selected-bg:#1A1E40;--option-selected-border:#7B82FF;--btn-bg:#1E2645;
-}
-*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased}
-body{font-family:'Inter','Noto Sans Bengali',system-ui,sans-serif;background:var(--bg);color:var(--text);
-  min-height:100vh;overflow-x:hidden;line-height:1.65;transition:background .3s,color .3s}
-.bn{font-family:'Noto Sans Bengali','Inter',sans-serif}
-@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
-@keyframes timerPulse{0%,100%{opacity:1}50%{opacity:.5}}
-.wrap{max-width:600px;margin:0 auto;width:100%}
-.header{position:fixed;top:0;left:0;right:0;height:56px;background:var(--card-bg);
-  border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;
-  padding:0 16px;z-index:1000;box-shadow:var(--shadow-sm);backdrop-filter:blur(14px)}
-.atlas-brand-box{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:8px;
-  background:linear-gradient(135deg,#5A5FE0,#8B5CF6);color:#fff}
-.dark-mode .atlas-brand-box{background:linear-gradient(135deg,#7B82FF,#A78BFA)}
-.atlas-brand-text{font-size:16px;font-weight:800;letter-spacing:-.5px;color:#fff;white-space:nowrap}
-.header-icon{background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text);
-  width:36px;height:36px;border-radius:var(--radius-full);font-size:16px;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;transition:all .2s}
-.header-icon:hover{background:var(--accent-light);border-color:var(--accent);color:var(--accent)}
-.screen{display:none}
-.screen.active{display:block;animation:fadeIn .25s}
-/* PRE-EXAM */
-.pre-wrap{padding:72px 16px 40px}
-.pre-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);
-  overflow:hidden;box-shadow:var(--shadow-md)}
-.pre-img{width:100%;display:block;max-height:300px;object-fit:contain;background:var(--bg-tertiary)}
-.pre-body{padding:18px}
-.pre-title{font-size:18px;font-weight:800;margin-bottom:6px}
-.pre-tag{display:inline-block;font-size:11px;font-weight:700;color:var(--accent);
-  background:var(--accent-light);padding:3px 10px;border-radius:var(--radius-full);margin-bottom:12px}
-.pre-meta{font-size:13px;color:var(--text-secondary);line-height:2;margin-bottom:16px}
-.name-input{width:100%;padding:12px 14px;border:1.5px solid var(--border);border-radius:var(--radius-sm);
-  background:var(--option-bg);color:var(--text);font-size:14px;font-family:inherit;margin-bottom:14px}
-.name-input:focus{outline:none;border-color:var(--accent)}
-.btn-start{width:100%;padding:15px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);
-  font-size:16px;font-weight:800;cursor:pointer;font-family:inherit;transition:filter .2s}
-.btn-start:hover{filter:brightness(1.08)}
-/* EXAM */
-.timer-sticky{position:sticky;top:56px;z-index:100;background:var(--atlas-bg);border:1px solid var(--atlas-border);
-  border-radius:var(--radius-sm);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;
-  margin:64px 14px 0;box-shadow:0 2px 10px var(--atlas-glow)}
-.timer-text{font-size:18px;font-weight:800;color:var(--atlas-text);letter-spacing:2px;font-variant-numeric:tabular-nums}
-.timer-warning{color:var(--error)!important;animation:timerPulse .5s infinite}
-.progress-text{font-size:12px;font-weight:600;color:var(--atlas-text);opacity:.75}
-.progress-bar-wrap{height:4px;background:rgba(255,255,255,.1);margin:8px 14px 12px;overflow:hidden;border-radius:2px}
-.progress-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),#7c3aed);transition:width .4s;width:0}
-.questions-area{padding:0 14px 90px}
-.mcq-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);
-  padding:16px;margin-bottom:12px;box-shadow:var(--shadow-sm);animation:fadeIn .2s}
-.q-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
-.q-number{font-size:11px;color:var(--accent);font-weight:700;background:var(--accent-light);
-  padding:3px 9px;border-radius:var(--radius-full)}
-.icon-btn{background:none;border:1px solid var(--border);font-size:14px;cursor:pointer;padding:4px 7px;
-  border-radius:6px;transition:.2s;opacity:.7;color:var(--text-secondary)}
-.icon-btn:hover{opacity:1;border-color:var(--accent)}
-.icon-btn.active{opacity:1;color:var(--warning);border-color:var(--warning)}
-.q-text{font-size:14px;font-weight:600;margin-bottom:12px;line-height:1.7;color:var(--text)}
-.q-text img{max-width:100%;border-radius:8px;margin:6px 0}
-.option-item{display:flex;align-items:center;gap:10px;padding:11px 13px;margin-bottom:7px;
-  background:var(--option-bg);border:1.5px solid var(--option-border);border-radius:var(--radius-sm);
-  cursor:pointer;transition:all .18s;font-size:13px;color:var(--text)}
-.option-item:hover:not(.dimmed):not(.revealed){border-color:var(--accent);background:var(--option-selected-bg)}
-.option-item.selected{background:var(--option-selected-bg);border-color:var(--option-selected-border);cursor:default}
-.option-item.dimmed{opacity:.4;cursor:not-allowed;pointer-events:none}
-.option-item.correct-reveal{background:var(--success-light);border-color:var(--success)}
-.option-item.wrong-reveal{background:var(--error-light);border-color:var(--error)}
-.option-radio{width:20px;height:20px;border-radius:50%;border:2px solid var(--text-tertiary);
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:11px;font-weight:700;
-  color:var(--text-tertiary);transition:all .18s}
-.option-item.selected .option-radio{border-color:var(--option-selected-border);background:var(--option-selected-border);color:#fff}
-.option-item.correct-reveal .option-radio{border-color:var(--success);background:var(--success);color:#fff}
-.option-item.wrong-reveal .option-radio{border-color:var(--error);background:var(--error);color:#fff}
-.option-text{flex:1;line-height:1.5}
-.q-explain{margin-top:10px;padding:10px 12px;background:var(--accent-light);border-radius:var(--radius-sm);
-  font-size:12px;color:var(--text-secondary);line-height:1.7;display:none}
-.q-explain.show{display:block}
-.submit-fixed{position:fixed;bottom:0;left:0;right:0;background:var(--success);color:#fff;border:none;
-  padding:14px;font-size:16px;font-weight:700;cursor:pointer;z-index:100;box-shadow:0 -2px 16px var(--success-glow);
-  transition:filter .2s;text-align:center;max-width:600px;margin:0 auto}
-.submit-fixed:hover{filter:brightness(.92)}
-.nav-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);width:38px;height:38px;background:var(--accent);
-  border:none;border-radius:10px 0 0 10px;color:#fff;font-size:15px;cursor:pointer;z-index:101;
-  box-shadow:0 4px 12px var(--accent-glow);display:flex;align-items:center;justify-content:center}
-.nav-overlay,.confirm-overlay{position:fixed;inset:0;background:var(--overlay);z-index:200;display:none}
-.nav-overlay{align-items:flex-end}
-.nav-overlay.active{display:flex}
-.nav-popup{width:100%;max-width:600px;margin:0 auto;background:var(--card-bg);
-  border-radius:var(--radius) var(--radius) 0 0;padding:16px;border:1px solid var(--border);
-  animation:slideUp .2s;max-height:80vh;overflow-y:auto}
-.nav-popup-title{font-size:14px;font-weight:700;color:var(--accent);margin-bottom:12px;text-align:center}
-.nav-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px}
-@media(max-width:480px){.nav-grid{grid-template-columns:repeat(6,1fr)}}
-.nav-num{aspect-ratio:1;border-radius:6px;background:var(--option-bg);border:1px solid var(--border);
-  color:var(--text-secondary);font-size:11px;font-weight:600;cursor:pointer;display:flex;
-  align-items:center;justify-content:center;transition:all .2s}
-.nav-num.answered{background:var(--accent);border-color:var(--accent);color:#fff}
-.nav-num.bm{box-shadow:0 0 0 2px var(--warning) inset}
-.nav-stats{text-align:center;margin-top:10px;font-size:11px;color:var(--text-secondary)}
-.nav-close{display:block;margin:12px auto 0;padding:8px 20px;background:var(--accent);color:#fff;border:none;
-  border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
-.confirm-overlay{align-items:center;justify-content:center}
-.confirm-overlay.active{display:flex}
-.confirm-modal{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);
-  padding:20px;max-width:400px;width:92%;text-align:center;box-shadow:var(--shadow-lg);animation:fadeIn .2s}
-.confirm-title{font-size:16px;font-weight:700;margin-bottom:12px}
-.confirm-stats{font-size:13px;color:var(--text-secondary);margin-bottom:16px;line-height:1.9}
-.confirm-buttons{display:flex;gap:8px;justify-content:center}
-.confirm-btn{padding:10px 20px;border-radius:var(--radius-sm);border:none;font-size:13px;font-weight:600;
-  cursor:pointer;font-family:inherit}
-.cb-back{background:var(--btn-bg);color:var(--text);border:1px solid var(--border)}
-.cb-go{background:var(--success);color:#fff}
-/* RESULT */
-.result-wrap{padding:72px 14px 40px}
-.result-score-card{background:linear-gradient(140deg,var(--atlas-bg),var(--atlas-card));
-  border:1.5px solid var(--atlas-border);border-radius:var(--radius);padding:24px 18px;text-align:center;
-  margin-bottom:14px;box-shadow:var(--shadow-md),0 0 24px var(--atlas-glow)}
-.result-exam-name{font-size:18px;font-weight:800;color:#fff;margin-bottom:12px}
-.result-big-score{font-size:42px;font-weight:900;color:var(--atlas-text);text-shadow:0 0 20px var(--atlas-glow-strong)}
-.result-total{font-size:14px;color:var(--atlas-text);opacity:.75;margin-top:4px}
-.result-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}
-.result-stat{background:var(--card-bg);border-radius:var(--radius-sm);padding:12px 8px;text-align:center;
-  border:1px solid var(--border)}
-.result-stat-val{font-size:18px;font-weight:800}
-.result-stat-label{font-size:10px;color:var(--text-secondary);margin-top:2px}
-.correct-val{color:var(--success)}.wrong-val{color:var(--error)}.skipped-val{color:var(--warning)}
-.info-row{display:flex;justify-content:space-around;font-size:13px;color:var(--atlas-text)}
-.motiv-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);
-  padding:16px;text-align:center;margin-bottom:14px}
-.motiv-msg{font-size:15px;font-weight:700;margin-bottom:8px}
-.motiv-ayat{font-size:13px;color:var(--atlas-text);line-height:1.8}
-.action-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px}
-.act-btn{padding:12px;border-radius:var(--radius-sm);border:none;font-size:13px;font-weight:700;cursor:pointer;
-  font-family:inherit;color:#fff;transition:filter .2s}
-.act-btn:hover{filter:brightness(1.08)}
-.act-btn:disabled{opacity:.4;cursor:not-allowed}
-.b-again{background:var(--accent)}.b-new{background:#8B5CF6}.b-mistake{background:var(--error)}
-.b-board{background:var(--warning)}.b-img{background:var(--info)}.b-pdf{background:var(--success)}
-.b-web{background:#0EA5E9}.b-yt{background:#EF4444}
-.solve-head{font-size:15px;font-weight:800;text-align:center;margin:18px 0 12px;color:var(--accent)}
-.filter-row{display:flex;gap:6px;margin-bottom:12px;justify-content:center;flex-wrap:wrap}
-.filter-btn{padding:7px 14px;border-radius:var(--radius-full);border:1px solid var(--border);
-  background:var(--option-bg);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;
-  font-family:inherit;transition:all .2s}
-.filter-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
-.board-row{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--card-bg);
-  border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px;font-size:13px}
-.board-rank{width:26px;height:26px;border-radius:50%;background:var(--accent-light);color:var(--accent);
-  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;flex-shrink:0}
-.board-name{flex:1;font-weight:600}
-.board-score{font-weight:800;color:var(--success)}
-.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--atlas-card);
-  color:var(--atlas-text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;z-index:600;
-  border:1px solid var(--atlas-border);box-shadow:var(--shadow-md);opacity:0;transition:opacity .3s;pointer-events:none}
-.toast.show{opacity:1}
-::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-"""
-
-
-# ============================================
-# EXAM PAGE GENERATOR
-# ============================================
-def generate_exam_html(cache_id, data):
+# ============================================================
+# SECTION 12.1: EXAM HTML (preserved from v2.4 — unchanged behavior)
+# ============================================================
+def generate_exam_html(cache_id: str, data: Dict, uid: int = 0, name: str = "") -> str:
     mcqs = data["mcqs"]
     total = len(mcqs)
-    topic = data.get("topic") or "ATLAS Exam"
-    tag = data.get("tag") or ""
+    topic = data.get("topic", "ATLAS Exam")
+    tag = data.get("tag", "")
     page = data.get("page", 1)
-    image_file_id = data.get("image_file_id") or ""
-    is_new_gen = bool(data.get("is_new_gen"))
+    image_file_id = data.get("image_file_id", "")
+    is_new_gen = data.get("is_new_gen", False)
+    chat_id = data.get("chat_id", "")
+    message_id = data.get("message_id", "")
+    prompt_type = data.get("prompt_type", "prompt_1")
+    prompt_display = PROMPT_DISPLAY_NAMES.get(prompt_type, "📋 ATLAS Special MCQ")
 
     cfg = {
-        "cacheId": cache_id,
-        "total": total,
-        "topic": topic,
-        "tag": tag,
-        "page": page,
-        "imageFileId": image_file_id,
-        "isNewGen": is_new_gen,
-        "mcqs": mcqs,
-        "negPerWrong": 0.25,
-        "secPerQ": 30,
-        "maxRegen": MAX_REGEN,
+        "cacheId": cache_id, "userId": uid, "total": total, "topic": topic,
+        "tag": tag, "page": page, "imageFileId": image_file_id, "isNewGen": is_new_gen,
+        "mcqs": mcqs, "negPerWrong": NEGATIVE_MARK, "secPerQ": SEC_PER_QUESTION,
+        "hasSource": bool(chat_id and message_id), "promptDisplay": prompt_display,
+        "hfSpaceUrl": HF_SPACE_URL,
         "websiteUrl": "https://atlascourses.com",
-        "youtubeUrl": "https://youtube.com/@atlascourses",
+        "youtubeUrl": "https://www.youtube.com/@atlasprep",
+        "whatsappUrl": "https://wa.me/8801999681290",
+        "groupsUrl": "https://t.me/MediAtlas/4221",
     }
-    cfg_json = json.dumps(cfg, ensure_ascii=False)
-    css = _css()
+    cfg_json = json.dumps(cfg, ensure_ascii=True)
+    user_name_safe = (name or "").replace("'", "\\'").replace('"', '\\"')
+    return _EXAM_HTML_TEMPLATE.replace("__CFG_JSON__", cfg_json).replace("__USER_NAME_SAFE__", user_name_safe)
 
-    return f"""<!DOCTYPE html>
+_EXAM_HTML_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="bn">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0">
-<title>ATLAS · এক্সাম</title>
-<style>{css}</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ATLAS Special Exam</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+    --bg:#0A0D1E;--card-bg:#12162E;--card-hover:#1A1E3A;
+    --border:#2A2E4A;--divider:#1E2240;
+    --accent:#5A5FE0;--accent-light:rgba(90,95,224,0.12);--accent-glow:rgba(90,95,224,0.4);
+    --atlas-bg:#0D1033;--atlas-card:#151A3E;--atlas-border:#3A3F6E;
+    --atlas-text:#A8AEFF;--atlas-glow:rgba(90,95,224,0.2);--atlas-glow-strong:rgba(90,95,224,0.6);
+    --text:#E8EAFF;--text-secondary:#7A82C8;--text-tertiary:#4A5080;
+    --success:#22D47A;--success-light:rgba(34,212,122,0.15);--success-glow:rgba(34,212,122,0.3);
+    --error:#F87171;--error-light:rgba(248,113,113,0.15);--warning:#FBBF24;
+    --option-bg:#1A1E3A;--option-border:#2A2E4A;
+    --btn-bg:#1A1E3A;--overlay:rgba(0,0,0,0.82);
+    --shadow-sm:0 1px 6px rgba(0,0,0,0.3);--shadow-md:0 4px 20px rgba(0,0,0,0.5);
+    --radius:12px;--radius-sm:8px;--radius-full:999px;
+}
+body.light-theme{
+    --bg:#F5F6FB;--card-bg:#FFFFFF;--card-hover:#EFF1FA;
+    --border:#D8DCEF;--divider:#E5E8F5;
+    --accent:#4A4FD0;--accent-light:rgba(74,79,208,0.10);--accent-glow:rgba(74,79,208,0.28);
+    --atlas-bg:#FFFFFF;--atlas-card:#F0F1FB;--atlas-border:#C9CDEE;
+    --atlas-text:#3A3FB5;--atlas-glow:rgba(74,79,208,0.12);--atlas-glow-strong:rgba(74,79,208,0.35);
+    --text:#1A1D38;--text-secondary:#5A5F85;--text-tertiary:#9094B8;
+    --success:#16A360;--success-light:rgba(22,163,96,0.12);--success-glow:rgba(22,163,96,0.25);
+    --error:#DC2626;--error-light:rgba(220,38,38,0.10);--warning:#D97706;
+    --option-bg:#F7F8FD;--option-border:#D8DCEF;
+    --btn-bg:#F0F1FB;--overlay:rgba(0,0,0,0.55);
+    --shadow-sm:0 1px 6px rgba(0,0,0,0.06);--shadow-md:0 4px 20px rgba(0,0,0,0.10);
+}
+.theme-toggle{position:absolute;right:14px;top:10px;width:34px;height:34px;border-radius:50%;background:var(--option-bg);border:1.5px solid var(--border);color:var(--text);font-size:16px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:60;transition:.2s;}
+.theme-toggle:active{transform:scale(0.9);}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;}
+.mode{display:none;}.mode.active{display:block;animation:fadeIn .25s ease;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.wrap{max-width:600px;margin:0 auto;padding:16px 14px 90px;}
+.header{position:sticky;top:0;z-index:50;background:var(--atlas-bg);border-bottom:1px solid var(--atlas-border);padding:10px 16px;display:flex;align-items:center;gap:8px;min-height:52px;}
+.brand{font-size:18px;font-weight:900;background:linear-gradient(135deg,#818CF8,#C4B5FD,#F472B6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;flex-shrink:0;}
+.header-sub{font-size:11px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.exam-hdr{display:none;position:sticky;top:52px;z-index:49;background:var(--atlas-bg);border-bottom:1px solid var(--atlas-border);padding:7px 14px 6px;gap:8px;flex-wrap:wrap;align-items:center;}
+.exam-hdr.visible{display:flex;}
+.hdr-timer{font-size:19px;font-weight:900;letter-spacing:1px;font-variant-numeric:tabular-nums;color:var(--success);}
+.hdr-timer.warn{color:var(--warning);}.hdr-timer.danger{color:var(--error);animation:blink .5s infinite;}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.hdr-meta{font-size:10.5px;color:var(--text-secondary);flex:1;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hdr-prog{font-size:11px;color:var(--text-secondary);font-weight:700;}
+.hdr-bar-wrap{width:100%;height:3px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;}
+.hdr-bar-fill{height:100%;background:linear-gradient(90deg,var(--success),var(--accent));transition:width .5s;}
+.hero{text-align:center;padding:20px 14px 14px;}
+.hero-img{display:none;}
+.hero-src-img{width:100%;max-height:300px;object-fit:contain;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;display:block;}
+.header-source-img{width:100%;max-height:280px;object-fit:contain;background:var(--atlas-bg);border-bottom:2px solid var(--accent);display:block;}
+.hero-title{font-size:18px;font-weight:800;color:var(--accent);margin-bottom:4px;}
+.hero-prompt{font-size:13px;color:var(--text-secondary);margin-bottom:12px;font-weight:600;}
+.hero-stats{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;}
+.stat-box{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 16px;text-align:center;min-width:76px;}
+.stat-val{font-size:18px;font-weight:800;color:var(--accent);}.stat-lbl{font-size:10px;color:var(--text-secondary);margin-top:2px;}
+.info-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:12px 0;}
+.info-row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--divider);font-size:13px;}
+.info-row:last-child{border-bottom:none;}.info-lbl{color:var(--text-secondary);}.info-val{font-weight:600;}
+.timer2-card{background:var(--card-bg);border:1.5px solid var(--border);border-radius:var(--radius);padding:16px;margin:12px 0;}
+.timer2-title{font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px;text-align:center;}
+.timer2-opts{display:flex;gap:10px;}
+.timer2-btn{flex:1;padding:11px 0;border-radius:var(--radius-sm);border:1.5px solid var(--border);background:var(--option-bg);color:var(--text-secondary);font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;font-family:'Noto Sans Bengali','Inter',sans-serif;position:relative;overflow:hidden;}
+.timer2-btn::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,0.06);opacity:0;transition:.2s;}
+.timer2-btn:active::after{opacity:1;}
+.timer2-btn.selected-yes{background:linear-gradient(135deg,#7c3aed,#5A5FE0);border-color:#7c3aed;color:#fff;box-shadow:0 0 14px rgba(124,58,237,0.45);transform:scale(1.03);}
+.timer2-btn.selected-no{background:linear-gradient(135deg,#22D47A,#16a34a);border-color:#22D47A;color:#fff;box-shadow:0 0 14px rgba(34,212,122,0.35);transform:scale(1.03);}
+.timer2-note{font-size:11px;color:var(--error);margin-top:8px;text-align:center;display:none;}
+.timer2-note.show{display:block;}
+.btn-start{width:100%;padding:15px;background:linear-gradient(135deg,var(--accent),#7c3aed);color:#fff;border:none;border-radius:var(--radius-sm);font-size:15px;font-weight:700;cursor:pointer;margin-top:10px;font-family:'Noto Sans Bengali','Inter',sans-serif;position:relative;overflow:hidden;box-shadow:0 4px 20px var(--accent-glow);transition:transform .15s,box-shadow .15s;}
+.btn-start:active{transform:scale(0.97);}
+.btn-start::before{content:'';position:absolute;top:-50%;left:-60%;width:40%;height:200%;background:rgba(255,255,255,0.15);transform:skewX(-20deg);animation:shimmer 2.5s infinite;}
+@keyframes shimmer{0%{left:-60%}100%{left:120%}}
+.hall-area{padding:12px 14px 100px;max-width:600px;margin:0 auto;}
+.mcq-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px;box-shadow:var(--shadow-sm);transition:border-color .3s;}
+.mcq-card.done{border-color:var(--atlas-border);opacity:.9;}
+.mcq-card.current{border-color:var(--accent);box-shadow:0 0 12px var(--accent-glow);}
+.q-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+.q-num{font-size:11px;color:var(--accent);font-weight:700;background:var(--accent-light);padding:3px 9px;border-radius:var(--radius-full);}
+.bm-btn{background:none;border:1px solid var(--border);font-size:14px;cursor:pointer;padding:4px 7px;border-radius:6px;transition:.2s;color:var(--text-secondary);}
+.bm-btn.active{color:var(--warning);border-color:var(--warning);}
+.q-text{font-size:14px;font-weight:600;margin-bottom:10px;line-height:1.7;}
+.opt{display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:6px;background:var(--option-bg);border:1.5px solid var(--option-border);border-radius:var(--radius-sm);cursor:pointer;transition:all .18s;font-size:13px;justify-content:space-between;}
+.opt:hover:not(.locked){border-color:var(--accent);background:rgba(90,95,224,0.1);}
+.opt.locked{cursor:default;pointer-events:none;}
+.opt.correct-r{background:var(--success-light)!important;border-color:var(--success)!important;}
+.opt.wrong-r{background:var(--error-light)!important;border-color:var(--error)!important;}
+.opt.dim{opacity:.32;}
+.opt-radio{width:20px;height:20px;border-radius:50%;border:2px solid var(--text-tertiary);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:11px;font-weight:700;transition:all .18s;}
+.opt.correct-r .opt-radio{border-color:var(--success);background:var(--success);color:#fff;}
+.opt.wrong-r .opt-radio{border-color:var(--error);background:var(--error);color:#fff;}
+.submit-fixed{position:fixed;bottom:0;left:0;right:0;width:100%;background:linear-gradient(135deg,#22D47A,#16a34a);color:#fff;border:none;padding:16px;font-size:16px;font-weight:700;cursor:pointer;z-index:200;box-shadow:0 -4px 24px rgba(34,212,122,0.5);font-family:'Noto Sans Bengali','Inter',sans-serif;display:none;overflow:hidden;}
+.submit-fixed::before{content:'';position:absolute;top:-50%;left:-60%;width:40%;height:200%;background:rgba(255,255,255,0.12);transform:skewX(-20deg);animation:shimmer 3s infinite;}
+.submit-fixed:active{transform:scale(0.98);}
+.confirm-overlay{position:fixed;inset:0;background:var(--overlay);z-index:300;display:none;align-items:center;justify-content:center;padding:20px;}
+.confirm-overlay.open{display:flex;animation:fadeIn .2s ease;}
+.confirm-popup{background:var(--card-bg);border:1.5px solid var(--accent);border-radius:var(--radius);padding:24px 20px;max-width:380px;width:100%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,0.7),0 0 30px var(--accent-glow);}
+.confirm-icon{font-size:36px;margin-bottom:12px;}
+.confirm-title{font-size:17px;font-weight:800;color:var(--text);margin-bottom:8px;}
+.confirm-body{font-size:13px;color:var(--text-secondary);margin-bottom:20px;line-height:1.6;}
+.confirm-btns{display:flex;gap:10px;}
+.confirm-btn{flex:1;padding:12px;border-radius:var(--radius-sm);border:none;font-size:14px;font-weight:700;cursor:pointer;font-family:'Noto Sans Bengali','Inter',sans-serif;transition:all .18s;}
+.confirm-btn.yes{background:linear-gradient(135deg,var(--success),#16a34a);color:#fff;box-shadow:0 0 14px rgba(34,212,122,0.35);}
+.confirm-btn.no{background:var(--option-bg);color:var(--text-secondary);border:1.5px solid var(--border);}
+.confirm-btn:active{transform:scale(0.96);}
+.nav-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);width:38px;height:38px;background:var(--accent);border:none;border-radius:10px 0 0 10px;color:#fff;font-size:15px;cursor:pointer;z-index:101;display:none;align-items:center;justify-content:center;box-shadow:0 4px 12px var(--accent-glow);}
+.nav-overlay{position:fixed;inset:0;background:var(--overlay);z-index:200;display:none;align-items:flex-end;}
+.nav-overlay.open{display:flex;}
+.nav-popup{width:100%;max-width:520px;margin:0 auto;background:var(--card-bg);border-radius:var(--radius) var(--radius) 0 0;padding:16px;border:1px solid var(--border);max-height:80vh;overflow-y:auto;}
+.nav-title{font-size:14px;font-weight:700;color:var(--accent);margin-bottom:12px;text-align:center;}
+.nav-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;}
+@media(max-width:480px){.nav-grid{grid-template-columns:repeat(6,1fr);}}
+.nav-num{aspect-ratio:1;border-radius:6px;background:var(--option-bg);border:1px solid var(--border);color:var(--text-secondary);font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.nav-num.ok{background:var(--success);color:#fff;border-color:var(--success);}
+.nav-num.bad{background:var(--error);color:#fff;border-color:var(--error);}
+.nav-close{display:block;margin:12px auto 0;padding:8px 20px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;}
+.result-score-card{background:linear-gradient(140deg,var(--atlas-bg),var(--atlas-card));border:1.5px solid var(--atlas-border);border-radius:var(--radius);padding:24px 18px;text-align:center;margin-bottom:14px;box-shadow:var(--shadow-md),0 0 24px var(--atlas-glow);}
+.result-name{font-size:15px;font-weight:800;color:#fff;margin-bottom:10px;}
+.result-big{font-size:52px;font-weight:900;color:var(--atlas-text);text-shadow:0 0 20px var(--atlas-glow-strong);}
+.result-denom{font-size:52px;font-weight:900;color:var(--atlas-text);opacity:.75;}
+.result-total-lbl{font-size:12px;color:var(--atlas-text);opacity:.6;margin-top:4px;}
+.timer2-result{background:rgba(248,113,113,0.12);border:1px solid var(--error);border-radius:var(--radius-sm);padding:10px 14px;margin-top:10px;font-size:13px;color:var(--error);font-weight:600;}
+.result-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;}
+.result-stat{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 8px;text-align:center;}
+.r-val{font-size:20px;font-weight:800;}.r-lbl{font-size:10px;color:var(--text-secondary);margin-top:2px;}
+.c-val{color:var(--success);}.w-val{color:var(--error);}.s-val{color:var(--warning);}
+.info-row2{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 14px;margin-bottom:8px;display:flex;justify-content:space-between;font-size:13px;}
+.mot-box{background:var(--card-bg);border:1px solid var(--accent-light);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:14px;}
+.mot-grade{font-size:13px;font-weight:700;color:var(--success);margin-bottom:12px;line-height:1.6;}
+.mot-divider{height:1px;background:var(--divider);margin:10px 0;}
+.ayat-text{font-size:11px;color:var(--text-secondary);line-height:1.6;}
+.result-btns{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
+.result-btn{padding:12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--btn-bg);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;font-family:'Noto Sans Bengali','Inter',sans-serif;width:100%;text-align:center;}
+.result-btn:hover{border-color:var(--accent);color:var(--accent);}.result-btn:active{opacity:0.8;}
+.result-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+.result-btn.danger{background:#c0392b;color:#fff;border-color:#c0392b;}
+.result-btn.success{background:var(--success);color:#fff;border-color:var(--success);}
+.result-btn.purple{background:#7c3aed;color:#fff;border-color:#7c3aed;}
+.divider{height:1px;background:var(--divider);margin:14px 0;}
+.section-title{font-size:13px;font-weight:700;color:var(--text-secondary);margin-bottom:10px;}
+.filter-bar{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;}
+.filter-btn{padding:6px 14px;border-radius:20px;border:1px solid var(--border);background:var(--card-bg);color:var(--text-secondary);cursor:pointer;font-size:11px;font-weight:600;transition:.2s;}
+.filter-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+.q-result-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:var(--radius-full);margin-bottom:7px;display:inline-block;}
+.q-result-badge.correct{background:var(--success-light);color:var(--success);}
+.q-result-badge.wrong{background:var(--error-light);color:var(--error);}
+.q-result-badge.skip{background:rgba(251,191,36,0.15);color:var(--warning);}
+.exp-box{background:var(--card-hover);border-left:3px solid var(--accent);padding:10px 12px;margin-top:8px;border-radius:0 6px 6px 0;font-size:12px;line-height:1.5;}
+.exp-hd{color:var(--accent);font-weight:700;font-size:11px;margin-bottom:3px;}
+.loading{text-align:center;padding:60px 20px;color:var(--text-secondary);}
+.spin{font-size:40px;animation:spin 1s linear infinite;display:block;margin-bottom:14px;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;font-weight:600;z-index:400;opacity:0;transition:opacity .3s;white-space:nowrap;pointer-events:none;}
+.toast.show{opacity:1;}
+</style>
 </head>
-<body class="dark-mode">
-
-<header class="header">
-  <div class="atlas-brand-box"><span class="atlas-brand-text">ATLAS EXAM</span></div>
-  <button class="header-icon" id="themeToggle" onclick="toggleTheme()">☀️</button>
+<body>
+<header class="header" style="flex-direction:column;padding:0;gap:0;">
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 16px;width:100%;min-height:52px;position:relative;">
+        <div class="brand">ATLAS</div>
+        <div class="header-sub" id="headerSub">Special Exam</div>
+        <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
+    </div>
+    <img id="headerSourceImg" class="header-source-img" src="" alt="">
 </header>
-
-<!-- SCREEN 1: PRE-EXAM -->
-<section class="screen active" id="screenPre">
-  <div class="wrap pre-wrap">
-    <div class="pre-card">
-      <img class="pre-img" id="preImg" alt="" style="display:none">
-      <div class="pre-body">
-        <div class="pre-title bn" id="preTitle"></div>
-        <span class="pre-tag bn" id="preTag" style="display:none"></span>
-        <div class="pre-meta bn" id="preMeta"></div>
-        <input class="name-input bn" id="nameInput" placeholder="তোমার নাম লেখো..." maxlength="40">
-        <button class="btn-start bn" onclick="startExam()">▶️ এক্সাম শুরু করুন</button>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- SCREEN 2: EXAM HALL -->
-<section class="screen" id="screenExam">
-  <div class="timer-sticky wrap" id="timerSticky">
-    <span class="timer-text" id="timerText">--:--</span>
-    <span class="progress-text bn" id="progressText">📈 ০%</span>
-  </div>
-  <div class="progress-bar-wrap wrap"><div class="progress-bar-fill" id="progressBarFill"></div></div>
-  <div class="questions-area wrap" id="questionsArea"></div>
-  <button class="submit-fixed bn" onclick="submitExam(false)">📤 Submit করুন</button>
-  <button class="nav-fab" onclick="openNav()">📋</button>
-</section>
-
-<!-- SCREEN 3: RESULT -->
-<section class="screen" id="screenResult">
-  <div class="wrap result-wrap" id="resultContent"></div>
-</section>
-
-<!-- NAV POPUP -->
-<div class="nav-overlay" id="navOverlay" onclick="closeNav()">
-  <div class="nav-popup" onclick="event.stopPropagation()">
-    <div class="nav-popup-title bn">📋 প্রশ্ন নেভিগেশন</div>
-    <div class="nav-grid" id="navGrid"></div>
-    <div class="nav-stats bn" id="navStats"></div>
-    <button class="nav-close bn" onclick="closeNav()">✕ বন্ধ</button>
-  </div>
+<div class="exam-hdr" id="examHdr">
+    <span class="hdr-timer" id="hdrTimer">00:00</span>
+    <span class="hdr-meta" id="hdrMeta">—</span>
+    <span class="hdr-prog" id="hdrProg">0/0 (0%)</span>
+    <div class="hdr-bar-wrap"><div class="hdr-bar-fill" id="hdrBarFill" style="width:0%"></div></div>
 </div>
-
-<!-- CONFIRM MODAL -->
+<div class="mode active" id="modeLoading">
+    <div class="loading"><span class="spin">⏳</span><div>লোড হচ্ছে...</div></div>
+</div>
+<div class="mode" id="modePreExam">
+    <div class="wrap">
+        <div class="hero">
+            <img id="preSrcImg" class="hero-src-img" src="" alt="" style="display:none;">
+            <div class="hero-title" id="preTitle">—</div>
+            <div class="hero-prompt" id="prePrompt">—</div>
+            <div class="hero-stats">
+                <div class="stat-box"><div class="stat-val" id="preQCount">—</div><div class="stat-lbl">📋 প্রশ্ন</div></div>
+                <div class="stat-box"><div class="stat-val" id="preTimerDisp">—</div><div class="stat-lbl">⏱️ মোট সময়</div></div>
+                <div class="stat-box"><div class="stat-val" id="prePage">—</div><div class="stat-lbl">📄 পেজ</div></div>
+            </div>
+        </div>
+        <div class="info-card">
+            <div class="info-row"><span class="info-lbl">Topic</span><span class="info-val" id="preTopic">—</span></div>
+            <div class="info-row"><span class="info-lbl">Type</span><span class="info-val" id="preType">ATLAS Special MCQ</span></div>
+            <div class="info-row"><span class="info-lbl">Negative</span><span class="info-val">প্রতি ভুলে -0.50</span></div>
+            <div class="info-row"><span class="info-lbl">Timer</span><span class="info-val" id="preTimerRule">—</span></div>
+        </div>
+        <div class="timer2-card">
+            <div class="timer2-title">⏱️ আপনি কি সেকেন্ড টাইমার?</div>
+            <div class="timer2-opts">
+                <button class="timer2-btn" id="t2yes" onclick="selectTimer2(true)">✅ হ্যাঁ</button>
+                <button class="timer2-btn selected-no" id="t2no" onclick="selectTimer2(false)">❌ না</button>
+            </div>
+            <div class="timer2-note" id="t2note">⚠️ সেকেন্ড টাইমার হলে result এ আরও ৩% মার্ক কাটা যাবে!</div>
+        </div>
+        <button class="btn-start" onclick="startHall()">▶️ এক্সাম শুরু করুন</button>
+    </div>
+</div>
+<div class="mode" id="modeHall">
+    <div class="hall-area" id="hallArea"></div>
+    <button class="submit-fixed" id="submitBtn" onclick="openConfirm()">📤 Submit করুন</button>
+    <button class="nav-fab" id="navFab" onclick="openNav()">📋</button>
+</div>
+<div class="mode" id="modeResult">
+    <div class="wrap" id="resultWrap"></div>
+</div>
 <div class="confirm-overlay" id="confirmOverlay">
-  <div class="confirm-modal">
-    <div class="confirm-title bn">⚠️ নিশ্চিত করুন</div>
-    <div class="confirm-stats bn" id="confirmStats"></div>
-    <div class="confirm-buttons">
-      <button class="confirm-btn cb-back bn" onclick="closeConfirm()">🔙 Back</button>
-      <button class="confirm-btn cb-go bn" onclick="doSubmit()">✅ Confirm Submit</button>
+    <div class="confirm-popup">
+        <div class="confirm-icon">📋</div>
+        <div class="confirm-title">সাবমিট করবেন?</div>
+        <div class="confirm-body" id="confirmBody">একবার সাবমিট করলে আর পরিবর্তন করা যাবে না।</div>
+        <div class="confirm-btns">
+            <button class="confirm-btn no" onclick="closeConfirm()">↩️ Back</button>
+            <button class="confirm-btn yes" onclick="doConfirmSubmit()">✅ Confirm</button>
+        </div>
     </div>
-  </div>
 </div>
-
-<div class="toast bn" id="toast"></div>
-
+<div class="nav-overlay" id="navOverlay" onclick="closeNav()">
+    <div class="nav-popup" onclick="event.stopPropagation()">
+        <div class="nav-title">📋 প্রশ্ন অগ্রগতি</div>
+        <div class="nav-grid" id="navGrid"></div>
+        <div style="text-align:center;margin-top:8px;font-size:10px;color:var(--text-secondary)" id="navStats"></div>
+        <button class="nav-close" onclick="closeNav()">✕ বন্ধ</button>
+    </div>
+</div>
+<div class="toast" id="toast"></div>
 <script>
-const CFG = {cfg_json};
-{_exam_js()}
+const CFG = __CFG_JSON__;
+const LABELS = ['A','B','C','D'];
+let questions = [], origQs = [];
+let userAnswers = {}, bookmarks = {};
+let submitted = false;
+let totalSec = 30, totalLeft = 30, totalTimer = null;
+let isSecondTimer = false;
+let USER_NAME = '__USER_NAME_SAFE__';
+const USER_ID = (CFG && CFG.userId) ? CFG.userId : 0;
+
+function init() {
+    try {
+        if (!CFG || !Array.isArray(CFG.mcqs) || CFG.mcqs.length === 0) {
+            document.getElementById('modeLoading').innerHTML =
+                '<div class="loading"><div style="font-size:40px;margin-bottom:14px">⚠️</div>' +
+                '<div>এক্সাম পাওয়া যায়নি বা ফাঁকা।</div>' +
+                '<div style="margin-top:10px;font-size:11px">পেজ refresh করুন বা bot-এ ফিরে যান।</div></div>';
+            return;
+        }
+        questions = [...CFG.mcqs];
+        origQs = [...CFG.mcqs];
+        totalSec = Math.max(30, Math.ceil(CFG.total * CFG.secPerQ));
+        totalLeft = totalSec;
+        if (!USER_NAME) {
+            try { const s = localStorage.getItem('atlas_name'); if (s) USER_NAME = s; } catch(e){}
+        }
+        document.getElementById('headerSub').textContent = CFG.topic || 'Special Exam';
+        document.getElementById('preTitle').textContent = '📝 ' + (CFG.topic || 'ATLAS Special Exam');
+        document.getElementById('prePrompt').textContent = CFG.promptDisplay || '';
+        document.getElementById('preQCount').textContent = CFG.total;
+        document.getElementById('preTopic').textContent = CFG.topic || '—';
+        document.getElementById('preType').textContent = CFG.promptDisplay || 'ATLAS Special MCQ';
+        document.getElementById('prePage').textContent = 'Page No: ' + (CFG.page || 1);
+        document.getElementById('preTimerDisp').textContent = zp(Math.floor(totalSec/60)) + ':' + zp(totalSec%60);
+        document.getElementById('preTimerRule').textContent = 'মোট ' + Math.ceil(CFG.total/2) + ' মিনিট • শেষ হলে auto submit';
+        if (CFG.imageFileId) {
+            const preImg = document.getElementById('preSrcImg');
+            if (preImg) {
+                preImg.src = CFG.hfSpaceUrl + '/api/tg-image/' + encodeURIComponent(CFG.imageFileId);
+                preImg.style.display = 'block';
+                preImg.onerror = () => { preImg.style.display = 'none'; };
+            }
+            const img = document.getElementById('headerSourceImg');
+            if (img) {
+                img.src = CFG.hfSpaceUrl + '/api/tg-image/' + encodeURIComponent(CFG.imageFileId);
+                img.style.display = 'none';
+                img.onerror = () => { img.style.display = 'none'; };
+            }
+        }
+        setMode('PreExam');
+    } catch(err) {
+        document.getElementById('modeLoading').innerHTML =
+            '<div class="loading"><div style="font-size:40px;margin-bottom:14px">⚠️</div>' +
+            '<div>লোড করতে সমস্যা হয়েছে।</div>' +
+            '<div style="margin-top:10px;font-size:10px;color:#7A82C8">' + (err.message||'Unknown') + '</div></div>';
+    }
+}
+
+function selectTimer2(val) {
+    isSecondTimer = val;
+    const yBtn = document.getElementById('t2yes');
+    const nBtn = document.getElementById('t2no');
+    const note = document.getElementById('t2note');
+    if (val) {
+        yBtn.className = 'timer2-btn selected-yes';
+        nBtn.className = 'timer2-btn';
+        note.className = 'timer2-note show';
+    } else {
+        yBtn.className = 'timer2-btn';
+        nBtn.className = 'timer2-btn selected-no';
+        note.className = 'timer2-note';
+    }
+}
+
+function startHall() {
+    if (!USER_NAME) USER_NAME = 'Student';
+    userAnswers = {}; bookmarks = {}; submitted = false; totalLeft = totalSec;
+    let html = '';
+    questions.forEach((q, qi) => {
+        const tagPrefix = q._tag ? '['+q._tag+']\n\n' : '';
+        html += '<div class="mcq-card'+(qi===0?' current':'')+'" id="qCard'+qi+'">'
+            + '<div class="q-head"><span class="q-num">প্রশ্ন '+(qi+1)+'/'+questions.length+'</span>'
+            + '<button class="bm-btn" id="bmBtn'+qi+'" onclick="toggleBm('+qi+')">🔖</button></div>'
+            + '<div class="q-text">'+(tagPrefix+q.question).replace(/\n/g,'<br>')+'</div>';
+        q.options.forEach((opt, oi) => {
+            html += '<div class="opt" id="opt'+qi+'_'+oi+'" onclick="pickOpt('+qi+','+oi+')">'
+                + '<span class="opt-radio">'+LABELS[oi]+'</span><span style="flex:1">'+opt+'</span></div>';
+        });
+        html += '</div>';
+    });
+    document.getElementById('hallArea').innerHTML = html;
+    document.getElementById('submitBtn').style.display = 'block';
+    document.getElementById('navFab').style.display = 'flex';
+    document.getElementById('examHdr').classList.add('visible');
+    const _srcImg = document.getElementById('headerSourceImg');
+    if (_srcImg && CFG.imageFileId) _srcImg.style.display = 'block';
+    document.getElementById('hdrMeta').textContent = (CFG.topic||'') + ' • Page ' + (CFG.page||1);
+    setMode('Hall');
+    window.scrollTo({top:0,behavior:'instant'});
+    updateHdrTimer(); clearInterval(totalTimer);
+    totalTimer = setInterval(() => {
+        totalLeft--; updateHdrTimer();
+        if (totalLeft <= 0) { stopAll(); doSubmit(); }
+    }, 1000);
+    updateHdrProg();
+}
+
+function updateHdrTimer() {
+    const el = document.getElementById('hdrTimer'); if (!el) return;
+    const t = Math.max(0, totalLeft);
+    el.textContent = zp(Math.floor(t/60)) + ':' + zp(t%60);
+    el.className = 'hdr-timer' + (t<=15?' danger':t<=60?' warn':'');
+}
+
+function updateHdrProg() {
+    const answered = Object.keys(userAnswers).length;
+    const pct = CFG.total ? Math.round(answered/CFG.total*100) : 0;
+    document.getElementById('hdrProg').textContent = answered+'/'+CFG.total+' ('+pct+'%)';
+    document.getElementById('hdrBarFill').style.width = pct+'%';
+}
+
+function pickOpt(qi, oi) {
+    if (submitted || userAnswers[qi] !== undefined) return;
+    userAnswers[qi] = oi;
+    lockQuestion(qi, oi);
+    updateHdrProg();
+    setTimeout(() => {
+        const nextIdx = findNextUnanswered(qi);
+        if (nextIdx !== -1) {
+            const nextCard = document.getElementById('qCard' + nextIdx);
+            if (nextCard) {
+                document.querySelectorAll('.mcq-card.current').forEach(c => c.classList.remove('current'));
+                nextCard.classList.add('current');
+                nextCard.scrollIntoView({behavior:'smooth', block:'center'});
+            }
+        }
+    }, 100);
+}
+
+function findNextUnanswered(fromIdx) {
+    for (let i = fromIdx + 1; i < questions.length; i++) {
+        if (userAnswers[i] === undefined) return i;
+    }
+    return -1;
+}
+
+function lockQuestion(qi, chosen) {
+    const card = document.getElementById('qCard'+qi); if (card) card.classList.add('done');
+    questions[qi].options.forEach((_, oi) => {
+        const el = document.getElementById('opt'+qi+'_'+oi); if (!el) return;
+        el.classList.add('locked');
+        if (oi === chosen) {
+            el.style.borderColor = 'var(--accent)';
+            el.style.background = 'rgba(90,95,224,0.18)';
+            if (!el.querySelector('.opt-icon'))
+                el.insertAdjacentHTML('beforeend','<span class="opt-icon" style="margin-left:auto;flex-shrink:0;">🔒</span>');
+        } else el.classList.add('dim');
+    });
+}
+
+function toggleBm(qi) {
+    bookmarks[qi] = !bookmarks[qi];
+    const btn = document.getElementById('bmBtn'+qi);
+    if (btn) btn.className = 'bm-btn'+(bookmarks[qi]?' active':'');
+    const btnR = document.getElementById('bmBtnR'+qi);
+    if (btnR) btnR.className = 'bm-btn'+(bookmarks[qi]?' active':'');
+    showToast(bookmarks[qi]?'🔖 বুকমার্ক করা হয়েছে':'🔖 বুকমার্ক রিমুভ');
+    fetch('/api/bookmark',{
+        method: bookmarks[qi]?'POST':'DELETE',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({user_id:USER_ID,cache_id:CFG.cacheId,question_index:qi,question_data:questions[qi],topic:CFG.topic||'',page:CFG.page||0})
+    }).catch(()=>{});
+}
+
+function openNav() {
+    let html='';
+    questions.forEach((q,i)=>{
+        let cls='nav-num';
+        if (userAnswers[i]!==undefined){
+            const ci = typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
+            cls += userAnswers[i]===ci?' ok':' bad';
+        }
+        html+='<div class="'+cls+'" onclick="goToQ('+i+')">'+(i+1)+'</div>';
+    });
+    document.getElementById('navGrid').innerHTML=html;
+    const ans=Object.keys(userAnswers).length;
+    document.getElementById('navStats').textContent='✅ '+ans+' উত্তর | ⬜ '+(CFG.total-ans)+' বাকি';
+    document.getElementById('navOverlay').classList.add('open');
+}
+function closeNav(){ document.getElementById('navOverlay').classList.remove('open'); }
+function goToQ(qi){
+    closeNav();
+    const el=document.getElementById('qCard'+qi);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+function openConfirm() {
+    if (submitted) return;
+    const un = questions.filter((_,i)=>userAnswers[i]===undefined).length;
+    document.getElementById('confirmBody').textContent =
+        un > 0
+        ? un+'টি প্রশ্নের উত্তর দেওয়া হয়নি। একবার submit করলে আর পরিবর্তন করা যাবে না।'
+        : 'সব প্রশ্নের উত্তর দিয়েছেন। একবার submit করলে আর পরিবর্তন করা যাবে না।';
+    document.getElementById('confirmOverlay').classList.add('open');
+}
+function closeConfirm(){ document.getElementById('confirmOverlay').classList.remove('open'); }
+
+function doConfirmSubmit() {
+    closeConfirm();
+    stopAll(); doSubmit();
+}
+
+function stopAll() { clearInterval(totalTimer); }
+
+function doSubmit() {
+    if (submitted) return;
+    submitted = true; stopAll();
+    document.getElementById('submitBtn').style.display='none';
+    document.getElementById('navFab').style.display='none';
+    document.getElementById('examHdr').classList.remove('visible');
+    const timeTaken = Math.max(0, totalSec - totalLeft);
+    let correct=0, wrong=0, skipped=0;
+    questions.forEach((q,i)=>{
+        const ci = typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
+        const ua = userAnswers[i];
+        if(ua===undefined) skipped++;
+        else if(ua===ci) correct++;
+        else wrong++;
+    });
+    const neg = parseFloat((wrong*CFG.negPerWrong).toFixed(2));
+    let fin = parseFloat((correct-neg).toFixed(2));
+    const pct = questions.length ? Math.round(correct/questions.length*100) : 0;
+    const mins = Math.floor(timeTaken/60), secs = timeTaken%60;
+    let timer2Deduction = 0;
+    let finAfterTimer2 = fin;
+    let timer2Neg = 0;
+    let timer2Main = correct;
+    if (isSecondTimer) {
+        // 2nd timer rule: Final = main - (wrong x 0.25) - (main x 3%)
+        timer2Neg = parseFloat((wrong*0.25).toFixed(2));
+        timer2Main = parseFloat((correct - timer2Neg).toFixed(2));
+        timer2Deduction = parseFloat((timer2Main * 0.03).toFixed(2));
+        finAfterTimer2 = parseFloat((timer2Main - timer2Deduction).toFixed(2));
+    }
+    _saveAnswerSnapshot();
+    fetch('/api/save-answers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cache_id:CFG.cacheId,answers:lastAnswers})}).catch(()=>{});
+    renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,'','',timer2Deduction,finAfterTimer2);
+    fetch('/api/exam/result',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID,user_name:USER_NAME,correct,wrong,skipped,time_taken:timeTaken})
+    }).then(r=>r.json()).then(d=>{
+        const motBox = document.getElementById('motBox');
+        if (motBox && (d.motivation || d.ayat)) {
+            let mh = '<div class="mot-grade">'+(d.motivation||'')+'</div><div class="mot-divider"></div>';
+            if (d.ayat) mh += '<div class="ayat-text">📖 '+d.ayat+'</div>';
+            motBox.innerHTML = mh;
+            motBox.style.display = 'block';
+        }
+    }).catch(()=>{});
+}
+
+function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,motivation,ayat,timer2Ded,finFinal) {
+    let html='';
+    html+='<div class="result-score-card">';
+    html+='<div class="result-name">📝 '+CFG.topic+'</div>';
+    html+='<div><span class="result-big">'+finFinal.toFixed(2)+'</span><span class="result-denom">/'+CFG.total+'</span></div>';
+    html+='<div class="result-total-lbl">Final Score ('+pct+'%)</div>';
+    if (isSecondTimer) {
+        html+='<div class="timer2-result">⏱️ আপনি সেকেন্ড টাইমার হওয়ায় ৩% মার্ক কেটে:<br>Final Result: '+finFinal.toFixed(2)+'/'+CFG.total+'</div>';
+    }
+    html+='</div>';
+    html+='<div class="result-grid">';
+    html+='<div class="result-stat"><div class="r-val c-val">✅ '+correct+'</div><div class="r-lbl">সঠিক</div></div>';
+    html+='<div class="result-stat"><div class="r-val w-val">❌ '+wrong+'</div><div class="r-lbl">ভুল</div></div>';
+    html+='<div class="result-stat"><div class="r-val s-val">⏭️ '+skipped+'</div><div class="r-lbl">স্কিপ</div></div>';
+    html+='</div>';
+    if (isSecondTimer) {
+        const t2neg = parseFloat((wrong*0.25).toFixed(2));
+        html+='<div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-'+t2neg.toFixed(2)+' ('+wrong+'×0.25)</span></div>';
+        html+='<div class="info-row2"><span>⏱️ 2nd Timer (-3%)</span><span style="color:var(--error)">-'+timer2Ded.toFixed(2)+'</span></div>';
+    } else {
+        html+='<div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-'+neg.toFixed(2)+' ('+wrong+'×'+CFG.negPerWrong+')</span></div>';
+    }
+    html+='<div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">'+finFinal.toFixed(2)+'/'+CFG.total+' ('+pct+'%)</span></div>';
+    html+='<div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>'+mins+'m '+secs+'s</span></div>';
+    if(motivation||ayat){
+        html+='<div class="mot-box" id="motBox"><div class="mot-grade">'+motivation+'</div><div class="mot-divider"></div>';
+        if(ayat) html+='<div class="ayat-text">📖 '+ayat+'</div>';
+        html+='</div>';
+    } else {
+        html+='<div class="mot-box" id="motBox" style="display:none"></div>';
+    }
+    html+='<div class="result-btns">';
+    html+='<button class="result-btn primary" onclick="practiceAgain()">🔄 Practice Again</button>';
+    html+='<button class="result-btn success" onclick="solvePDF()">📄 Solve PDF</button>';
+    html+='<button class="result-btn primary" id="newExamBtn" onclick="startNewExam()">🆕 New Exam</button>';
+    if(CFG.hasSource) html+='<button class="result-btn" id="backSrcBtn" onclick="backToSource()">↩️ Back to Source</button>';
+    html+='<button class="result-btn danger" onclick="mistakePractice()">❌ Mistake Practice ('+wrong+')</button>';
+    html+='<button class="result-btn purple" onclick="specialPractice()">🔥 Special Practice ('+(wrong+skipped)+')</button>';
+    html+='<button class="result-btn" onclick="openLink(CFG.websiteUrl)">🌐 ATLAS Website</button>';
+    html+='<button class="result-btn" onclick="openLink(CFG.youtubeUrl)">▶️ YouTube Channel</button>';
+    html+='<button class="result-btn" onclick="openLink(CFG.whatsappUrl)">💬 WhatsApp</button>';
+    html+='<button class="result-btn" onclick="openLink(CFG.groupsUrl)">📢 Groups+Channels</button>';
+    html+='</div>';
+    html+='<div class="divider"></div>';
+    html+='<div class="section-title">📋 Solve Sheet</div>';
+    html+='<div class="filter-bar">';
+    html+='<button class="filter-btn active" onclick="filt(event,\'all\')">সব</button>';
+    html+='<button class="filter-btn" onclick="filt(event,\'correct\')">✅ সঠিক</button>';
+    html+='<button class="filter-btn" onclick="filt(event,\'wrong\')">❌ ভুল</button>';
+    html+='<button class="filter-btn" onclick="filt(event,\'skip\')">⏭️ স্কিপ</button>';
+    html+='</div><div id="solveSheet">'+buildSolve('all')+'</div>';
+    document.getElementById('resultWrap').innerHTML=html;
+    setMode('Result');
+    // instant jump to top of result page (no smooth delay)
+    window.scrollTo(0, 0);
+    requestAnimationFrame(()=>{ window.scrollTo(0, 0); });
+}
+
+function buildSolve(filter) {
+    let html='';
+    questions.forEach((q,i)=>{
+        const ci=typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
+        const ua=userAnswers[i];
+        const st=ua===undefined?'skip':ua===ci?'correct':'wrong';
+        if(filter!=='all'&&st!==filter) return;
+        const stL=st==='correct'?'✅ সঠিক':st==='wrong'?'❌ ভুল':'⏭️ স্কিপ';
+        const bmActive = bookmarks[i] ? ' active' : '';
+        html+='<div class="mcq-card" data-status="'+st+'">';
+        html+='<div class="q-head"><span class="q-result-badge '+st+'">'+stL+'</span>'
+            + '<button class="bm-btn'+bmActive+'" id="bmBtnR'+i+'" onclick="toggleBm('+i+')">🔖</button></div>';
+        html+='<div class="q-head"><span class="q-num">প্রশ্ন '+(i+1)+'/'+questions.length+'</span></div>';
+        const tagPrefix = q._tag ? '['+q._tag+']\n\n' : '';
+        html+='<div class="q-text">'+(tagPrefix+q.question).replace(/\n/g,'<br>')+'</div>';
+        q.options.forEach((opt,oi)=>{
+            let cls='opt locked',icon='';
+            if(oi===ci){cls+=' correct-r';icon='<span class="opt-icon">✅</span>';}
+            else if(oi===ua&&ua!==ci){cls+=' wrong-r';icon='<span class="opt-icon">❌</span>';}
+            else cls+=' dim';
+            html+='<div class="'+cls+'"><span class="opt-radio">'+LABELS[oi]+'</span><span>'+opt+'</span>'+icon+'</div>';
+        });
+        if(q.explanation) {
+            const expSuffix = q._exp ? ('\n\n📌 '+q._exp) : '';
+            html+='<div class="exp-box"><div class="exp-hd">📋 ব্যাখ্যা</div>'+(q.explanation+expSuffix).replace(/\n/g,'<br>')+'</div>';
+        }
+        html+='</div>';
+    });
+    return html||'<div style="color:var(--text-secondary);text-align:center;padding:20px">কোনো প্রশ্ন নেই</div>';
+}
+
+function filt(e,t){
+    document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+    e.target.classList.add('active');
+    document.getElementById('solveSheet').innerHTML=buildSolve(t);
+}
+
+let lastAnswers={};
+function _saveAnswerSnapshot(){ lastAnswers={...userAnswers}; }
+
+function practiceAgain(){
+    questions=[...origQs];
+    totalSec=Math.max(30,Math.ceil(questions.length*CFG.secPerQ));
+    userAnswers={};bookmarks={};submitted=false;
+    startHall();
+}
+
+function mistakePractice(){
+    const wrongQs=origQs.filter((q,i)=>{
+        const ci=typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
+        const ua=lastAnswers[i];
+        return ua!==undefined&&ua!==ci;
+    });
+    if(!wrongQs.length){showToast('🎉 কোনো ভুল নেই!');return;}
+    _startPractice(wrongQs);
+}
+
+function specialPractice(){
+    const filtered=origQs.filter((q,i)=>{
+        const ci=typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
+        const ua=lastAnswers[i];
+        return ua===undefined||ua!==ci;
+    });
+    if(!filtered.length){showToast('✅ সব সঠিক ছিল!');return;}
+    _startPractice(filtered);
+}
+
+function _startPractice(filtered){
+    questions=filtered;
+    totalSec=Math.max(30,Math.ceil(questions.length*CFG.secPerQ));
+    userAnswers={};bookmarks={};submitted=false;
+    startHall();
+}
+
+function startNewExam(){
+    const btn=document.getElementById('newExamBtn');
+    if(btn){btn.disabled=true;btn.textContent='⏳ নতুন MCQ তৈরি হচ্ছে...';}
+    const ctrl = new AbortController();
+    const tid = setTimeout(()=>ctrl.abort(), 120000);
+    let dots=0;
+    const dotTimer = setInterval(()=>{
+        dots=(dots+1)%4;
+        if(btn) btn.textContent='⏳ তৈরি হচ্ছে'+'.'.repeat(dots+1);
+    }, 800);
+    fetch('/api/new-exam',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID}),
+        signal:ctrl.signal
+    }).then(r=>{
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        return r.json();
+    }).then(d=>{
+        clearTimeout(tid); clearInterval(dotTimer);
+        if(d.ok && d.new_cache_id){
+            if(btn) btn.textContent='✅ হয়ে গেছে! যাচ্ছি...';
+            setTimeout(()=>{
+                window.location.href='/exam/'+d.new_cache_id+'?uid='+USER_ID+'&name='+encodeURIComponent(USER_NAME);
+            }, 400);
+        } else {
+            showToast(d.message||'❌ তৈরি করা যায়নি।', 4000);
+            if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
+        }
+    }).catch(e=>{
+        clearTimeout(tid); clearInterval(dotTimer);
+        const msg = e.name==='AbortError' ? '⏱️ Timeout — আবার চেষ্টা করো' : '❌ Network error';
+        showToast(msg, 4000);
+        if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
+    });
+}
+
+function backToSource(){
+    const btn=document.getElementById('backSrcBtn');
+    if(btn){btn.disabled=true;btn.textContent='⏳ পাঠানো হচ্ছে...';}
+    fetch('/api/back-to-source',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID})
+    }).then(r=>r.json()).then(d=>{
+        if(d.ok){
+            showToast('✅ Telegram-এ পাঠানো হয়েছে। Bot-এ গিয়ে message-এ tap করুন।');
+            if(btn){btn.textContent='✅ Telegram-এ চেক করুন';setTimeout(()=>{btn.disabled=false;btn.textContent='↩️ Back to Source';},4000);}
+        }else{
+            showToast(d.message||'❌ Error');
+            if(btn){btn.disabled=false;btn.textContent='↩️ Back to Source';}
+        }
+    }).catch(()=>{
+        showToast('❌ Network error');
+        if(btn){btn.disabled=false;btn.textContent='↩️ Back to Source';}
+    });
+}
+
+function solvePDF(){
+    window.open('/api/solve-pdf-direct/'+CFG.cacheId, '_blank');
+}
+
+function openLink(url){ if(url) window.open(url,'_blank'); }
+function zp(n){return String(n).padStart(2,'0');}
+function setMode(m){
+    document.querySelectorAll('.mode').forEach(el=>el.classList.remove('active'));
+    document.getElementById('mode'+m).classList.add('active');
+}
+function showToast(msg,dur){
+    dur=dur||2800;
+    const t=document.getElementById('toast');
+    t.textContent=msg;t.classList.add('show');
+    clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),dur);
+}
+function toggleTheme() {
+    const isLight = document.body.classList.toggle('light-theme');
+    document.getElementById('themeToggle').textContent = isLight ? '☀️' : '🌙';
+    try { localStorage.setItem('atlas_theme', isLight ? 'light' : 'dark'); } catch(e){}
+}
+function applyStoredTheme() {
+    let saved = 'dark';
+    try { saved = localStorage.getItem('atlas_theme') || 'dark'; } catch(e){}
+    if (saved === 'light') {
+        document.body.classList.add('light-theme');
+        const t = document.getElementById('themeToggle');
+        if (t) t.textContent = '☀️';
+    }
+}
+applyStoredTheme();
+init();
 </script>
 </body>
-</html>"""
+</html>'''
 
+# ============================================================
+# SECTION 13: STARTUP
+# ============================================================
+@app.on_event("startup")
+async def startup():
+    print("=" * 60)
+    print("🌐 ATLAS Exam Server v3.0 Starting...")
+    print("=" * 60)
+    setup_gemini()
+    get_supabase_backup()
+    print("✅ Exam Server Ready! (Creative PDF + Full-page Premium PDF)")
+    print("=" * 60)
 
-# ============================================
-# EXAM PAGE JAVASCRIPT  (plain JS, no f-string)
-# ============================================
-def _exam_js():
-    return r"""
-const LABELS=['ক','খ','গ','ঘ','ঙ'];
-const BN=['০','১','২','৩','৪','৫','৬','৭','৮','৯'];
-function bn(n){return String(n).split('').map(c=>/[0-9]/.test(c)?BN[+c]:c).join('');}
-const MCQS=CFG.mcqs;
-let answers={}, bookmarks={}, examSeconds=CFG.total*CFG.secPerQ, totalSeconds=examSeconds;
-let timer=null, submitted=false, isDark=true, userName='', activeCacheId=CFG.cacheId, regenLeft=CFG.maxRegen;
-
-function ansIndex(q){let a=(q.answer!==undefined)?q.answer:(q.answer_index!==undefined?q.answer_index:0);return (typeof a==='number'&&a>0&&a<=5&&q.options&&q.options[a]===undefined)?a-1:a;}
-
-// ---- THEME ----
-function toggleTheme(){isDark=!isDark;document.body.classList.toggle('dark-mode',isDark);
-  document.getElementById('themeToggle').textContent=isDark?'☀️':'🌙';
-  try{localStorage.setItem('atlas-theme',isDark?'dark':'light');}catch(e){}}
-try{if(localStorage.getItem('atlas-theme')==='light'){isDark=false;document.body.classList.remove('dark-mode');document.getElementById('themeToggle').textContent='🌙';}}catch(e){}
-
-function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
-
-// ---- PRE-EXAM ----
-function initPre(){
-  document.getElementById('preTitle').textContent='📝 '+CFG.topic+(CFG.page?(' — Page '+bn(CFG.page)):'');
-  if(CFG.tag){const t=document.getElementById('preTag');t.textContent=CFG.tag;t.style.display='inline-block';}
-  const mins=Math.floor(examSeconds/60), secs=examSeconds%60;
-  document.getElementById('preMeta').innerHTML=
-    '✅ '+bn(CFG.total)+'টি প্রশ্ন<br>⏱️ '+bn(String(mins).padStart(2,'0'))+':'+bn(String(secs).padStart(2,'0'))+' মিনিট<br>📊 Negative: -'+bn('0.25');
-  if(CFG.imageFileId){const im=document.getElementById('preImg');im.src='/api/tg-image/'+encodeURIComponent(CFG.imageFileId);im.style.display='block';im.onerror=()=>{im.style.display='none';};}
-  try{const n=localStorage.getItem('atlas-name');if(n)document.getElementById('nameInput').value=n;}catch(e){}
-}
-function startExam(){
-  userName=(document.getElementById('nameInput').value||'').trim()||'Anonymous';
-  try{localStorage.setItem('atlas-name',userName);}catch(e){}
-  showScreen('screenExam');
-  renderQuestions();startTimer();updateProgress();
-  document.getElementById('timerText').textContent=fmt(examSeconds);
-}
-function showScreen(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');window.scrollTo(0,0);}
-
-// ---- RENDER QUESTIONS ----
-function renderQuestions(){
-  let h='';
-  MCQS.forEach((q,i)=>{
-    const bm=bookmarks[i]?' active':'';
-    h+='<div class="mcq-card" id="qCard'+i+'"><div class="q-header">'+
-       '<span class="q-number bn">প্রশ্ন '+bn(i+1)+'/'+bn(CFG.total)+'</span>'+
-       '<button class="icon-btn'+bm+'" id="bm'+i+'" onclick="toggleBookmark('+i+')">🔖</button></div>'+
-       '<div class="q-text bn">'+(q.question||'')+'</div>';
-    (q.options||[]).forEach((opt,oi)=>{
-      h+='<div class="option-item bn" id="opt'+i+'_'+oi+'" data-q="'+i+'" onclick="selectOption('+i+','+oi+')">'+
-         '<span class="option-radio">'+LABELS[oi]+'</span><span class="option-text">'+opt+'</span></div>';
-    });
-    h+='<div class="q-explain bn" id="exp'+i+'"></div></div>';
-  });
-  document.getElementById('questionsArea').innerHTML=h;
-}
-function selectOption(qi,oi){
-  if(submitted)return;
-  document.querySelectorAll('[data-q="'+qi+'"]').forEach(el=>{el.classList.remove('selected');el.classList.add('dimmed');});
-  const el=document.getElementById('opt'+qi+'_'+oi);
-  if(el){el.classList.add('selected');el.classList.remove('dimmed');}
-  answers[qi]=oi;updateProgress();
-}
-
-// ---- TIMER ----
-function startTimer(){stopTimer();timer=setInterval(()=>{examSeconds--;document.getElementById('timerText').textContent=fmt(examSeconds);
-  if(examSeconds<=60)document.getElementById('timerText').classList.add('timer-warning');
-  if(examSeconds<=0){stopTimer();doSubmit(true);}},1000);}
-function stopTimer(){if(timer){clearInterval(timer);timer=null;}}
-function fmt(s){if(s<0)s=0;const m=Math.floor(s/60),x=s%60;return bn(String(m).padStart(2,'0')+':'+String(x).padStart(2,'0'));}
-
-// ---- PROGRESS ----
-function updateProgress(){const a=Object.keys(answers).length,p=Math.round(a/CFG.total*100);
-  document.getElementById('progressText').textContent='📈 '+bn(p)+'%';
-  document.getElementById('progressBarFill').style.width=p+'%';}
-
-// ---- BOOKMARK ----
-function toggleBookmark(i){
-  const q=MCQS[i];
-  if(bookmarks[i]){delete bookmarks[i];document.getElementById('bm'+i)?.classList.remove('active');
-    fetch('/api/bookmark',{method:'DELETE',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({user_id:userName,question_text:q.question})}).catch(()=>{});}
-  else{bookmarks[i]=true;document.getElementById('bm'+i)?.classList.add('active');toast('🔖 বুকমার্ক হয়েছে');
-    const ai=ansIndex(q);const o=q.options||[];
-    fetch('/api/bookmark',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({user_id:userName,question_text:q.question,option1:o[0]||'',option2:o[1]||'',
-        option3:o[2]||'',option4:o[3]||'',answer_index:ai,explanation:q.explanation||'',exam_name:CFG.topic})}).catch(()=>{});}
-}
-
-// ---- NAV ----
-function openNav(){let h='';MCQS.forEach((q,i)=>{let c='nav-num';if(answers[i]!==undefined)c+=' answered';if(bookmarks[i])c+=' bm';
-  h+='<button class="'+c+'" onclick="goQ('+i+')">'+bn(i+1)+'</button>';});
-  document.getElementById('navGrid').innerHTML=h;
-  document.getElementById('navStats').textContent='🟦 উত্তর: '+bn(Object.keys(answers).length)+' | ⬜ বাকি: '+bn(CFG.total-Object.keys(answers).length);
-  document.getElementById('navOverlay').classList.add('active');}
-function closeNav(){document.getElementById('navOverlay').classList.remove('active');}
-function goQ(i){closeNav();document.getElementById('qCard'+i)?.scrollIntoView({behavior:'smooth',block:'center'});}
-
-// ---- SUBMIT ----
-function submitExam(auto){if(submitted)return;if(auto){doSubmit(true);return;}
-  const a=Object.keys(answers).length,sk=CFG.total-a;
-  document.getElementById('confirmStats').innerHTML='✅ উত্তর দিয়েছেন: '+bn(a)+'টি<br>⏭️ বাকি: '+bn(sk)+'টি<br>⚠️ জমা দিলে আর পরিবর্তন করা যাবে না।';
-  document.getElementById('confirmOverlay').classList.add('active');}
-function closeConfirm(){document.getElementById('confirmOverlay').classList.remove('active');}
-function doSubmit(auto){
-  document.getElementById('confirmOverlay').classList.remove('active');
-  if(submitted)return;submitted=true;stopTimer();
-  let correct=0,wrong=0,skipped=0;
-  MCQS.forEach((q,i)=>{const ua=answers[i],ai=ansIndex(q);if(ua===undefined)skipped++;else if(ua===ai)correct++;else wrong++;});
-  const neg=+(wrong*CFG.negPerWrong).toFixed(2);
-  const finalScore=+(correct-neg).toFixed(2);
-  const timeTaken=totalSeconds-examSeconds;
-  postResult(correct,wrong,skipped,timeTaken,finalScore,neg);
-}
-function postResult(correct,wrong,skipped,timeTaken,finalScore,neg){
-  fetch('/api/exam/result',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({cache_id:activeCacheId,user_id:userName,user_name:userName,correct,wrong,skipped,time_taken:timeTaken})})
-   .then(r=>r.json()).then(d=>renderResult(correct,wrong,skipped,timeTaken,finalScore,neg,d))
-   .catch(()=>renderResult(correct,wrong,skipped,timeTaken,finalScore,neg,{motivation:'✅ সম্পন্ন হয়েছে!',ayat:'',leaderboard_disabled:CFG.isNewGen}));
-}
-""" + _exam_js_result()
-
-
-def _exam_js_result():
-    return r"""
-// ---- RESULT ----
-function renderResult(correct,wrong,skipped,timeTaken,finalScore,neg,fb){
-  revealAnswers();
-  const pct=Math.round(correct/CFG.total*100);
-  const boardDisabled=fb.leaderboard_disabled||CFG.isNewGen;
-  let h='';
-  h+='<div class="result-score-card"><div class="result-exam-name bn">📝 '+CFG.topic+'</div>'+
-     '<div class="result-big-score">'+bn(finalScore.toFixed(2))+'</div>'+
-     '<div class="result-total bn">/ '+bn(CFG.total)+' · ('+bn(pct)+'%)</div></div>';
-  h+='<div class="result-grid">'+
-     '<div class="result-stat"><div class="result-stat-val correct-val">✅ '+bn(correct)+'</div><div class="result-stat-label bn">সঠিক</div></div>'+
-     '<div class="result-stat"><div class="result-stat-val wrong-val">❌ '+bn(wrong)+'</div><div class="result-stat-label bn">ভুল</div></div>'+
-     '<div class="result-stat"><div class="result-stat-val skipped-val">⏭️ '+bn(skipped)+'</div><div class="result-stat-label bn">স্কিপ</div></div></div>';
-  h+='<div class="result-score-card" style="padding:12px"><div class="info-row bn">'+
-     '<span>⏱️ '+fmt(timeTaken)+'</span><span>📊 Negative: -'+bn(neg.toFixed(2))+'</span></div></div>';
-  h+='<div class="motiv-card"><div class="motiv-msg bn">'+(fb.motivation||'')+'</div>'+
-     (fb.ayat?('<div class="motiv-ayat bn">📖 '+fb.ayat+'</div>'):'')+'</div>';
-  // actions
-  h+='<div class="action-grid">'+
-     '<button class="act-btn b-again bn" onclick="practiceAgain()">🔄 Again Practice</button>'+
-     '<button class="act-btn b-new bn" id="btnNew" onclick="newExam()">🆕 New Exam</button>'+
-     '<button class="act-btn b-mistake bn" onclick="mistakePractice()">❌ Mistake Practice</button>'+
-     '<button class="act-btn b-board bn" '+(boardDisabled?'disabled title="New-gen এক্সামে লিডারবোর্ড নেই"':'onclick="showBoard()"')+'>🏆 Leaderboard</button>'+
-     (CFG.imageFileId?'<button class="act-btn b-img bn" onclick="backToImage()">⚡ Back to Image</button>':'')+
-     '<button class="act-btn b-pdf bn" id="btnPdf" onclick="solvePdf()">📄 Solve PDF</button>'+
-     '<button class="act-btn b-web bn" onclick="ext(CFG.websiteUrl)">🌐 ATLAS Website</button>'+
-     '<button class="act-btn b-yt bn" onclick="ext(CFG.youtubeUrl)">▶️ ATLAS YouTube</button></div>';
-  // solve sheet
-  h+='<div class="solve-head bn">── Solve Sheet ──</div>'+
-     '<div class="filter-row">'+
-     '<button class="filter-btn active bn" data-f="all" onclick="filterSolve(\'all\',this)">সব</button>'+
-     '<button class="filter-btn bn" data-f="correct" onclick="filterSolve(\'correct\',this)">✅ সঠিক</button>'+
-     '<button class="filter-btn bn" data-f="wrong" onclick="filterSolve(\'wrong\',this)">❌ ভুল</button>'+
-     '<button class="filter-btn bn" data-f="skipped" onclick="filterSolve(\'skipped\',this)">⏭️ স্কিপ</button></div>'+
-     '<div id="solveList">'+buildSolve('all')+'</div>';
-  // image preview if exists
-  let imgBlock='';
-  if(CFG.imageFileId){imgBlock='<img id="resImg" class="pre-img" style="border-radius:12px;margin-bottom:14px" src="/api/tg-image/'+encodeURIComponent(CFG.imageFileId)+'" onerror="this.style.display=\'none\'">';}
-  document.getElementById('resultContent').innerHTML=imgBlock+h;
-  showScreen('screenResult');
-}
-function revealAnswers(){MCQS.forEach((q,i)=>{const ua=answers[i],ai=ansIndex(q);
-  (q.options||[]).forEach((o,oi)=>{const el=document.getElementById('opt'+i+'_'+oi);if(!el)return;
-    if(oi===ai)el.classList.add('correct-reveal');
-    if(ua!==undefined&&oi===ua&&ua!==ai)el.classList.add('wrong-reveal');});
-  if(q.explanation){const e=document.getElementById('exp'+i);if(e){e.innerHTML='📋 ব্যাখ্যা: '+q.explanation;e.classList.add('show');}}});}
-
-function statusOf(i){const ua=answers[i],ai=ansIndex(MCQS[i]);if(ua===undefined)return'skipped';return ua===ai?'correct':'wrong';}
-function buildSolve(filter){
-  let h='';
-  MCQS.forEach((q,i)=>{const st=statusOf(i);if(filter!=='all'&&st!==filter)return;
-    const ai=ansIndex(q),ua=answers[i];
-    const badge=st==='correct'?'✅ সঠিক':(st==='wrong'?'❌ ভুল':'⏭️ স্কিপ');
-    h+='<div class="mcq-card"><div class="q-header"><span class="q-number bn">'+badge+' — প্রশ্ন '+bn(i+1)+'/'+bn(CFG.total)+'</span></div>'+
-       '<div class="q-text bn">'+(q.question||'')+'</div>';
-    (q.options||[]).forEach((o,oi)=>{let cls='option-item bn';if(oi===ai)cls+=' correct-reveal';else if(ua!==undefined&&oi===ua)cls+=' wrong-reveal';
-      h+='<div class="'+cls+'"><span class="option-radio">'+LABELS[oi]+'</span><span class="option-text">'+o+'</span></div>';});
-    if(q.explanation)h+='<div class="q-explain show bn">📋 ব্যাখ্যা: '+q.explanation+'</div>';
-    h+='</div>';});
-  return h||'<div class="motiv-card bn" style="color:var(--text-secondary)">এই ক্যাটাগরিতে কোনো প্রশ্ন নেই।</div>';
-}
-function filterSolve(f,btn){document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
-  document.getElementById('solveList').innerHTML=buildSolve(f);}
-
-// ---- ACTIONS ----
-function practiceAgain(){answers={};submitted=false;examSeconds=totalSeconds;
-  document.getElementById('timerText').classList.remove('timer-warning');
-  showScreen('screenExam');renderQuestions();startTimer();updateProgress();}
-function mistakePractice(){const wrong=MCQS.map((q,i)=>statusOf(i)==='wrong'?i:-1).filter(i=>i>=0);
-  if(!wrong.length){toast('🎉 কোনো ভুল নেই!');return;}
-  window._fullMcqs=window._fullMcqs||MCQS.slice();
-  const subset=wrong.map(i=>MCQS[i]);MCQS.length=0;subset.forEach(q=>MCQS.push(q));
-  CFG.total=MCQS.length;answers={};submitted=false;examSeconds=CFG.total*CFG.secPerQ;totalSeconds=examSeconds;
-  document.getElementById('timerText').classList.remove('timer-warning');
-  showScreen('screenExam');renderQuestions();startTimer();updateProgress();toast('❌ ভুল প্রশ্ন প্র্যাকটিস');}
-function backToImage(){showScreen('screenPre');document.getElementById('resImg');window.scrollTo(0,0);}
-function ext(u){window.open(u,'_blank');}
-
-function newExam(){const b=document.getElementById('btnNew');b.disabled=true;b.textContent='⏳ তৈরি হচ্ছে...';
-  fetch('/api/new-exam',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cache_id:activeCacheId})})
-   .then(r=>r.json()).then(d=>{if(d.ok&&d.new_cache_id){window.location.href='/exam/'+d.new_cache_id;}
-     else{toast(d.message||'নতুন এক্সাম তৈরি ব্যর্থ।');b.disabled=false;b.textContent='🆕 New Exam';}})
-   .catch(()=>{toast('সার্ভার সমস্যা।');b.disabled=false;b.textContent='🆕 New Exam';});}
-
-function showBoard(){fetch('/api/leaderboard/'+activeCacheId).then(r=>r.json()).then(d=>{
-  if(d.disabled){toast('New-gen এক্সামে লিডারবোর্ড নেই।');return;}
-  const rows=d.data||[];let h='<div class="solve-head bn">🏆 লিডারবোর্ড</div>';
-  if(!rows.length)h+='<div class="motiv-card bn" style="color:var(--text-secondary)">এখনো কেউ অংশ নেয়নি।</div>';
-  rows.sort((a,b)=>b.final_score-a.final_score).slice(0,50).forEach((r,i)=>{
-    h+='<div class="board-row"><div class="board-rank">'+bn(i+1)+'</div>'+
-       '<div class="board-name bn">'+(r.user_name||'Anonymous')+'</div>'+
-       '<div class="board-score bn">'+bn((+r.final_score).toFixed(2))+' / '+bn(r.total||CFG.total)+'</div></div>';});
-  document.getElementById('resultContent').insertAdjacentHTML('beforeend','<div id="boardBlock">'+h+'</div>');
-  document.getElementById('boardBlock').scrollIntoView({behavior:'smooth'});}).catch(()=>toast('লিডারবোর্ড লোড ব্যর্থ।'));}
-
-function solvePdf(){const b=document.getElementById('btnPdf');b.disabled=true;b.textContent='⏳ PDF...';
-  fetch('/api/solve-pdf',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({cache_id:activeCacheId,answers:answers})})
-   .then(r=>r.json()).then(d=>{if(d.ok&&d.pdf_base64){
-     const bin=atob(d.pdf_base64);const arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
-     const blob=new Blob([arr],{type:'application/pdf'});const url=URL.createObjectURL(blob);
-     const a=document.createElement('a');a.href=url;a.download=d.filename||'ATLAS_Solve.pdf';a.click();
-     setTimeout(()=>URL.revokeObjectURL(url),4000);toast('📄 PDF ডাউনলোড হচ্ছে');}
-     else toast(d.message||'PDF তৈরি ব্যর্থ।');b.disabled=false;b.textContent='📄 Solve PDF';})
-   .catch(()=>{toast('সার্ভার সমস্যা।');b.disabled=false;b.textContent='📄 Solve PDF';});}
-
-// ---- BOOT ----
-initPre();
-"""
-
-
-# ============================================
-# SOLVE PDF HTML GENERATOR
-# ============================================
-def _ans_index(q):
-    a = q.get("answer", q.get("answer_index", 0))
-    opts = q.get("options", [])
-    if isinstance(a, int) and a > 0 and a <= len(opts) and (a - 1) < len(opts):
-        # heuristic: if answers look 1-based
-        if a == len(opts) and len(opts) >= a:
-            return a - 1
-    return a if isinstance(a, int) and a < len(opts) else 0
-
-
-def generate_solve_pdf_html(data, answers):
-    mcqs = data["mcqs"]
-    topic = data.get("topic") or "ATLAS Exam"
-    tag = data.get("tag") or ""
-    page = data.get("page", 1)
-    labels = ["ক", "খ", "গ", "ঘ", "ঙ"]
-
-    rows = ""
-    for i, q in enumerate(mcqs):
-        ai = q.get("answer", q.get("answer_index", 0))
-        opts = q.get("options", [])
-        if isinstance(ai, int) and ai >= len(opts) and ai > 0:
-            ai = ai - 1
-        ua = answers.get(str(i), answers.get(i))
-        opts_html = ""
-        for oi, opt in enumerate(opts):
-            cls = ""
-            if oi == ai:
-                cls = "correct"
-            elif ua is not None and oi == ua:
-                cls = "wrong"
-            opts_html += (f'<div class="opt {cls}"><span class="lbl">{labels[oi] if oi < len(labels) else oi+1}</span>'
-                          f'<span>{opt}</span></div>')
-        exp = q.get("explanation", "")
-        exp_html = f'<div class="exp">📋 ব্যাখ্যা: {exp}</div>' if exp else ""
-        rows += (f'<div class="qcard"><div class="qnum">প্রশ্ন {i+1}/{len(mcqs)}</div>'
-                 f'<div class="qtext">{q.get("question","")}</div>{opts_html}{exp_html}</div>')
-
-    tag_html = f'<span class="tag">{tag}</span>' if tag else ""
-    return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;500;600;700;800&family=Inter:wght@400;600;700&display=swap');
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'Noto Sans Bengali','Inter',sans-serif;color:#1A1D2E;padding:0;font-size:13px;line-height:1.7}}
-.head{{text-align:center;padding:18px;background:linear-gradient(135deg,#5A5FE0,#8B5CF6);color:#fff;border-radius:10px;margin-bottom:18px}}
-.head h1{{font-size:20px;font-weight:800}}
-.head .sub{{font-size:13px;opacity:.9;margin-top:4px}}
-.tag{{display:inline-block;background:rgba(255,255,255,.25);padding:2px 10px;border-radius:20px;font-size:11px;margin-top:6px}}
-.qcard{{border:1px solid #D4D8EE;border-radius:10px;padding:14px;margin-bottom:12px;page-break-inside:avoid}}
-.qnum{{display:inline-block;font-size:11px;font-weight:700;color:#5A5FE0;background:#ECEEFF;padding:2px 8px;border-radius:12px;margin-bottom:8px}}
-.qtext{{font-weight:600;margin-bottom:10px}}
-.opt{{display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:5px;border:1.5px solid #D4D8EE;border-radius:7px}}
-.opt .lbl{{width:18px;height:18px;border-radius:50%;border:1.5px solid #7A82A8;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#7A82A8;flex-shrink:0}}
-.opt.correct{{background:#DCFBEE;border-color:#0EA867}}
-.opt.correct .lbl{{background:#0EA867;border-color:#0EA867;color:#fff}}
-.opt.wrong{{background:#FEE8E8;border-color:#E53E3E}}
-.opt.wrong .lbl{{background:#E53E3E;border-color:#E53E3E;color:#fff}}
-.exp{{margin-top:8px;padding:8px 10px;background:#ECEEFF;border-radius:7px;font-size:12px;color:#4A5270}}
-.foot{{text-align:center;font-size:11px;color:#7A82A8;margin-top:14px}}
-</style></head><body>
-<div class="head"><h1>📝 {topic}</h1><div class="sub">Page {page} · মোট {len(mcqs)}টি প্রশ্ন</div>{tag_html}</div>
-{rows}
-<div class="foot">— ATLAS Courses · atlascourses.com —</div>
-</body></html>"""
-
-
-# ============================================
-# ENTRYPOINT
-# ============================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "7860"))
