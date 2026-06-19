@@ -837,6 +837,32 @@ async def _do_premium_pdf(cache_id: str, header_label: str = "") -> JSONResponse
     return JSONResponse({"ok": True, "pdf_b64": b64, "filename": f"ATLAS_Practice_Sheet_{cache_id[:8]}.pdf"})
 
 # ============================================================
+# SECTION 11.3B: Bookmark PDF API — POST (bot.py /bm command)
+# ============================================================
+@app.post("/api/bookmark-pdf")
+async def api_bookmark_pdf(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad_json"}, status_code=400)
+    mcqs = body.get("mcqs", [])
+    if not mcqs:
+        return JSONResponse({"ok": False, "message": "কোনো Bookmark MCQ নেই।"}, status_code=400)
+    header_label = body.get("header_label", "ATLAS Bookmark Practice Sheet")
+    html = generate_premium_pdf_html(mcqs, header_label)
+    try:
+        pdf_bytes = await _render_pdf(html)
+    except Exception as e:
+        print(f"Bookmark PDF render error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "message": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="ATLAS_Bookmark_Sheet.pdf"'}
+    )
+
+# ============================================================
 # SECTION 11.4: CREATIVE PDF API (জ্ঞানমূলক / অনুধাবনমূলক)
 # GET /api/creative-pdf/{cache_id}?ctype=knowledge|comprehension
 # Returns raw PDF, or JSON {ok:false, reason:"..."} when data insufficient
