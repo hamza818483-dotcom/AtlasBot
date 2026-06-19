@@ -1557,6 +1557,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /error — Latest error log\n"
         "  /class add — ক্লাস অ্যাড\n"
         "  /keys — AI Key স্ট্যাটাস\n"
+        "  /ping — Bot Status Dashboard\n"
         "  /live — CSV থেকে Live Quiz"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
@@ -1601,11 +1602,48 @@ async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
-    log(f"📑 /bm from {user['user_id']}")
-    await update.message.reply_text(
-        "🔖 **বুকমার্ক PDF**\n\nWeb Exam এ গিয়ে প্রশ্ন বুকমার্ক করতে পারবেন।\nতারপর এখান থেকে PDF ডাউনলোড করতে পারবেন।\n\n🌐 Web Exam দিতে MCQ সেট থেকে 'Web Exam' বাটনে ক্লিক করুন।\n\n💡 Bookmark MCQ দিয়ে Exam দিতে: /bmexam",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    user_id = user['user_id']
+    log(f"📑 /bm from {user_id}")
+    bms = get_all_bookmarks(user_id)
+    if not bms:
+        await update.message.reply_text(
+            "📭 আপনার কোনো Bookmark করা MCQ নেই।\n\n🌐 Web Exam এ গিয়ে 🔖 বাটনে চাপ দিয়ে প্রশ্ন Bookmark করুন!\n\n💡 Bookmark MCQ দিয়ে Exam দিতে: /bmexam"
+        )
+        return
+    wait_msg = await update.message.reply_text(f"🔖 **Bookmark PDF তৈরি হচ্ছে...**\n📦 মোট {len(bms)} টি Bookmark MCQ\n⏱️ অনুগ্রহ করে অপেক্ষা করুন...", parse_mode=ParseMode.MARKDOWN)
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{HF_SPACE_URL}/api/bookmark-pdf",
+                json={"mcqs": bms, "header_label": "ATLAS Bookmark Practice Sheet"}
+            )
+            ct = resp.headers.get("content-type", "")
+            if resp.status_code == 200 and "pdf" in ct:
+                pdf_bytes = resp.content
+            else:
+                try:
+                    j = resp.json()
+                    reason = j.get("message") or f"status {resp.status_code}"
+                except Exception:
+                    reason = f"status {resp.status_code}"
+                raise Exception(f"Bookmark PDF API failed: {reason}")
+        pdf_file = BytesIO(pdf_bytes)
+        pdf_file.name = f"ATLAS_Bookmark_Sheet.pdf"
+        await update.message.chat.send_document(
+            document=pdf_file,
+            caption=f"🔖 **ATLAS Bookmark Practice Sheet**\n📦 মোট {len(bms)} টি Bookmark MCQ\n🚀 সেরা গাইডলাইনে গোছানো প্রস্তুতি - এটলাস",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        log_error(f"Bookmark PDF error: {e}")
+        try:
+            await wait_msg.edit_text(f"❌ **Bookmark PDF তৈরি করা যায়নি**\n📋 কারণ: {str(e)[:200]}", parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
 
 # ── v4.0: /bmexam ──
 async def cmd_bmexam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2810,10 +2848,15 @@ async def cmd_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("⚙️ Custom", callback_data="pomo_custom")],
     ]
     try:
-        pomo_img = _generate_pomodoro_image()
+        if os.path.exists(POMODORO_IMAGE_PATH):
+            with open(POMODORO_IMAGE_PATH, 'rb') as f:
+                pomo_img = BytesIO(f.read())
+            pomo_img.name = "pomodoro.png"
+        else:
+            pomo_img = _generate_pomodoro_image()
         await update.message.reply_photo(photo=pomo_img, caption=POMODORO_CAPTION, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        log_error(f"Pomodoro image generation error, fallback to text: {e}")
+        log_error(f"Pomodoro image error, fallback to text: {e}")
         await update.message.reply_text(POMODORO_CAPTION, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
 def _pomo_text(first_name: str, total_sec: int, left_sec: int, paused: bool) -> str:
@@ -3609,10 +3652,10 @@ async def daily_reset_scheduler() -> None:
             await asyncio.sleep(60)
 
 # ============================================================
-# SECTION: /pin — Owner Bot Status Dashboard
+# SECTION: /ping — Owner Bot Status Dashboard
 # ============================================================
 
-async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু Owner ব্যবহার করতে পারবেন।")
@@ -3649,7 +3692,6 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         today_str = now.strftime('%Y-%m-%d')
         active_today = sum(1 for u in all_users if u.get('usage_count', 0) > 0)
 
-        _reset_provider_stats_if_new_day()
         inventory = [
             ("gemini", GEMINI_KEYS),
             ("groq", GROQ_KEYS),
@@ -3659,39 +3701,14 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ("gemma", GEMMA_KEYS or OPENROUTER_KEYS),
         ]
         total_keys = 0
-        active_keys = 0
-        exhausted_keys = 0
-        total_req_ok = 0
-        total_req_fail = 0
         key_lines = []
         for provider, keys in inventory:
             hint = PROVIDER_QUOTA_HINTS.get(provider, {})
             plabel = hint.get("label", provider)
             n = len(keys)
             total_keys += n
-            if n == 0:
-                continue
-            pstat = _provider_stats.get(provider, {})
-            p_active = 0
-            p_exhausted = 0
-            p_ok = 0
-            p_fail = 0
-            for i, k in enumerate(keys):
-                klabel = f"{provider}#{i+1}"
-                ks = pstat.get(klabel, {})
-                ok = ks.get("ok", 0)
-                fail = ks.get("fail", 0)
-                p_ok += ok
-                p_fail += fail
-                if ks.get("exhausted"):
-                    p_exhausted += 1
-                    exhausted_keys += 1
-                else:
-                    p_active += 1
-                    active_keys += 1
-            total_req_ok += p_ok
-            total_req_fail += p_fail
-            key_lines.append(f"  {plabel}: {n} keys (🟢{p_active} 🔴{p_exhausted}) ✅{p_ok} ❌{p_fail}")
+            if n > 0:
+                key_lines.append(f"  {plabel}: <b>{n}</b> keys")
 
         pomo_count = len(_pomodoro_sessions)
         active_quizzes = len(_timer_tasks)
@@ -3713,10 +3730,6 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🔑 <b>AI KEYS</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"  🔑 Total Keys: <b>{total_keys}</b>\n"
-            f"  🟢 Active: <b>{active_keys}</b>\n"
-            f"  🔴 Exhausted: <b>{exhausted_keys}</b>\n"
-            f"  ✅ আজ Success: <b>{total_req_ok}</b>\n"
-            f"  ❌ আজ Fail: <b>{total_req_fail}</b>\n\n"
         )
         for line in key_lines:
             text += line + "\n"
@@ -3730,7 +3743,7 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
     except Exception as e:
-        log_error(f"cmd_pin error: {e}")
+        log_error(f"cmd_ping error: {e}")
         await update.message.reply_text("⏳ সমস্যা হয়েছে। আবার চেষ্টা করুন।")
 
 # ============================================================
@@ -3887,7 +3900,7 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("send", cmd_send))
     application.add_handler(CommandHandler("timer", cmd_timer))
     application.add_handler(CommandHandler("live", cmd_live))
-    application.add_handler(CommandHandler("pin", cmd_pin))
+    application.add_handler(CommandHandler("ping", cmd_ping))
     application.add_handler(CommandHandler("progress", cmd_progress))
     application.add_handler(CommandHandler("revision", cmd_revision))
     application.add_handler(CommandHandler("report", cmd_report))
