@@ -16,8 +16,12 @@ pyrogram
 tgcrypto
 jinja2
 supabase
-google-generativeai
+google-genai
 pandas
 certifi
 pytz
 flask
+playwright
+aiofile
+chromium 
+storage

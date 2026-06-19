@@ -43,6 +43,12 @@ CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.
 HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
 BASE_URL = os.getenv("BASE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
 
+# Fallback providers for Creative (জ্ঞানমূলক/অনুধাবনমূলক) generation when Gemini is exhausted
+GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEY", "").split(",") if k.strip()]
+OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
+
 SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
 
@@ -647,7 +653,7 @@ async def api_new_exam(request: Request):
         print(f"Gemini generation error: {e}")
         traceback.print_exc()
         return JSONResponse({"ok": False, "error": "gen_fail", "message": "প্রশ্ন তৈরি ব্যর্থ হয়েছে। একটু পরে আবার চেষ্টা করুন।"})
-    new_id = uuid.uuid4().hex[:12]
+    new_id = uuid.uuid4().hex[:16]
     try:
         client = get_supabase()
         row = {
@@ -835,6 +841,51 @@ async def _do_premium_pdf(cache_id: str, header_label: str = "") -> JSONResponse
 # GET /api/creative-pdf/{cache_id}?ctype=knowledge|comprehension
 # Returns raw PDF, or JSON {ok:false, reason:"..."} when data insufficient
 # ============================================================
+def _b64_data_url(image_bytes: bytes) -> str:
+    mime = "image/jpeg"
+    if image_bytes[:8].startswith(b"\x89PNG"):
+        mime = "image/png"
+    elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        mime = "image/webp"
+    return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+
+async def _call_creative_fallback(prompt: str, img_bytes: bytes) -> Optional[dict]:
+    """Groq/OpenRouter fallback when Gemini is exhausted. Returns parsed JSON dict or None."""
+    content = [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": _b64_data_url(img_bytes)}},
+    ]
+    chains = [
+        ("https://api.groq.com/openai/v1", GROQ_KEYS, GROQ_MODEL, {}),
+        ("https://openrouter.ai/api/v1", OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
+         {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}),
+    ]
+    for base_url, keys, model, extra_headers in chains:
+        for k in keys:
+            try:
+                headers = {"Authorization": f"Bearer {k}", "Content-Type": "application/json"}
+                headers.update(extra_headers)
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": content}],
+                    "temperature": 0.6, "max_tokens": 8192,
+                }
+                async with httpx.AsyncClient(timeout=120) as client:
+                    r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+                    if r.status_code != 200:
+                        continue
+                    txt = r.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    for tag in ('```json', '```'):
+                        if txt.startswith(tag):
+                            txt = txt[len(tag):]
+                    if txt.endswith('```'):
+                        txt = txt[:-3]
+                    return json.loads(txt.strip())
+            except Exception as e:
+                print(f"[creative-fallback] {base_url} error: {e}")
+                continue
+    return None
+
 async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
     """Returns {'ok':True,'items':[...]} or {'ok':False,'reason':str}.
     Tries primary (strict source-only) prompt first, then a lenient
@@ -884,6 +935,28 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
             print(f"creative gen error: {e}")
             traceback.print_exc()
             last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
+
+    # Gemini exhausted/failed both prompts — try Groq/OpenRouter fallback
+    print("[creative-pdf] Gemini failed, trying Groq/OpenRouter fallback...")
+    for p in (prompt, fallback_prompt):
+        try:
+            obj = await _call_creative_fallback(p, img_bytes)
+            if obj is None:
+                continue
+            if isinstance(obj, dict) and obj.get("error"):
+                last_reason = str(obj.get("error"))[:300]
+                continue
+            items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
+            clean = [it for it in items if it.get("question") and it.get("answer")]
+            if len(clean) >= 2:
+                print(f"[creative-pdf] fallback succeeded with {len(clean)} items")
+                return {"ok": True, "items": clean}
+            if len(clean) >= 1:
+                last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
+        except Exception as e:
+            print(f"[creative-pdf] fallback error: {e}")
+            continue
+
     return {"ok": False, "reason": last_reason}
 
 @app.get("/api/creative-pdf/{cache_id}")
@@ -1003,59 +1076,110 @@ def _not_found_html() -> str:
 </head><body><div><h2>⚠️ এক্সাম পাওয়া যায়নি</h2><p>লিংকটি মেয়াদোত্তীর্ণ বা ভুল হতে পারে।</p></div></body></html>"""
 
 def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
+    """ATLAS Solve Sheet — same A4 2-column theme as Premium PDF, with explanations + correct/wrong marking."""
     mcqs = data["mcqs"]
     topic = data.get("topic", "ATLAS Exam")
-    page = data.get("page", 1)
-    labels = ["A", "B", "C", "D"]
-    rows = ""
-    count = 0
+    labels = ["a", "b", "c", "d"]
+
+    def strip_prefix(opt: str, oi: int) -> str:
+        clean = opt
+        for pfx in [f"{labels[oi].upper()}) ", f"{labels[oi].upper()})", f"({labels[oi]}) ",
+                    f"({labels[oi]})", f"{labels[oi]}) ", f"{labels[oi]})"]:
+            if clean.startswith(pfx):
+                return clean[len(pfx):].strip()
+        return clean
+
+    # Build per-question render data (answered or not, all questions included)
+    items = []
     for i, q in enumerate(mcqs):
         correct_idx = q.get("answer", 0)
         if isinstance(correct_idx, str):
             correct_idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(correct_idx.upper(), 0)
         user_answer = answers.get(str(i))
-        if user_answer is None:
-            continue
-        count += 1
-        user_idx = int(user_answer) if user_answer != -1 else -1
-        opts_html = ""
-        for oi, opt in enumerate(q.get('options', [])[:4]):
-            cls = ""
-            if oi == correct_idx:
-                cls = "correct"
-            elif oi == user_idx and user_idx != correct_idx:
-                cls = "wrong"
-            opts_html += f'<div class="opt {cls}"><span class="lbl">{labels[oi]}</span><span>{_esc(opt)}</span></div>'
-        exp = q.get("explanation", "")
-        exp_html = f'<div class="exp"><div class="exp-hd">📋 ব্যাখ্যা</div>{_esc(exp)}</div>' if exp else ""
-        rows += f'<div class="qcard"><div class="qnum">প্রশ্ন {i+1}/{len(mcqs)}</div><div class="qtext">{_esc(q.get("question",""))}</div>{opts_html}{exp_html}</div>'
-    if count == 0:
-        rows = '<div class="qcard"><div class="qtext">কোনো উত্তরকৃত প্রশ্ন নেই।</div></div>'
+        user_idx = int(user_answer) if (user_answer is not None and user_answer != -1) else -1
+        items.append({"q": q, "num": i + 1, "correct_idx": correct_idx, "user_idx": user_idx})
+
+    pages_html = ""
+    PER_PAGE = 8  # explanations make cards taller than plain Premium PDF
+    total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
+
+    for p_i, page_idx in enumerate(range(0, len(items), PER_PAGE)):
+        chunk = items[page_idx:page_idx + PER_PAGE]
+        n = len(chunk)
+        if n <= 4:
+            qfs, ofs, gap = 12.5, 12, "12px"
+        elif n <= 6:
+            qfs, ofs, gap = 11.5, 11, "10px"
+        else:
+            qfs, ofs, gap = 10.5, 10, "8px"
+
+        half = (n + 1) // 2
+        left_col = chunk[:half]
+        right_col = chunk[half:]
+
+        def render_q(it):
+            q = it["q"]
+            num = it["num"]
+            correct_idx = it["correct_idx"]
+            user_idx = it["user_idx"]
+            q_text = _esc(q.get("question", ""))
+            opts = q.get("options", [])[:4]
+            opts_html = ""
+            for oi, opt in enumerate(opts):
+                clean = _esc(strip_prefix(opt, oi))
+                cls = ""
+                mark = ""
+                if oi == correct_idx:
+                    cls = "correct"
+                    mark = " ✅"
+                elif oi == user_idx and user_idx != correct_idx:
+                    cls = "wrong"
+                    mark = " ❌"
+                opts_html += f'<div class="opt-line {cls}">({labels[oi]}) {clean}{mark}</div>'
+            exp = q.get("explanation", "")
+            exp_html = f'<div class="exp-box"><span class="exp-hd">📋 ব্যাখ্যা:</span> {_esc(exp)}</div>' if exp else ""
+            return (f'<div class="q-block" style="margin-bottom:{gap};">'
+                    f'<div class="q-text"><span class="q-num">{num}.</span> {q_text}</div>'
+                    f'<div class="opts-grid">{opts_html}</div>{exp_html}</div>')
+
+        left_html = "".join(render_q(it) for it in left_col)
+        right_html = "".join(render_q(it) for it in right_col)
+
+        pb = 'page-break-after:always;' if (p_i + 1) < total_pages else ''
+        pages_html += f'''
+        <div class="page" style="{pb}font-size:{qfs}px;">
+            <div class="header-bar">📋 ATLAS Solve Sheet — {_esc(topic)}</div>
+            <div class="columns">
+                <div class="col">{left_html}</div>
+                <div class="divider-v"></div>
+                <div class="col">{right_html}</div>
+            </div>
+            <div class="footer">🌐 atlascourses.com · ▶ youtube.com/@atlasprep</div>
+        </div>'''
+
     return f'''<!DOCTYPE html>
 <html lang="bn"><head><meta charset="UTF-8">
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700&family=Inter:wght@400;600;700&display=swap');
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'Noto Sans Bengali','Segoe UI',sans-serif;color:#E8EAFF;background:#0A0D1E;padding:18px;font-size:13px;line-height:1.7;}}
-.head{{text-align:center;padding:18px;background:linear-gradient(135deg,#5A5FE0,#7c3aed);color:#fff;border-radius:12px;margin-bottom:18px;}}
-.head h1{{font-size:22px;font-weight:800}}
-.qcard{{background:#12162E;border:1px solid #2A2E4A;border-radius:12px;padding:14px;margin-bottom:12px;page-break-inside:avoid;}}
-.qnum{{display:inline-block;font-size:11px;font-weight:700;color:#5A5FE0;background:rgba(90,95,224,0.12);padding:3px 10px;border-radius:12px;margin-bottom:8px;}}
-.qtext{{font-weight:600;margin-bottom:9px;font-size:14px;}}
-.opt{{display:flex;align-items:center;gap:10px;padding:9px 12px;margin-bottom:5px;background:#1A1E3A;border-radius:8px;border-left:3px solid #2A2E4A;}}
-.opt .lbl{{width:20px;height:20px;border-radius:50%;border:2px solid #4A5080;color:#4A5080;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;}}
-.opt.correct{{background:rgba(34,212,122,0.15);border-left-color:#22D47A;}}
-.opt.correct .lbl{{background:#22D47A;border-color:#22D47A;color:#fff;}}
-.opt.wrong{{background:rgba(248,113,113,0.15);border-left-color:#F87171;}}
-.opt.wrong .lbl{{background:#F87171;border-color:#F87171;color:#fff;}}
-.exp{{margin-top:9px;padding:9px 12px;background:#1A1E3A;border-left:3px solid #5A5FE0;border-radius:0 8px 8px 0;font-size:12px;color:#7A82C8;}}
-.exp-hd{{color:#5A5FE0;font-weight:700;font-size:11px;margin-bottom:4px;}}
-.foot{{text-align:center;font-size:11px;color:#4A5080;margin-top:18px;}}
-@page{{size:A4;margin:10mm 8mm;}}
-</style></head><body>
-<div class="head"><h1>📋 ATLAS Solve Sheet</h1><div style="font-size:13px;opacity:.9;margin-top:4px">📝 {_esc(topic)} · Page {page} · {len(mcqs)} Questions</div></div>
-{rows}
-<div class="foot">🌐 atlascourses.com · ▶️ youtube.com/@atlasprep</div>
-</body></html>'''
+html,body{{font-family:'Noto Sans Bengali','Inter',sans-serif;color:#111;background:#fff;line-height:1.5;}}
+.page{{padding:10mm 9mm;min-height:297mm;display:flex;flex-direction:column;}}
+.header-bar{{background:linear-gradient(135deg,#d4f1f9,#cfe9ff);border:1.5px solid #9cc8db;border-radius:8px;text-align:center;padding:9px 0;margin-bottom:16px;font-weight:700;font-size:15px;color:#0a3d5c;font-family:'Inter','Noto Sans Bengali',sans-serif;letter-spacing:.3px;}}
+.columns{{display:flex;gap:0;flex:1;}}
+.col{{flex:1;min-width:0;padding:0 10px;}}
+.divider-v{{width:1.5px;background:linear-gradient(#bbb,#ddd,#bbb);margin:0 2px;}}
+.q-block{{page-break-inside:avoid;}}
+.q-text{{font-weight:600;line-height:1.5;margin-bottom:4px;color:#15233a;}}
+.q-num{{font-weight:800;color:#0a3d5c;}}
+.opts-grid{{padding-left:8px;}}
+.opt-line{{font-size:0.92em;line-height:1.45;white-space:normal;color:#222;padding:1px 4px;border-radius:4px;}}
+.opt-line.correct{{background:rgba(34,212,122,0.18);color:#0a6b3a;font-weight:700;}}
+.opt-line.wrong{{background:rgba(248,113,113,0.18);color:#a3201a;font-weight:700;}}
+.exp-box{{margin-top:3px;margin-left:8px;padding:4px 8px;background:#f0f4fb;border-left:2.5px solid #5A5FE0;border-radius:0 6px 6px 0;font-size:0.85em;color:#333;}}
+.exp-hd{{color:#5A5FE0;font-weight:700;}}
+.footer{{text-align:center;font-size:9.5px;color:#777;margin-top:10px;padding-top:5px;border-top:1px solid #ddd;}}
+@page{{size:A4;margin:0;}}
+</style></head><body>{pages_html}</body></html>'''
 
 def generate_premium_pdf_html(mcqs: List[Dict], header_label: str = "ATLAS Practice Sheet") -> str:
     """ATLAS Practice Sheet — 2-column, full A4 page fill (auto density per page)."""
@@ -1292,7 +1416,6 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 .hero{text-align:center;padding:20px 14px 14px;}
 .hero-img{display:none;}
 .hero-src-img{width:100%;max-height:300px;object-fit:contain;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;display:block;}
-.header-source-img{width:100%;max-height:280px;object-fit:contain;background:var(--atlas-bg);border-bottom:2px solid var(--accent);display:block;}
 .hero-title{font-size:18px;font-weight:800;color:var(--accent);margin-bottom:4px;}
 .hero-prompt{font-size:13px;color:var(--text-secondary);margin-bottom:12px;font-weight:600;}
 .hero-stats{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;}
@@ -1324,7 +1447,9 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 .bm-btn{background:none;border:1px solid var(--border);font-size:14px;cursor:pointer;padding:4px 7px;border-radius:6px;transition:.2s;color:var(--text-secondary);}
 .bm-btn.active{color:var(--warning);border-color:var(--warning);}
 .q-text{font-size:14px;font-weight:600;margin-bottom:10px;line-height:1.7;}
-.opt{display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:6px;background:var(--option-bg);border:1.5px solid var(--option-border);border-radius:var(--radius-sm);cursor:pointer;transition:all .18s;font-size:13px;justify-content:space-between;}
+.opt{display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:6px;background:var(--option-bg);border:1.5px solid var(--option-border);border-radius:var(--radius-sm);cursor:pointer;transition:all .18s;font-size:13px;}
+.opt>span:nth-child(2){flex:1;}
+.opt-icon{flex-shrink:0;margin-left:auto;}
 .opt:hover:not(.locked){border-color:var(--accent);background:rgba(90,95,224,0.1);}
 .opt.locked{cursor:default;pointer-events:none;}
 .opt.correct-r{background:var(--success-light)!important;border-color:var(--success)!important;}
@@ -1399,13 +1524,10 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 </style>
 </head>
 <body>
-<header class="header" style="flex-direction:column;padding:0;gap:0;">
-    <div style="display:flex;align-items:center;gap:8px;padding:10px 16px;width:100%;min-height:52px;position:relative;">
-        <div class="brand">ATLAS</div>
-        <div class="header-sub" id="headerSub">Special Exam</div>
-        <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
-    </div>
-    <img id="headerSourceImg" class="header-source-img" src="" alt="">
+<header class="header">
+    <div class="brand">ATLAS</div>
+    <div class="header-sub" id="headerSub">Special Exam</div>
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
 </header>
 <div class="exam-hdr" id="examHdr">
     <span class="hdr-timer" id="hdrTimer">00:00</span>
@@ -1516,12 +1638,6 @@ function init() {
                 preImg.style.display = 'block';
                 preImg.onerror = () => { preImg.style.display = 'none'; };
             }
-            const img = document.getElementById('headerSourceImg');
-            if (img) {
-                img.src = CFG.hfSpaceUrl + '/api/tg-image/' + encodeURIComponent(CFG.imageFileId);
-                img.style.display = 'none';
-                img.onerror = () => { img.style.display = 'none'; };
-            }
         }
         setMode('PreExam');
     } catch(err) {
@@ -1568,8 +1684,6 @@ function startHall() {
     document.getElementById('submitBtn').style.display = 'block';
     document.getElementById('navFab').style.display = 'flex';
     document.getElementById('examHdr').classList.add('visible');
-    const _srcImg = document.getElementById('headerSourceImg');
-    if (_srcImg && CFG.imageFileId) _srcImg.style.display = 'block';
     document.getElementById('hdrMeta').textContent = (CFG.topic||'') + ' • Page ' + (CFG.page||1);
     setMode('Hall');
     window.scrollTo({top:0,behavior:'instant'});
@@ -1771,8 +1885,8 @@ function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,moti
     html+='<button class="result-btn success" onclick="solvePDF()">📄 Solve PDF</button>';
     html+='<button class="result-btn primary" id="newExamBtn" onclick="startNewExam()">🆕 New Exam</button>';
     if(CFG.hasSource) html+='<button class="result-btn" id="backSrcBtn" onclick="backToSource()">↩️ Back to Source</button>';
-    html+='<button class="result-btn danger" onclick="mistakePractice()">❌ Mistake Practice ('+wrong+')</button>';
-    html+='<button class="result-btn purple" onclick="specialPractice()">🔥 Special Practice ('+(wrong+skipped)+')</button>';
+    html+='<button class="result-btn danger" onclick="mistakePractice()">❌ Mistake Practice (Only Wrong) - ('+wrong+')</button>';
+    html+='<button class="result-btn purple" onclick="specialPractice()">🔥 Special Practice (Wrong+Skip) - ('+(wrong+skipped)+')</button>';
     html+='<button class="result-btn" onclick="openLink(CFG.websiteUrl)">🌐 ATLAS Website</button>';
     html+='<button class="result-btn" onclick="openLink(CFG.youtubeUrl)">▶️ YouTube Channel</button>';
     html+='<button class="result-btn" onclick="openLink(CFG.whatsappUrl)">💬 WhatsApp</button>';
@@ -1841,9 +1955,11 @@ function practiceAgain(){
 }
 
 function mistakePractice(){
+    console.log('[debug] lastAnswers:', JSON.stringify(lastAnswers), 'origQs.length:', origQs.length);
     const wrongQs=origQs.filter((q,i)=>{
         const ci=typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
         const ua=lastAnswers[i];
+        console.log('[debug] i='+i+' ua='+ua+' ci='+ci+' include='+(ua!==undefined&&ua!==ci));
         return ua!==undefined&&ua!==ci;
     });
     if(!wrongQs.length){showToast('🎉 কোনো ভুল নেই!');return;}
@@ -1862,8 +1978,10 @@ function specialPractice(){
 
 function _startPractice(filtered){
     questions=filtered;
+    origQs=[...filtered];
     totalSec=Math.max(30,Math.ceil(questions.length*CFG.secPerQ));
     userAnswers={};bookmarks={};submitted=false;
+    lastAnswers={};
     startHall();
 }
 
