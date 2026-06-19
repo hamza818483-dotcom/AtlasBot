@@ -1,169 +1,1178 @@
-"""
-ATLAS MCQ BOT - Main Telegram Bot
-All handlers, commands, quiz engine, poll sender
-"""
+# ============================================================
+# ATLAS MCQ BOT - Complete Telegram Bot
+# Version: 4.0
+# (v3.0 features + Multi-AI Fallback + Cache + /gpa + /bmexam +
+#  /error + Share&Challenge + 6h Check-in + Creative PDF buttons +
+#  Owner error forwarding + Keep-alive + Backup DB mirror +
+#  Option prefix cleanup + /all time+delete + Back-to-Source image)
+# ============================================================
 
+# ============================================================
+# SECTION 1: IMPORTS
+# ============================================================
 import asyncio
 import json
 import time
 import traceback
 import random
-import threading
 import uuid
-from datetime import datetime, timedelta
+import os
+import base64
+import hashlib
+import re
+from datetime import datetime, timedelta, timezone
+from io import BytesIO, StringIO
+import csv
+from typing import Optional, Dict, List, Tuple, Any
+
+key = os.getenv("GEMINI_KEY", "")
+print(f"[STARTUP] GEMINI_KEY loaded: len={len(key)}, prefix={key[:10]}, suffix={key[-4:]}")
+
+# Telegram Bot
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    Poll, BotCommand, BotCommandScopeDefault
+    Poll, BotCommand, BotCommandScopeDefault, MenuButtonDefault
 )
 from telegram.ext import (
     Application, ApplicationBuilder,
     CommandHandler, MessageHandler, CallbackQueryHandler,
-    PollAnswerHandler, filters, ContextTypes
+    PollAnswerHandler, filters, ContextTypes, ApplicationHandlerStop
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter, Forbidden
 
-from config import (
-    BOT_TOKEN, OWNER_ID, BASE_URL, CF_WORKER_URL,
-    DEFAULT_TIMER, DEFAULT_FREE_LIMIT, DEFAULT_DAILY_LIMIT,
-    DEFAULT_NEGATIVE_MARK, MAX_MCQ, MIN_MCQ, NEW_PRACTICE_COUNT,
-    POLL_DELAY, BD_TZ, AYATS, FEEDBACKS,
-    PROCESSING_MSG, PREMIUM_MSG, LOG_DIR
+# Supabase
+from supabase import create_client, Client
+
+# ATLAS Dual Storage (D1 primary + Supabase overflow)
+from storage import (
+    dual_insert, dual_get_mcq, enforce_quotas,
+    bind_supabase, bootstrap_d1_schema, d1_enabled
 )
-from database import (
-    create_user, get_user, update_user, is_permitted,
-    permit_user, unpermit_user, get_all_users,
-    get_setting, set_setting, get_all_settings,
-    get_user_limit, set_user_limit,
-    save_mcq, get_mcq, get_user_mcqs,
-    save_result, get_user_results,
-    add_bookmark, get_bookmarks, delete_bookmark,
-    get_today_usage, increment_usage, get_usage_report,
-    check_access, reset_daily_usage, init_database,
-    save_active_quiz, get_active_quiz, remove_active_quiz
-)
-from gemini_mcq import mcq_generator, download_image, get_file_url
-from exam_server import create_exam_link
 
-import os
+# Google Gemini (New SDK)
+from google import genai
+from google.genai import types
 
-# ============================================
-# LOGGING
-# ============================================
+# Image Processing
+from PIL import Image, ImageDraw, ImageFont
+
+# HTTP
+import httpx
+import aiohttp
+
+# ============================================================
+# SECTION 2: CONFIGURATION
+# ============================================================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+GENAI_API_KEY = (os.getenv("GEMINI_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+print(f"[CONFIG] GEMINI_KEY: len={len(GENAI_API_KEY)}, prefix={GENAI_API_KEY[:8] if GENAI_API_KEY else 'EMPTY'}, suffix={GENAI_API_KEY[-4:] if GENAI_API_KEY else 'EMPTY'}")
+
+# ── v4.0: Multi-AI provider keys (all optional, comma-separated, silent skip) ──
+NVIDIA_KEYS = [k.strip() for k in os.getenv("NVIDIA_KEY", "").split(",") if k.strip()]
+OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEY", "").split(",") if k.strip()]
+NEMOTRON_KEYS = [k.strip() for k in os.getenv("NEMOTRON_KEY", "").split(",") if k.strip()]
+GEMMA_KEYS = [k.strip() for k in os.getenv("GEMMA_KEY", "").split(",") if k.strip()]
+GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
+
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
+OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
+NEMOTRON_MODEL = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
+GEMMA_MODEL = os.getenv("GEMMA_MODEL", "google/gemma-3-27b-it:free")
+
+SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
+SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
+SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
+
+HF_SPACE_URL = "https://hamzahf1-atlasbot.hf.space"
+CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
+
+DEFAULT_TIMER = 30
+DEFAULT_FREE_LIMIT = 3
+DEFAULT_DAILY_LIMIT = 5
+DEFAULT_NEGATIVE_MARK = -0.50
+NEW_PRACTICE_COUNT = 15
+MAX_MCQ = 35
+MIN_MCQ = 10
+POLL_DELAY = 1.5
+
+FREE_NEW_EXAM_LIMIT = 2
+PERMITTED_NEW_EXAM_LIMIT = 20
+
+BOT_USERNAME = ""  # filled at startup for deep links
+
+BUSY_MSG = "🤖 এটলাস বট এই মুহূর্তে ব্যস্ত আছে!\nকিছুক্ষণ অপেক্ষা করে আবার চেষ্টা করুন। 🙏\n\nবারবার সমস্যা হলে Owner কে জানান।\n🔗 Owner: @rafi_somc"
+
+try:
+    BD_TZ = timezone(timedelta(hours=6))
+except:
+    BD_TZ = datetime.now().astimezone().tzinfo
+
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+PROCESSING_MSG = """
+🔄 {first_name}, আপনার MCQ তৈরি করা হচ্ছে...
+📊 Today: {attempt}/{limit}
+⏱️ আনুমানিক সময়: {eta} সেকেন্ড
+🕐 শেষ হবে: {end_time}
+"""
+
+PREMIUM_MSG = """
+🌟 প্রিমিয়াম ফিচার!
+আপনার আজকের ফ্রি লিমিট শেষ হয়ে গেছে।
+আগামীকাল আবার চেষ্টা করুন অথবা এডমিনের সাথে যোগাযোগ করুন।
+"""
+
+# ============================================================
+# SECTION 3: SUPABASE CLIENT SETUP (+ v4.0 backup mirror)
+# ============================================================
+supabase: Client = None
+supabase_backup: Client = None
+
+def get_supabase() -> Client:
+    global supabase
+    if supabase is None:
+        try:
+            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            log("✅ Supabase client initialized")
+        except Exception as e:
+            log_error(f"Supabase init failed: {e}")
+            raise
+    return supabase
+
+def get_supabase_backup() -> Optional[Client]:
+    """v4.0: optional secondary Supabase mirror. Silent if not configured."""
+    global supabase_backup
+    if not SUPABASE_BACKUP_URL or not SUPABASE_BACKUP_KEY:
+        return None
+    if supabase_backup is None:
+        try:
+            supabase_backup = create_client(SUPABASE_BACKUP_URL, SUPABASE_BACKUP_KEY)
+            log("✅ Supabase BACKUP client initialized")
+        except Exception as e:
+            log_error(f"Supabase backup init failed: {e}")
+            return None
+    return supabase_backup
+
+def mirror_insert(table: str, row: Dict) -> None:
+    """v4.0: fire-and-forget mirror to backup DB. Never raises, never blocks logic."""
+    try:
+        bk = get_supabase_backup()
+        if bk:
+            bk.table(table).insert(row).execute()
+    except Exception:
+        pass
+
+def init_database():
+    try:
+        client = get_supabase()
+        log("✅ Supabase database ready (tables managed via Dashboard)")
+    except Exception as e:
+        log_error(f"Database init error: {e}")
+
+# ============================================================
+# SECTION 4: GEMINI SETUP (Multi-key rotation; AIza & AQ. both work —
+# they are plain API-key strings, SDK handles both formats identically)
+# ============================================================
+GEMINI_KEYS = [k.strip() for k in GENAI_API_KEY.split(",") if k.strip()]
+_current_key_idx = 0
+_bot_genai_client = None
+
+def setup_gemini():
+    global _bot_genai_client
+    if GEMINI_KEYS:
+        _bot_genai_client = genai.Client(api_key=GEMINI_KEYS[0])
+        log(f"✅ Gemini configured ({len(GEMINI_KEYS)} keys loaded)")
+    else:
+        log("⚠️ No GEMINI keys!", "WARNING")
+
+def rotate_gemini_key():
+    global _bot_genai_client, _current_key_idx
+    if len(GEMINI_KEYS) <= 1:
+        return False
+    _current_key_idx = (_current_key_idx + 1) % len(GEMINI_KEYS)
+    _bot_genai_client = genai.Client(api_key=GEMINI_KEYS[_current_key_idx])
+    log(f"🔄 Rotated to key #{_current_key_idx+1}/{len(GEMINI_KEYS)}")
+    return True
+
+# ============================================================
+# SECTION 4B: v4.0 MULTI-AI FALLBACK ENGINE
+# Chain: Gemini (all keys) → NVIDIA 11B → OpenRouter Qwen VL 72B →
+#        Nemotron → Gemma. Providers without keys are silently skipped.
+# ============================================================
+
+STRICT_SOURCE_RULES = """
+
+🔒 STRICT MANDATORY RULES (MUST FOLLOW 100%):
+1. প্রতিটি প্রশ্ন/অপশন/ব্যাখ্যা শুধুমাত্র Input Source (Image/Text) থেকে আসবে। নিজের জ্ঞান/আন্দাজ থেকে কিছু বানানো সম্পূর্ণ নিষেধ।
+2. Source-এর প্রতিটি গুরুত্বপূর্ণ তথ্য কভার করো — যত MCQ সম্ভব বানাও যেন একটাও সম্ভাব্য MCQ মিস না হয়। তবে Quality > Quantity।
+3. হাবিজাবি/দুর্বল/অপ্রাসঙ্গিক MCQ একদম নিষেধ।
+4. একটি প্রশ্নের একটিই সঠিক উত্তর — একাধিক সঠিক যেন না হয়।
+5. Output: ONLY valid JSON, no extra text."""
+
+async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
+    global _bot_genai_client
+    if not GEMINI_KEYS:
+        return None
+    if _bot_genai_client is None:
+        setup_gemini()
+    tries = max(1, len(GEMINI_KEYS))
+    for attempt in range(tries):
+        klabel = f"gemini#{_current_key_idx+1}"
+        try:
+            contents = [prompt_text]
+            if image_bytes:
+                contents.append(Image.open(BytesIO(image_bytes)))
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=0.7, top_p=0.95, top_k=40,
+                    max_output_tokens=8192,
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                )
+            ))
+            if resp and resp.text:
+                _track_attempt("gemini", klabel, ok=True)
+                return resp.text
+            _track_attempt("gemini", klabel, ok=False)
+        except Exception as e:
+            log_error(f"Gemini attempt {attempt+1} failed: {e}")
+            es = str(e).lower()
+            exhausted = any(s in es for s in ("quota", "429", "resource_exhausted"))
+            _track_attempt("gemini", klabel, ok=False, exhausted=exhausted)
+            rotate_gemini_key()
+    return None
+
+def _b64_data_url(image_bytes: bytes) -> str:
+    mime = "image/jpeg"
+    if image_bytes[:8].startswith(b"\x89PNG"):
+        mime = "image/png"
+    elif image_bytes[:4] == b"RIFF":
+        mime = "image/webp"
+    return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+
+# ============================================================
+# v4.0: PROVIDER/KEY USAGE TRACKING (for /keys command, owner-only)
+# Tracks per-key success/fail/exhausted counts for the current BD-day.
+# In-memory (resets on restart) + reset daily at BD midnight.
+# ============================================================
+_provider_stats: Dict[str, Dict] = {}
+_provider_stats_day = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+
+# Free-tier daily quota hints (approx) + reset time (BD) per provider — for display only
+PROVIDER_QUOTA_HINTS = {
+    "gemini":         {"rpd": 200,  "reset": "দুপুর ১-২টা (BD)", "label": "Gemini 2.5 Flash"},
+    "groq":           {"rpd": 14400, "reset": "প্রতিদিন (rolling)", "label": "Groq Llama-4-Scout Vision"},
+    "nvidia":         {"rpd": 1000, "reset": "প্রতি মাসে credit", "label": "NVIDIA Vision"},
+    "openrouter-qwen":{"rpd": 50,   "reset": "ভোর ৬টা (BD)", "label": "OpenRouter Qwen2.5-VL-72B"},
+    "nemotron":       {"rpd": 50,   "reset": "ভোর ৬টা (BD)", "label": "OpenRouter Nemotron-VL"},
+    "gemma":          {"rpd": 50,   "reset": "ভোর ৬টা (BD)", "label": "OpenRouter Gemma-3-27B"},
+}
+
+def _reset_provider_stats_if_new_day():
+    global _provider_stats, _provider_stats_day
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+    if today != _provider_stats_day:
+        _provider_stats = {}
+        _provider_stats_day = today
+
+def _track_attempt(provider: str, key_label: str, ok: bool, exhausted: bool = False):
+    if not provider:
+        return
+    _reset_provider_stats_if_new_day()
+    p = _provider_stats.setdefault(provider, {})
+    k = p.setdefault(key_label or provider, {"ok": 0, "fail": 0, "exhausted": False, "last": ""})
+    if ok:
+        k["ok"] += 1
+    else:
+        k["fail"] += 1
+    if exhausted:
+        k["exhausted"] = True
+    k["last"] = datetime.now(BD_TZ).strftime('%H:%M')
+
+def _key_prefix(k: str) -> str:
+    """Safe key fingerprint for display (prefix + suffix only)."""
+    if not k:
+        return "—"
+    if len(k) <= 12:
+        return k[:4] + "…"
+    return f"{k[:6]}…{k[-4:]}"
+
+async def _call_openai_compat(base_url: str, api_key: str, model: str,
+                              prompt_text: str, image_bytes: Optional[bytes],
+                              extra_headers: Dict = None,
+                              provider: str = "", key_label: str = "") -> Tuple[Optional[str], bool]:
+    """Generic OpenAI-compatible chat call. Returns (text, quota_exhausted)."""
+    content: Any
+    if image_bytes:
+        content = [
+            {"type": "text", "text": prompt_text},
+            {"type": "image_url", "image_url": {"url": _b64_data_url(image_bytes)}},
+        ]
+    else:
+        content = prompt_text
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.7,
+        "max_tokens": 8192,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+            if r.status_code == 200:
+                data = r.json()
+                txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if txt:
+                    _track_attempt(provider, key_label, ok=True)
+                    return txt, False
+                return None, False
+            if r.status_code == 429:
+                _track_attempt(provider, key_label, ok=False, exhausted=True)
+                log_error(f"{provider} {model} quota/429: {r.text[:150]}")
+                return None, True
+            _track_attempt(provider, key_label, ok=False)
+            log_error(f"OpenAI-compat {model} status {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        _track_attempt(provider, key_label, ok=False)
+        log_error(f"OpenAI-compat {model} error: {e}")
+    return None, False
+
+async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> Tuple[Optional[str], str]:
+    """v4.0: Full fallback chain. Returns (text, provider_name) or (None, '').
+    Order: Gemini (all keys) → Groq 90B Vision → NVIDIA → OpenRouter Qwen VL → Nemotron → Gemma.
+    Every provider/key with all-key rotation; missing keys silently skipped."""
+    full_prompt = prompt_text + STRICT_SOURCE_RULES
+    # 1) Gemini (primary, all keys with rotation) — tracked inside _call_gemini
+    txt = await _call_gemini(full_prompt, image_bytes)
+    if txt:
+        return txt, "gemini"
+    or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
+    # 2) Groq 90B Vision (best accuracy fallback) — all keys rotated
+    for i, k in enumerate(GROQ_KEYS):
+        txt, _ = await _call_openai_compat("https://api.groq.com/openai/v1", k, GROQ_MODEL,
+                                           full_prompt, image_bytes, provider="groq", key_label=f"groq#{i+1}")
+        if txt:
+            return txt, "groq"
+    # 3) NVIDIA Vision — all keys rotated
+    for i, k in enumerate(NVIDIA_KEYS):
+        txt, _ = await _call_openai_compat("https://integrate.api.nvidia.com/v1", k, NVIDIA_MODEL,
+                                           full_prompt, image_bytes, provider="nvidia", key_label=f"nvidia#{i+1}")
+        if txt:
+            return txt, "nvidia"
+    # 4-6) OpenRouter family: Qwen VL 72B → Nemotron → Gemma — all keys rotated
+    chains = [
+        (OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL, "openrouter-qwen"),
+        (NEMOTRON_KEYS or OPENROUTER_KEYS, NEMOTRON_MODEL, "nemotron"),
+        (GEMMA_KEYS or OPENROUTER_KEYS, GEMMA_MODEL, "gemma"),
+    ]
+    for keys, model, name in chains:
+        for i, k in enumerate(keys):
+            txt, _ = await _call_openai_compat("https://openrouter.ai/api/v1", k, model,
+                                               full_prompt, image_bytes, or_headers,
+                                               provider=name, key_label=f"{name}#{i+1}")
+            if txt:
+                return txt, name
+    return None, ""
+
+def parse_mcq_json(response_text: str) -> List[Dict]:
+    """Shared cleaner+parser+validator for MCQ JSON from any AI provider."""
+    t = (response_text or "").strip()
+    if t.startswith('```json'):
+        t = t[7:]
+    if t.startswith('```'):
+        t = t[3:]
+    if t.endswith('```'):
+        t = t[:-3]
+    t = t.strip()
+    # Salvage: take JSON array slice if extra text around it
+    if not t.startswith('['):
+        s, e = t.find('['), t.rfind(']')
+        if s != -1 and e != -1 and e > s:
+            t = t[s:e+1]
+    try:
+        mcqs = json.loads(t)
+    except json.JSONDecodeError as je:
+        # Extra data after a valid JSON array (e.g. AI appended extra text/JSON)
+        if "Extra data" in str(je) and je.pos > 0:
+            mcqs = json.loads(t[:je.pos])
+        else:
+            raise
+    valid = []
+    for mcq in mcqs:
+        if all(k in mcq for k in ['question', 'options', 'answer']):
+            if len(mcq['options']) >= 4:
+                mcq['options'] = mcq['options'][:4]
+            if isinstance(mcq['answer'], str):
+                mcq['answer'] = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(mcq['answer'].upper(), 0)
+            if 0 <= mcq['answer'] <= 3 and len(mcq['options']) == 4:
+                mcq['options'] = [clean_option_prefix(o, i) for i, o in enumerate(mcq['options'])]
+                valid.append(mcq)
+    return valid
+
+_OPT_PREFIX_RE = re.compile(r'^\s*[\(\[]?\s*([A-Da-d]|[কখগঘ])\s*[\)\.\:\]।]\s*')
+
+def clean_option_prefix(opt: str, idx: int = 0) -> str:
+    """v4.0: Quiz/Poll/Web Exam অপশনের শুরুতে A)/a)/ক) ইত্যাদি prefix remove."""
+    if not isinstance(opt, str):
+        return opt
+    cleaned = _OPT_PREFIX_RE.sub('', opt, count=1).strip()
+    return cleaned if cleaned else opt
+
+# ============================================================
+# SECTION 5: PROMPTS (4 TYPES) — preserved from v3.0
+# ============================================================
+
+PROMPT_01 = """MCQ TYPE: Standard Easy
+
+🟥Overall Instructions:
+-Image এ আগে থেকে MCQ বানানো থাকুক বা Information থাকুক,সকল জায়গা থেকেই প্রশ্ন বানাবে
+-কোনো টেক্সটের নিচে কালার মার্ক বা কোনো টেক্সট হাইলাইটেড থাকলে সেখান থেকে প্রশ্ন বানান মিস দেওয়া যাবে না(must priority)
+-কোয়ালিটিফুল প্রশ্ন বানাতে হবে।
+-এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে।
+-ছক থাকলে স্পেশাল প্রায়োরিটি পাবে(Use Every Information for Making MCQ)
+-টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা এসব info theke mcq banabe na.
+-হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে।
+-সর্বনিম্ন ১৫ থেকে ৩৫ টি Mcq বানাতে হবে।তথ্য একবারেই না থাকলে ১০/১০+ MCQ
+
+💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
+-সোর্স থেকে সকল টাইপের প্রশ্ন বানাতে হবে
+-যতভাবে প্রশ্ন আসতে পারে প্রশ্ন রেডি হবে
+-প্রশ্নগুলো মানসম্মত হবে
+-প্রশ্ন কঠিন হবে না।
+
+💥অপশন: (৪টি, এক শব্দের ছোট+20% বড় অপশন)
+-নির্দিষ্ট টপিক বা বক্স থেকে ৪ টা অপশন বানানো সীমাবদ্ধ থাকবে না,ইনপুট সোর্স থেকে মিক্সড তথ্যের অপশন থাকবে।
+-অবশ্যই প্রশ্ন অনুযায়ী সঠিক তথ্যের অপশন বানাতে হবে।
+-সোর্স অনুযায়ী বিভিন্ন অপশনে মিক্সড তথ্য থাকলেও সমস্যা নাই।
+-যে টপিক/অংশ থেকে প্রশ্ন বানাবে সেখানে কাছাকাছি অপশন থাকলে সেখান থেকেই অপশন নিবে(Hight Priority),যাতে করে User Confused হয় কোনটা আন্সার হবে ভাবতে গিয়ে।
+-অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে,বাকিগুলো ভুল উত্তর।
+-৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must.অর্থাৎ অপশনে হ্যাঁ,না,সত্য,মিথ্যা,জ্বী,না এসব টাইপ কথা থাকবে না।
+
+💥উত্তর: 
+-A/B/C/D এর মধ্যে একটি
+-একাধিক উত্তর যেনো সঠিক না হয় এই বিষয় সর্বাধিক গুরুত্ব দিতে হবে।
+-Answer Gulo different Option e hote hobe must.
+
+💥ব্যাখ্যা: 
+-সঠিক উত্তর + ওই টপিকে রিলেটেড বাকি তথ্য (Source থেকে) থাকবে,যাতে একটা MCQ Solve করতে গিয়ে ইউজার ব্যাখ্যা দেখে আরো কয়েকটা তথ্য শিখার মাধ্যমে জ্ঞান অর্জন করতে পারে।
+-Input source থেকেই সব তথ্য
+-Bengali explanation, max 200 character
+-JSON output only. Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
+
+PROMPT_02 = """MCQ TYPE: True/False Style
+
+🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ): Source এ যত তথ্য আছে তার ভিত্তিতে সর্বনিম্ন ১৫ থেকে ৩৫ টি MCQ অবশ্যই বানাতে হবে। কখনোই মাত্র ১-২টি MCQ বানিয়ে থামবে না। তথ্য কম থাকলেও কমপক্ষে ১০টি বানাও — একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করো।
+
+💥প্রশ্নের ধরন (randomly mix করো, একঘেয়ে নয়):
+- "নিচের কোনটিকে সত্য বললে ভুল হবে না?" → সত্য চাই
+- "নিচের কোনটিকে সত্য বললে ভুল হবে?" → মিথ্যা চাই
+- "নিচের কোনটিকে মিথ্যা বললে ভুল হবে?" → সত্য চাই
+- "নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?" → মিথ্যা চাই
+
+💥অপশন: 
+-ছোট বা বড় (২ টাইপই হতে পারে)
+-নির্দিষ্ট টপিক বা বক্স থেকে অপশন বানানো সীমাবদ্ধ থাকবে না,ইনপুট সোর্স থেকে মিক্সড তথ্যের অপশন থাকবে।
+-অবশ্যই প্রশ্ন অনুযায়ী সঠিক তথ্যের অপশন বানাতে হবে।
+-প্রশ্নে সঠিক/সত্য/পজিটিভ উত্তর বাছাই করতে বললে একটি অপশন সঠিক/সত্য/পজিটিভ হবে,বাকি গুলো ভুল।
+-প্রশ্নে ভুল/মিথ্যা/নেগেটিভ উত্তর বাছাই করতে বললে একটিই অপশনই ভুল/মিথ্যা/নেগেটিভ হবে,বাকিগুলো সঠিক।
+-অবশ্যই সকল তথ্য Input Image Or Text থেকেই নিতে হবে।
+-৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must.অর্থাৎ অপশনে হ্যাঁ,না,সত্য,মিথ্যা,জ্বী,না এসব টাইপ কথা থাকবে না।
+
+💥উত্তর:
+-A/B/C/D এর মধ্যে একটি (A/B/C/D format)
+-প্রশ্ন অনুযায়ী উত্তর অবশ্যই একটিই হবে।
+-একাধিক উত্তর যেনো সঠিক না হয় এই বিষয় সর্বাধিক গুরুত্ব দিতে হবে।
+
+💥ব্যাখ্যা:
+-কোনটা সঠিক, কেন সঠিক ও এর সাথে Input Source থেকেই সামঞ্জস্যপূর্ণ তথ্য দেওয়া থাকবে Precisely.
+-Input source থেকেই সব
+-Bengali, max 165 chars
+-JSON output only (একটি বড় array, কমপক্ষে ১৫টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
+
+PROMPT_03 = """MCQ TYPE: Short Question, Long Options
+
+💥Instructions:
+-প্রশ্ন: ছোট, এক লাইন
+-অপশন: ৪টি বড় (বাক্য বা phrase)
+-উত্তর: A/B/C/D এর মধ্যে একটি (A/B/C/D format)
+-ব্যাখ্যা: সঠিকটা কেন সঠিক + বাকিগুলো কেন ভুল (Precisely)
+-Input source থেকেই সব
+-Bengali, max 165 chars
+-সর্বনিম্ন ১৫ থেকে ৩৫ টি Mcq
+-JSON output only. Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-answer must be integer 0-3 (A=0, B=1, C=2, D=3)
+-৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must. হ্যাঁ/না টাইপ কথা থাকবে না।
+-একটিই সঠিক উত্তর হবে, বাকিগুলো ভুল।"""
+
+PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Options)
+
+🔴 সংখ্যা ও মিশ্রণ (সবচেয়ে গুরুত্বপূর্ণ):
+- Source এর তথ্যের ভিত্তিতে সর্বনিম্ন ১৫ থেকে ৩৫ টি MCQ অবশ্যই বানাতে হবে। কখনোই ১-২টি বানিয়ে থামবে না।
+- নিচের ৩ ধরনের প্রশ্ন বাধ্যতামূলকভাবে মিশ্রিত করতে হবে — প্রতিটি ধরন থেকে প্রায় সমান সংখ্যক (≈৩ ভাগের ১ ভাগ করে):
+  Type 1 (Standard Easy): সাধারণ প্রশ্ন, ৪টি অপশন, একটি সঠিক
+  Type 2 (True/False): "নিচের কোনটিকে সত্য/মিথ্যা বললে ভুল হবে (না)?" ধরনের — সত্য/মিথ্যা ভঙ্গি randomly
+  Type 3 (Short Q + Long Options): এক লাইনের প্রশ্ন, ৪টি বড় বাক্য/phrase অপশন
+- পরপর একই ধরনের প্রশ্ন না দিয়ে ধরনগুলো interleave করো (১,২,৩,১,২,৩...) যাতে সত্যিকারের mix হয়।
+
+💥সাধারণ নিয়ম (সব ধরনের জন্য):
+-৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে (হ্যাঁ/না/সত্য/মিথ্যা টাইপ একক শব্দ অপশন নিষেধ)
+-একটিই সঠিক উত্তর, বাকিগুলো ভুল; একাধিক সঠিক যেন না হয়
+-হাইলাইটেড/কালার মার্ক করা টেক্সট priority পাবে
+-ছক/table থাকলে special priority
+-টপিকের নাম, অধ্যায়ের নাম, পেইজ সংখ্যা থেকে MCQ বানাবে না
+-Input source থেকেই সব তথ্য
+-Bengali explanation, max 165-200 chars
+-JSON output only (একটি বড় array, কমপক্ষে ১৫টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
+
+PROMPT_MAP = {
+    'prompt_1': {'name': '🩺 Medical Standard MCQ', 'text': PROMPT_01},
+    'prompt_2': {'name': '✅ সত্য-মিথ্যার প্রশ্ন', 'text': PROMPT_02},
+    'prompt_3': {'name': '🔥 কঠিন প্রশ্ন', 'text': PROMPT_03},
+    'prompt_mixed': {'name': '🎲 Mixed (সবগুলো)', 'text': PROMPT_MIXED},
+}
+
+# ============================================================
+# SECTION 6: AYATS — preserved from v3.0
+# ============================================================
+
+AYATS = {
+    'hardship': [
+        '🌙 "فَإِنَّ مَعَ الْعُسْرِ يُسْرًا إِنَّ مَعَ الْعُسْرِ يُسْرًا"\n"নিশ্চয়ই কষ্টের সাথেই স্বস্তি আছে, নিশ্চয়ই কষ্টের সাথেই স্বস্তি আছে।"\n[সূরা আশ-শারহ ৯৪:৫-৬]',
+        '🌙 "لَا يُكَلِّفُ اللَّهُ نَفْسًا إِلَّا وُسْعَهَا"\n"আল্লাহ কাউকে তার সাধ্যের বাইরে বোঝা দেন না।"\n[সূরা বাকারা ২:২৮৬]',
+        '🌙 "سَيَجْعَلُ اللَّهُ بَعْدَ عُسْرٍ يُسْرًا"\n"আল্লাহ কষ্টের পর স্বস্তি দেবেন।"\n[সূরা তালাক ৬৫:৭]',
+        '🌙 "فَلَا تَعْلَمُ نَفْسٌ مَّا أُخْفِيَ لَهُم مِّن قُرَّةِ أَعْيُنٍ"\n"কেউ জানে না তাদের জন্য চোখ শীতলকারী কী জিনিস লুকায়িত আছে।"\n[সূরা সাজদাহ ৩২:১৭]',
+    ],
+    'patience': [
+        '🌙 "يَا أَيُّهَا الَّذِينَ آمَنُوا اسْتَعِينُوا بِالصَّبْرِ وَالصَّلَاةِ إِنَّ اللَّهَ مَعَ الصَّابِرِينَ"\n"হে ঈমানদারগণ! ধৈর্য ও সালাতের মাধ্যমে সাহায্য প্রার্থনা কর। নিশ্চয়ই আল্লাহ ধৈর্যশীলদের সাথে আছেন।"\n[সূরা বাকারা ২:১৫৩]',
+        '🌙 "وَاصْبِرْ وَمَا صَبْرُكَ إِلَّا بِاللَّهِ"\n"ধৈর্য ধর, তোমার ধৈর্য তো আল্লাহরই সাহায্যে।"\n[সূরা নাহল ১৬:১২৭]',
+        '🌙 "إِنَّمَا يُوَفَّى الصَّابِرُونَ أَجْرَهُم بِغَيْرِ حِسَابٍ"\n"ধৈর্যশীলদেরই তো অগণিত পুরস্কার দেওয়া হবে।"\n[সূরা যুমার ৩৯:১০]',
+    ],
+    'tawakkul': [
+        '🌙 "وَمَن يَتَوَكَّلْ عَلَى اللَّهِ فَهُوَ حَسْبُهُ"\n"যে আল্লাহর উপর ভরসা করে, তার জন্য তিনিই যথেষ্ট।"\n[সূরা তালাক ৬৫:৩]',
+        '🌙 "وَأُفَوِّضُ أَمْرِي إِلَى اللَّهِ"\n"আমি আমার কাজ আল্লাহর উপর ছেড়ে দিলাম।"\n[সূরা গাফির ৪০:৪৪]',
+        '🌙 "فَإِذَا عَزَمْتَ فَتَوَكَّلْ عَلَى اللَّهِ"\n"যখন সিদ্ধান্ত কর, তখন আল্লাহর উপর ভরসা কর।"\n[সূরা আলে ইমরান ৩:১৫৯]',
+    ],
+    'ibadah': [
+        '🌙 "وَقَالَ رَبُّكُمُ ادْعُونِي أَسْتَجِبْ لَكُمْ"\n"তোমাদের রব বলেন: আমাকে ডাকো, আমি সাড়া দেবো।"\n[সূরা গাফির ৪০:৬০]',
+        '🌙 "فَاذْكُرُونِي أَذْكُرْكُمْ"\n"তোমরা আমাকে স্মরণ করো, আমি তোমাদের স্মরণ করবো।"\n[সূরা বাকারা ২:১৫২]',
+        '🌙 "أَلَا بِذِكْرِ اللَّهِ تَطْمَئِنُّ الْقُلُوبُ"\n"জেনে রেখো, আল্লাহর স্মরণেই হৃদয় প্রশান্ত হয়।"\n[সূরা রা\'দ ১৩:২৮]',
+    ],
+    'exam': [
+        '🌙 "وَلَنَبْلُوَنَّكُم بِشَيْءٍ مِّنَ الْخَوْفِ وَالْجُوعِ"\n"আমি অবশ্যই তোমাদের পরীক্ষা করবো ভয়, ক্ষুধা দিয়ে।"\n[সূরা বাকারা ২:১৫৫]',
+        '🌙 "أَحَسِبَ النَّاسُ أَن يُتْرَكُوا أَن يَقُولُوا آمَنَّا وَهُمْ لَا يُفْتَنُونَ"\n"মানুষ কি ভাবে, \'আমরা ইমান এনেছি\' বললেই তাদের ছেড়ে দেওয়া হবে, তাদের পরীক্ষা করা হবে না?"\n[সূরা আনকাবূত ২৯:২]',
+        '🌙 "وَلَنَبْلُوَنَّكُمْ حَتَّىٰ نَعْلَمَ الْمُجَاهِدِينَ مِنكُمْ وَالصَّابِرِينَ"\n"আমি অবশ্যই তোমাদের পরীক্ষা করবো যতক্ষণ না জেনে নিই কারা জিহাদ করে ও ধৈর্যশীল।"\n[সূরা মুহাম্মদ ৪৭:৩১]',
+    ],
+    'effort': [
+        '🌙 "وَأَن لَّيْسَ لِلْإِنسَانِ إِلَّا مَا سَعَىٰ"\n"মানুষ তার চেষ্টার ফল ছাড়া কিছুই পায় না।"\n[সূরা নাজম ৫৩:৩৯]',
+        '🌙 "إِنَّ اللَّهَ لَا يُغَيِّرُ مَا بِقَوْمٍ حَتَّىٰ يُغَيِّرُوا مَا بِأَنفُسِهِمْ"\n"আল্লাহ কোনো জাতির অবস্থা পরিবর্তন করেন না যতক্ষণ না তারা নিজেদের পরিবর্তন করে।"\n[সূরা রা\'দ ১৩:১১]',
+        '🌙 "فَمَن يَعْمَلْ مِثْقَالَ ذَرَّةٍ خَيْرًا يَرَهُ"\n"যে অণু পরিমাণ ভালো কাজ করবে, সে তা দেখতে পাবে।"\n[সূরা যিলযাল ৯৯:৭]',
+    ],
+    'success': [
+        '🌙 "إِن يَنصُرْكُمُ اللَّهُ فَلَا غَالِبَ لَكُمْ"\n"আল্লাহ যদি তোমাদের সাহায্য করেন, কেউ তোমাদের পরাজিত করতে পারবে না।"\n[সূরা আলে ইমরান ৩:১৬০]',
+        '🌙 "وَمَا النَّصْرُ إِلَّا مِنْ عِندِ اللَّهِ"\n"সাহায্য তো শুধু আল্লাহর কাছ থেকেই আসে।"\n[সূরা আনফাল ৮:১০]',
+        '🌙 "إِنَّ اللَّهَ يُحِبُّ الْمُحْسِنِينَ"\n"নিশ্চয়ই আল্লাহ সৎকর্মশীলদের ভালোবাসেন।"\n[সূরা বাকারা ২:১৯৫]',
+    ],
+    'hope': [
+        '🌙 "لَا تَقْنَطُوا مِن رَّحْمَةِ اللَّهِ"\n"আল্লাহর রহমত থেকে নিরাশ হয়ো না।"\n[সূরা যুমার ৩৯:৫৩]',
+        '🌙 "إِنَّ رَحْمَتَ اللَّهِ قَرِيبٌ مِّنَ الْمُحْسِنِينَ"\n"নিশ্চয়ই আল্লাহর রহমত সৎকর্মশীলদের নিকটবর্তী।"\n[সূরা আ\'রাফ ৭:৫৬]',
+        '🌙 "وَرَحْمَتِي وَسِعَتْ كُلَّ شَيْءٍ"\n"আমার রহমত সবকিছুকে পরিবেষ্টন করে।"\n[সূরা আ\'রাফ ৭:১৫৬]',
+    ],
+}
+
+# ============================================================
+# SECTION 7: FEEDBACK MESSAGES — preserved
+# ============================================================
+FEEDBACKS = {
+    'excellent': [
+        '🌟 অসাধারণ! তুমি সত্যিই অনেক ভালো করেছো!',
+        '🏆 দারুণ! তোমার প্রস্তুতি অনেক ভালো!',
+        '💪 বাহ! দারুণ ফলাফল! এমনিতেই থাকো!',
+        '🔥 অসাধারণ! তুমি পুড়িয়ে দিচ্ছো!',
+    ],
+    'good': [
+        '✅ ভালো হয়েছে! আরও চেষ্টা করো!',
+        '👍 মোটামুটি ভালো! ইম্প্রুভ করার জায়গা আছে!',
+        '📚 ভালো! আরও পড়াশোনা করে আরও ভালো করবে!',
+    ],
+    'average': [
+        '📖 মোটামুটি! আরও পড়তে হবে!',
+        '💭 ঠিক আছে, তবে আরও ভালো করা সম্ভব!',
+        '🎯 গড় ফলাফল! নিয়মিত চর্চা করো!',
+    ],
+    'poor': [
+        '📚 বেশি করে পড়তে হবে! হাল ছেড়ো না!',
+        '💪 চিন্তা করো না! আবার চেষ্টা করো!',
+        '🌱 শুরুটা কঠিনই হয়! লেগে থাকো!',
+        '🔄 অনুশীলনের বিকল্প নেই! আবার পড়ো!',
+    ],
+}
+
+# ============================================================
+# SECTION 8: LOGGING + v4.0 OWNER ERROR FORWARDING
+# ============================================================
 LOG_FILE = os.path.join(LOG_DIR, f"bot_{datetime.now(BD_TZ).strftime('%Y-%m-%d')}.log")
 
-def log(message, level="INFO"):
+def log(message: str, level: str = "INFO") -> None:
     timestamp = datetime.now(BD_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    log_msg = f"[{timestamp}] [{level}] [BOT] {message}"
+    log_msg = f"[{timestamp}] [{level}] [ATLAS] {message}"
     print(log_msg)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(log_msg + "\n")
-
-def log_error(message):
-    log(message, "ERROR")
-    with open(os.path.join(LOG_DIR, f"errors_{datetime.now(BD_TZ).strftime('%Y-%m-%d')}.log"), "a") as f:
-        f.write(f"[{datetime.now(BD_TZ).strftime('%Y-%m-%d %H:%M:%S')}] {message}\n{traceback.format_exc()}\n{'='*50}\n")
-
-# ============================================
-# BOT APPLICATION + QUIZ STATE
-# ============================================
-application = None
-_timer_tasks = {}    # {chat_id: asyncio.Task}
-_poll_chat_map = {}  # {poll_id: chat_id}
-
-# ============================================
-# SETUP
-# ============================================
-async def setup_bot():
-    global application
-    log("🚀 Setting up bot application...")
-    application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .base_url("https://atlas-bot-proxy.hamza818483.workers.dev/bot")
-        .base_file_url("https://atlas-bot-proxy.hamza818483.workers.dev/file/bot")
-        .connect_timeout(30)
-        .read_timeout(60)
-        .write_timeout(60)
-        .build()
-    )
-    await register_handlers()
-    await set_bot_commands()
-    asyncio.create_task(daily_reset_scheduler())
-    log("✅ Bot setup complete!")
-
-async def register_handlers():
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("all", cmd_all))
-    application.add_handler(CommandHandler("bm", cmd_bm))
-    application.add_handler(CommandHandler("info", cmd_info))
-    application.add_handler(CommandHandler("permit", cmd_permit))
-    application.add_handler(CommandHandler("limit", cmd_limit))
-    application.add_handler(CommandHandler("free", cmd_free))
-    application.add_handler(CommandHandler("daily", cmd_daily))
-    application.add_handler(CommandHandler("setneg", cmd_setneg))
-    application.add_handler(CommandHandler("settimer", cmd_settimer))
-    application.add_handler(CommandHandler("tag", cmd_tag))
-    application.add_handler(CommandHandler("exp", cmd_exp))
-    application.add_handler(CommandHandler("log", cmd_log))
-    application.add_handler(PollAnswerHandler(handle_poll_answer))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_image))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    log("✅ All handlers registered")
-
-async def set_bot_commands():
-    commands = [
-        BotCommand("start", "শুরু করুন"),
-        BotCommand("all", "আপনার সব তৈরি MCQ দেখুন"),
-        BotCommand("bm", "বুকমার্ক PDF ডাউনলোড"),
-        BotCommand("info", "ইউজার রিপোর্ট (এডমিন)"),
-        BotCommand("permit", "ইউজার পারমিট (এডমিন)"),
-        BotCommand("limit", "ডেইলি লিমিট সেট (এডমিন)"),
-        BotCommand("free", "ফ্রি ট্রাই সেট (এডমিন)"),
-        BotCommand("daily", "পারমিটেড লিমিট (এডমিন)"),
-        BotCommand("setneg", "নেগেটিভ মার্ক (এডমিন)"),
-        BotCommand("settimer", "টাইমার সেট (এডমিন)"),
-        BotCommand("tag", "Quiz/Poll tag সেট (এডমিন)"),
-        BotCommand("exp", "Explanation suffix সেট (এডমিন)"),
-        BotCommand("log", "এরর লগ (এডমিন)"),
-    ]
     try:
-        await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-        log("✅ Bot commands set")
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_msg + "\n")
+    except Exception:
+        pass
+
+def log_error(message: str) -> None:
+    timestamp = datetime.now(BD_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    log(message, "ERROR")
+    error_file = os.path.join(LOG_DIR, f"errors_{datetime.now(BD_TZ).strftime('%Y-%m-%d')}.log")
+    try:
+        with open(error_file, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n{traceback.format_exc()}\n{'='*50}\n")
+    except Exception:
+        pass
+    # v4.0: auto-forward every error to OWNER (fire-and-forget)
+    try:
+        if application and _bot_loop and OWNER_ID:
+            short = str(message)[:900]
+            asyncio.run_coroutine_threadsafe(
+                application.bot.send_message(chat_id=OWNER_ID, text=f"🚨 ATLAS ERROR\n\n{short}"),
+                _bot_loop
+            )
+    except Exception:
+        pass
+
+async def notify_owner(text: str) -> None:
+    try:
+        if application and OWNER_ID:
+            await application.bot.send_message(chat_id=OWNER_ID, text=text[:4000])
+    except Exception:
+        pass
+
+async def safe_user_reply(message, custom: str = None) -> None:
+    """v4.0: user never sees raw errors — cool busy message only."""
+    try:
+        await message.reply_text(custom or BUSY_MSG)
+    except Exception:
+        pass
+
+# ============================================================
+# SECTION 9: GLOBAL VARIABLES
+# ============================================================
+application: Optional[Application] = None
+_timer_tasks: Dict[int, asyncio.Task] = {}
+_poll_chat_map: Dict[str, int] = {}
+_image_cache: Dict[str, Dict] = {}
+_last_quiz_answers: Dict[int, Dict] = {}
+_checkin_polls: Dict[str, int] = {}  # v4.0: poll_id -> user_id for 6h check-in
+_bot_start_time: Optional[datetime] = None
+
+# ============================================================
+# SECTION 10: DATABASE FUNCTIONS (Supabase) — preserved + mirror
+# ============================================================
+
+def create_user(user_id: int, first_name: str, username: str) -> bool:
+    try:
+        client = get_supabase()
+        existing = client.table('users').select('user_id').eq('user_id', user_id).execute()
+        if existing.data and len(existing.data) > 0:
+            client.table('users').update({'first_name': first_name, 'username': username}).eq('user_id', user_id).execute()
+            return True
+        else:
+            row = {
+                'user_id': user_id, 'first_name': first_name, 'username': username,
+                'is_permitted': False, 'daily_limit': DEFAULT_DAILY_LIMIT,
+                'free_limit': DEFAULT_FREE_LIMIT, 'practice_count': 0,
+                'usage_count': 0, 'last_reset': datetime.now(BD_TZ).strftime('%Y-%m-%d')
+            }
+            client.table('users').insert(row).execute()
+            mirror_insert('users', row)
+            log(f"👥 New user created: {user_id} ({first_name})")
+            return True
     except Exception as e:
-        log_error(f"Failed to set commands: {e}")
+        log_error(f"create_user error: {e}")
+        return False
 
-# ============================================
-# DAILY RESET SCHEDULER
-# ============================================
-async def daily_reset_scheduler():
-    log("⏰ Daily reset scheduler started")
-    while True:
-        now = datetime.now(BD_TZ)
-        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        wait_seconds = (midnight - now).total_seconds()
-        log(f"⏰ Next daily reset in {wait_seconds/3600:.1f} hours")
-        await asyncio.sleep(wait_seconds)
-        log("🔄 Running daily reset...")
-        reset_daily_usage()
-        log("✅ Daily reset complete!")
+def get_user(user_id: int) -> Optional[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('users').select('*').eq('user_id', user_id).execute()
+        if result.data and len(result.data) > 0:
+            return result.data[0]
+        return None
+    except Exception as e:
+        log_error(f"get_user error: {e}")
+        return None
 
-# ============================================
-# HELPERS
-# ============================================
-def is_admin(user_id):
+def update_user(user_id: int, data: Dict) -> bool:
+    try:
+        client = get_supabase()
+        client.table('users').update(data).eq('user_id', user_id).execute()
+        return True
+    except Exception as e:
+        log_error(f"update_user error: {e}")
+        return False
+
+def is_permitted(user_id: int) -> bool:
+    user = get_user(user_id)
+    if user:
+        return user.get('is_permitted', False)
+    return False
+
+def permit_user(user_id: int) -> bool:
+    return update_user(user_id, {'is_permitted': True, 'daily_limit': 50})
+
+def unpermit_user(user_id: int) -> bool:
+    return update_user(user_id, {'is_permitted': False, 'daily_limit': DEFAULT_DAILY_LIMIT})
+
+def get_all_users() -> List[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('users').select('user_id,first_name,username').execute()
+        return result.data if result.data else []
+    except Exception as e:
+        log_error(f"get_all_users error: {e}")
+        return []
+
+def get_usage_report() -> List[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('users').select('*').order('usage_count', desc=True).limit(30).execute()
+        reports = []
+        for row in (result.data or []):
+            reports.append({
+                'first_name': row.get('first_name', 'Unknown'),
+                'user_id': row.get('user_id'),
+                'usage': row.get('usage_count', 0),
+                'limit': row.get('daily_limit', 0),
+                'status': '✅ Permitted' if row.get('is_permitted') else '🔒 Free'
+            })
+        return reports
+    except Exception as e:
+        log_error(f"get_usage_report error: {e}")
+        return []
+
+def get_setting(key: str, default: Any = None) -> Any:
+    try:
+        client = get_supabase()
+        result = client.table('settings').select('value').eq('key', key).execute()
+        if result.data and len(result.data) > 0:
+            return result.data[0].get('value', default)
+        return default
+    except Exception as e:
+        log_error(f"get_setting error: {e}")
+        return default
+
+def set_setting(key: str, value: Any) -> bool:
+    try:
+        client = get_supabase()
+        existing = client.table('settings').select('key').eq('key', key).execute()
+        if existing.data and len(existing.data) > 0:
+            client.table('settings').update({'value': str(value)}).eq('key', key).execute()
+        else:
+            client.table('settings').insert({'key': key, 'value': str(value)}).execute()
+        return True
+    except Exception as e:
+        log_error(f"set_setting error: {e}")
+        return False
+
+def get_all_settings() -> Dict:
+    try:
+        client = get_supabase()
+        result = client.table('settings').select('*').execute()
+        settings = {}
+        for row in (result.data or []):
+            settings[row['key']] = row['value']
+        return settings
+    except Exception as e:
+        log_error(f"get_all_settings error: {e}")
+        return {}
+
+def get_user_limit(user_id: int) -> int:
+    user = get_user(user_id)
+    if user:
+        return user.get('daily_limit', DEFAULT_DAILY_LIMIT)
+    return DEFAULT_DAILY_LIMIT
+
+def set_user_limit(user_id: int, count: int) -> bool:
+    return update_user(user_id, {'daily_limit': count})
+
+def check_access(user_id: int) -> Tuple[bool, int, int, bool]:
+    # v4.0: Owner has unlimited access
+    if user_id == OWNER_ID:
+        return True, 0, 999999, True
+    user = get_user(user_id)
+    if not user:
+        return True, 0, DEFAULT_FREE_LIMIT, False
+    is_perm = user.get('is_permitted', False)
+    usage = user.get('usage_count', 0)
+    limit = user.get('daily_limit', DEFAULT_DAILY_LIMIT)
+    allowed = usage < limit
+    return allowed, usage, limit, is_perm
+
+def check_new_exam_limit(user_id: int) -> Tuple[bool, int, int, bool]:
+    if user_id == OWNER_ID:
+        return True, 0, 999999, True
+    user = get_user(user_id)
+    if not user:
+        return True, 0, FREE_NEW_EXAM_LIMIT, False
+    is_perm = user.get('is_permitted', False)
+    used = user.get('new_exam_count', 0)
+    last_reset = user.get('last_new_exam_reset', '')
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+    if last_reset != today:
+        used = 0
+        update_user(user_id, {'new_exam_count': 0, 'last_new_exam_reset': today})
+    limit = PERMITTED_NEW_EXAM_LIMIT if is_perm else FREE_NEW_EXAM_LIMIT
+    allowed = used < limit
+    return allowed, used, limit, is_perm
+
+def increment_new_exam_count(user_id: int) -> int:
+    user = get_user(user_id)
+    if user:
+        new_count = user.get('new_exam_count', 0) + 1
+        update_user(user_id, {'new_exam_count': new_count, 'last_new_exam_reset': datetime.now(BD_TZ).strftime('%Y-%m-%d')})
+        return new_count
+    return 0
+
+def increment_usage(user_id: int) -> int:
+    try:
+        user = get_user(user_id)
+        if user:
+            new_usage = user.get('usage_count', 0) + 1
+            new_practice = user.get('practice_count', 0) + 1
+            # v4.0: track last active date for check-in streak logic
+            update_user(user_id, {'usage_count': new_usage, 'practice_count': new_practice,
+                                  'last_reset': user.get('last_reset') or datetime.now(BD_TZ).strftime('%Y-%m-%d')})
+            return new_usage
+        return 0
+    except Exception as e:
+        log_error(f"increment_usage error: {e}")
+        return 0
+
+def reset_daily_usage() -> None:
+    try:
+        client = get_supabase()
+        today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+        client.table('users').update({'usage_count': 0, 'last_reset': today}).neq('user_id', 0).execute()
+        client.table('users').update({'new_exam_count': 0, 'last_new_exam_reset': today}).neq('last_new_exam_reset', today).execute()
+        log("✅ Daily usage reset for all users")
+    except Exception as e:
+        log_error(f"reset_daily_usage error: {e}")
+
+async def save_mcq(user_id: int, mcqs: List[Dict], source_type: str, prompt_type: str = 'prompt_1',
+             image_file_id: str = None, image_data: bytes = None,
+             chat_id: int = None, message_id: int = None, source_hash: str = None) -> str:
+    quiz_id = uuid.uuid4().hex[:16]
+    mcq_data = {
+        'quiz_id': quiz_id, 'user_id': user_id,
+        'mcqs': json.dumps(mcqs, ensure_ascii=False),
+        'source_type': source_type, 'prompt_type': prompt_type,
+        'image_file_id': image_file_id, 'chat_id': chat_id,
+        'message_id': message_id, 'created_at': datetime.now(BD_TZ).isoformat()
+    }
+    if source_hash:
+        mcq_data['source_hash'] = source_hash
+
+    # ---- D1 (primary) + Supabase (overflow/mirror) via dual storage ----
+    try:
+        await dual_insert('mcqs', mcq_data)
+    except Exception as e:
+        log_error(f"save_mcq dual_insert error: {e}")
+
+    # ---- Supabase legacy write (kept for backward compatibility / dashboards) ----
+    try:
+        client = get_supabase()
+        sb_data = dict(mcq_data)
+        try:
+            client.table('mcqs').upsert(sb_data, on_conflict='quiz_id').execute()
+        except Exception as col_e:
+            # If source_hash column doesn't exist yet, retry without it (no data loss)
+            if source_hash and 'source_hash' in str(col_e):
+                sb_data.pop('source_hash', None)
+                client.table('mcqs').upsert(sb_data, on_conflict='quiz_id').execute()
+            else:
+                raise
+        mirror_insert('mcqs', sb_data)
+    except Exception as e:
+        log_error(f"save_mcq error: {e}")
+
+    if image_file_id:
+        _image_cache[quiz_id] = {'image_file_id': image_file_id, 'prompt_type': prompt_type, 'chat_id': chat_id, 'message_id': message_id}
+    log(f"💾 MCQ saved: {quiz_id} ({len(mcqs)} questions)")
+    return quiz_id
+
+def find_cached_mcq(source_hash: str, prompt_type: str) -> Optional[Dict]:
+    """v4.0: same image+type → instant cached result (no AI call, no quota)."""
+    try:
+        client = get_supabase()
+        result = client.table('mcqs').select('*').eq('source_hash', source_hash)\
+            .eq('prompt_type', prompt_type).order('created_at', desc=True).limit(1).execute()
+        if result.data and len(result.data) > 0:
+            row = result.data[0]
+            mcqs = json.loads(row['mcqs']) if isinstance(row['mcqs'], str) else row['mcqs']
+            return {'mcqs': mcqs, 'image_file_id': row.get('image_file_id')}
+        return None
+    except Exception:
+        return None
+
+async def get_mcq(quiz_id: str) -> Optional[Dict]:
+    # ---- D1 (primary) first ----
+    try:
+        row = await dual_get_mcq(quiz_id)
+        if row:
+            mcqs = json.loads(row['mcqs']) if isinstance(row['mcqs'], str) else row['mcqs']
+            return {
+                'quiz_id': row['quiz_id'], 'user_id': row['user_id'], 'mcqs': mcqs,
+                'source_type': row.get('source_type', 'unknown'),
+                'prompt_type': row.get('prompt_type', 'prompt_1'),
+                'image_file_id': row.get('image_file_id'),
+                'chat_id': row.get('chat_id'), 'message_id': row.get('message_id'),
+                'created_at': row.get('created_at', 'Unknown')
+            }
+    except Exception as e:
+        log_error(f"get_mcq dual_get_mcq error: {e}")
+
+    # ---- Supabase fallback ----
+    try:
+        client = get_supabase()
+        result = client.table('mcqs').select('*').eq('quiz_id', quiz_id).execute()
+        if result.data and len(result.data) > 0:
+            data = result.data[0]
+            mcqs = json.loads(data['mcqs']) if isinstance(data['mcqs'], str) else data['mcqs']
+            return {
+                'quiz_id': data['quiz_id'], 'user_id': data['user_id'], 'mcqs': mcqs,
+                'source_type': data.get('source_type', 'unknown'),
+                'prompt_type': data.get('prompt_type', 'prompt_1'),
+                'image_file_id': data.get('image_file_id'),
+                'chat_id': data.get('chat_id'), 'message_id': data.get('message_id'),
+                'created_at': data.get('created_at', 'Unknown')
+            }
+        return None
+    except Exception as e:
+        log_error(f"get_mcq error: {e}")
+        return None
+
+def delete_mcq(quiz_id: str, user_id: int) -> bool:
+    """v4.0: /all delete button."""
+    try:
+        client = get_supabase()
+        client.table('mcqs').delete().eq('quiz_id', quiz_id).eq('user_id', user_id).execute()
+        _image_cache.pop(quiz_id, None)
+        log(f"🗑️ MCQ deleted: {quiz_id} by {user_id}")
+        return True
+    except Exception as e:
+        log_error(f"delete_mcq error: {e}")
+        return False
+
+def get_user_mcqs(user_id: int) -> List[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('mcqs').select('*').eq('user_id', user_id).order('created_at', desc=True).execute()
+        mcq_list = []
+        for row in (result.data or []):
+            mcqs = json.loads(row['mcqs']) if isinstance(row['mcqs'], str) else row['mcqs']
+            mcq_list.append({
+                'quiz_id': row['quiz_id'], 'mcqs': mcqs,
+                'source_type': row.get('source_type', 'unknown'),
+                'prompt_type': row.get('prompt_type', 'prompt_1'),
+                'image_file_id': row.get('image_file_id'),
+                'chat_id': row.get('chat_id'), 'message_id': row.get('message_id'),
+                'created_at': row.get('created_at', 'Unknown')
+            })
+        return mcq_list
+    except Exception as e:
+        log_error(f"get_user_mcqs error: {e}")
+        return []
+
+def save_result(user_id: int, quiz_id: str, quiz_name: str, total: int, right: int, wrong: int, skipped: int, time_taken: int, mark: float, negative_mark: float) -> bool:
+    try:
+        client = get_supabase()
+        row = {
+            'user_id': user_id, 'quiz_id': quiz_id, 'quiz_name': quiz_name,
+            'total': total, 'correct': right, 'wrong': wrong, 'skipped': skipped,
+            'time_taken': time_taken, 'mark': mark, 'negative_mark': negative_mark,
+            'created_at': datetime.now(BD_TZ).isoformat()
+        }
+        client.table('results').insert(row).execute()
+        mirror_insert('results', row)
+        log(f"📊 Result saved: {user_id} - {quiz_name} ({right}/{total})")
+        return True
+    except Exception as e:
+        log_error(f"save_result error: {e}")
+        return False
+
+def get_user_results(user_id: int, limit: int = 10) -> List[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('results').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(limit).execute()
+        return result.data if result.data else []
+    except Exception as e:
+        log_error(f"get_user_results error: {e}")
+        return []
+
+def add_bookmark(user_id: int, cache_id: str, question_index: int, question_data: Dict, topic: str = '', page: int = 0) -> bool:
+    try:
+        client = get_supabase()
+        row = {
+            'user_id': user_id, 'cache_id': cache_id, 'question_index': question_index,
+            'question_data': json.dumps(question_data, ensure_ascii=False),
+            'topic': topic, 'page': page, 'created_at': datetime.now(BD_TZ).isoformat()
+        }
+        client.table('bookmarks').insert(row).execute()
+        mirror_insert('bookmarks', row)
+        return True
+    except Exception as e:
+        log_error(f"add_bookmark error: {e}")
+        return False
+
+def get_bookmarks(user_id: int, cache_id: str) -> List[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('bookmarks').select('*').eq('user_id', user_id).eq('cache_id', cache_id).order('question_index', desc=False).execute()
+        bookmarks = []
+        for row in (result.data or []):
+            q_data = json.loads(row['question_data']) if isinstance(row['question_data'], str) else row['question_data']
+            bookmarks.append({'id': row['id'], 'question_index': row['question_index'], 'question_data': q_data, 'topic': row.get('topic', ''), 'page': row.get('page', 0)})
+        return bookmarks
+    except Exception as e:
+        log_error(f"get_bookmarks error: {e}")
+        return []
+
+def get_all_bookmarks(user_id: int) -> List[Dict]:
+    """v4.0: all bookmarks across all cache_ids for /bmexam."""
+    try:
+        client = get_supabase()
+        result = client.table('bookmarks').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(500).execute()
+        out, seen = [], set()
+        for row in (result.data or []):
+            q = json.loads(row['question_data']) if isinstance(row['question_data'], str) else row['question_data']
+            key = (q.get('question', '') or '')[:120]
+            if key and key not in seen:
+                seen.add(key)
+                out.append(q)
+        return out
+    except Exception as e:
+        log_error(f"get_all_bookmarks error: {e}")
+        return []
+
+def delete_bookmark(user_id: int, cache_id: str, question_index: int) -> bool:
+    try:
+        client = get_supabase()
+        client.table('bookmarks').delete().eq('user_id', user_id).eq('cache_id', cache_id).eq('question_index', question_index).execute()
+        return True
+    except Exception as e:
+        log_error(f"delete_bookmark error: {e}")
+        return False
+
+def get_prompts_from_db() -> Dict:
+    try:
+        client = get_supabase()
+        result = client.table('prompts').select('*').execute()
+        if result.data and len(result.data) > 0:
+            prompts = {}
+            for row in result.data:
+                pkey = row.get('prompt_key')
+                if not pkey:
+                    continue
+                prompts[pkey] = {'name': row.get('prompt_name', pkey), 'text': row.get('prompt_text', '')}
+            return prompts or PROMPT_MAP
+        return PROMPT_MAP
+    except Exception as e:
+        log_error(f"get_prompts_from_db error: {e}")
+        return PROMPT_MAP
+
+def update_prompt_in_db(prompt_key: str, prompt_name: str, prompt_text: str) -> bool:
+    try:
+        client = get_supabase()
+        existing = client.table('prompts').select('prompt_key').eq('prompt_key', prompt_key).execute()
+        if existing.data and len(existing.data) > 0:
+            client.table('prompts').update({'prompt_name': prompt_name, 'prompt_text': prompt_text, 'updated_at': datetime.now(BD_TZ).isoformat()}).eq('prompt_key', prompt_key).execute()
+        else:
+            client.table('prompts').insert({'prompt_key': prompt_key, 'prompt_name': prompt_name, 'prompt_text': prompt_text, 'is_active': True, 'updated_at': datetime.now(BD_TZ).isoformat()}).execute()
+        log(f"📝 Prompt updated: {prompt_key}")
+        return True
+    except Exception as e:
+        log_error(f"update_prompt_in_db error: {e}")
+        return False
+
+def save_active_quiz(chat_id: int, quiz_data: Dict) -> bool:
+    try:
+        client = get_supabase()
+        client.table('active_quizzes').upsert({'chat_id': chat_id, 'quiz_data': json.dumps(quiz_data, ensure_ascii=False), 'created_at': datetime.now(BD_TZ).isoformat()}).execute()
+        return True
+    except Exception as e:
+        log_error(f"save_active_quiz error: {e}")
+        return False
+
+def get_active_quiz(chat_id: int) -> Optional[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('active_quizzes').select('*').eq('chat_id', chat_id).execute()
+        if result.data and len(result.data) > 0:
+            quiz_data = json.loads(result.data[0]['quiz_data']) if isinstance(result.data[0]['quiz_data'], str) else result.data[0]['quiz_data']
+            return quiz_data
+        return None
+    except Exception as e:
+        log_error(f"get_active_quiz error: {e}")
+        return None
+
+def remove_active_quiz(chat_id: int) -> bool:
+    try:
+        client = get_supabase()
+        client.table('active_quizzes').delete().eq('chat_id', chat_id).execute()
+        return True
+    except Exception as e:
+        log_error(f"remove_active_quiz error: {e}")
+        return False
+
+# ============================================================
+# SECTION 11: HELPER FUNCTIONS — preserved
+# ============================================================
+
+def is_admin(user_id: int) -> bool:
     return user_id == OWNER_ID
 
-def get_user_info(update: Update):
+def get_user_info(update: Update) -> Dict:
     user = update.effective_user
     return {
         'user_id': user.id,
         'first_name': user.first_name or "User",
-        'username': user.username or ""
+        'username': user.username or "",
+        'full_name': f"{user.first_name or ''} {user.last_name or ''}".strip()
     }
 
-def get_feedback(percentage):
+def get_ayat(score: Optional[float] = None) -> str:
+    if score is not None:
+        if score >= 80:
+            category = random.choice(['success', 'hope'])
+        elif score >= 60:
+            category = random.choice(['hope', 'effort'])
+        elif score >= 40:
+            category = random.choice(['effort', 'patience'])
+        else:
+            category = random.choice(['hardship', 'patience'])
+    else:
+        category = random.choice(['tawakkul', 'exam', 'ibadah'])
+    ayats_list = AYATS.get(category, AYATS['hope'])
+    return random.choice(ayats_list)
+
+def get_feedback(percentage: float) -> str:
     if percentage >= 90:
         return random.choice(FEEDBACKS['excellent'])
     elif percentage >= 75:
@@ -173,8 +1182,7 @@ def get_feedback(percentage):
     else:
         return random.choice(FEEDBACKS['poor'])
 
-def apply_tag_exp(mcqs):
-    """Apply global tag/exp to MCQ list"""
+def apply_tag_exp(mcqs: List[Dict]) -> List[Dict]:
     tag = get_setting('quiz_tag', '')
     exp_text = get_setting('quiz_exp', '')
     if not tag and not exp_text:
@@ -189,222 +1197,602 @@ def apply_tag_exp(mcqs):
         result.append(m)
     return result
 
-def format_poll_question(mcq, q_num):
-    """Format poll question with tag"""
+def format_poll_question(mcq: Dict, q_num: int) -> str:
     tag = mcq.get('_tag', '')
-    q = mcq['question']
-    text = f"[{tag}]\n\n{q_num}. {q}" if tag else f"{q_num}. {q}"
+    q = mcq.get('question', '')
+    if tag:
+        text = f"[{tag}]\n\n{q_num}. {q}"
+    else:
+        text = f"{q_num}. {q}"
     return text[:300]
 
-def format_explanation(mcq):
-    """Format explanation with exp suffix"""
+def format_explanation(mcq: Dict) -> str:
     exp = mcq.get('explanation', 'ব্যাখ্যা পাওয়া যায়নি')
     suffix = mcq.get('_exp', '')
-    text = f"{exp}\n\n📌 {suffix}" if suffix else exp
+    if suffix:
+        text = f"{exp}\n\n📌 {suffix}"
+    else:
+        text = exp
     return text[:200]
 
-# ============================================
-# COMMAND: /start
-# ============================================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def get_prompt_display_name(prompt_type: str) -> str:
+    prompt_map = get_prompts_from_db()
+    if prompt_type in prompt_map:
+        return prompt_map[prompt_type].get('name', prompt_type)
+    return PROMPT_MAP.get(prompt_type, {}).get('name', prompt_type)
+
+def generate_caption(user: Dict, practice_no: int, total_mcq: int, prompt_name: str = '') -> str:
+    ayat = get_ayat(None)
+    prompt_line = f"\n📋 Type: {prompt_name}" if prompt_name else ""
+    caption = f"""🌟 স্বাগতম প্রিয় শিক্ষার্থী {user['first_name']}..!
+🚀 Today Practice No: {practice_no:02d}
+✅ Total MCQ: {total_mcq}{prompt_line}
+
+{ayat}"""
+    return caption
+
+def clean_mcq_options(mcqs: List[Dict]) -> List[Dict]:
+    """v4.0: ensure no A)/ক) prefixes anywhere (also for old cached sets)."""
+    out = []
+    for m in mcqs:
+        m2 = dict(m)
+        opts = m2.get('options', [])
+        m2['options'] = [clean_option_prefix(o, i) for i, o in enumerate(opts)]
+        out.append(m2)
+    return out
+
+def share_button(quiz_id: str) -> InlineKeyboardButton:
+    """v4.0: Share & Challenge deep-link button."""
+    uname = BOT_USERNAME or "atlasprepbot"
+    return InlineKeyboardButton("🔗 Share & Challenge Your Friend",
+                                url=f"https://t.me/share/url?url=https://t.me/{uname}?start=quiz_{quiz_id}&text=🔥 ATLAS Quiz Challenge! তুমিও Solve করে দেখাও!")
+
+def mcq_set_keyboard(quiz_id: str, user_id: int = 0) -> List[List[InlineKeyboardButton]]:
+    return [
+        [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
+        [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+        [InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data=f"crpdf_k_{quiz_id}"), InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data=f"crpdf_c_{quiz_id}")],
+        [share_button(quiz_id)],
+    ]
+
+# ============================================================
+# SECTION 12: MCQ GENERATOR (v4.0 — Multi-AI fallback + cache)
+# ============================================================
+
+async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
+    """Generate MCQs from an image — Gemini→NVIDIA→OpenRouter chain + cache."""
+    try:
+        # v4.0: instant cache hit for same image+prompt_type
+        src_hash = hashlib.md5(image_bytes).hexdigest() + f"_{prompt_type}"
+        cached = find_cached_mcq(src_hash, prompt_type)
+        if cached and cached.get('mcqs'):
+            log(f"⚡ Cache hit for image (prompt: {prompt_type})")
+            return clean_mcq_options(cached['mcqs']), None
+
+        prompts = get_prompts_from_db()
+        prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
+        prompt_text = prompt_text + '\n\nIMPORTANT (Language Auto-Detect): Detect the language of the source content. Generate ALL questions, options and explanations in that SAME language (English source -> English MCQ, Bengali source -> Bengali MCQ, any other language -> that language).'
+
+        response_text, provider = await ai_generate(prompt_text, image_bytes)
+        if not response_text:
+            return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
+
+        valid_mcqs = parse_mcq_json(response_text)
+        # v4.0 FIX: if AI returned too few (e.g. True/False or Mixed giving 1),
+        # retry once with an explicit "more questions" instruction.
+        if 0 < len(valid_mcqs) < MIN_MCQ:
+            log(f"⚠️ Only {len(valid_mcqs)} MCQs — retrying for more (prompt: {prompt_type})")
+            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও, source এর প্রতিটি তথ্য ব্যবহার করো। JSON array তে ১৫+ object থাকতেই হবে।"
+            rt, rp = await ai_generate(retry_prompt, image_bytes)
+            if rt:
+                retry_mcqs = parse_mcq_json(rt)
+                if len(retry_mcqs) > len(valid_mcqs):
+                    valid_mcqs = retry_mcqs
+                    provider = rp
+        if len(valid_mcqs) == 0:
+            return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
+        valid_mcqs = valid_mcqs[:MAX_MCQ]
+        log(f"✅ Generated {len(valid_mcqs)} MCQs from image (prompt: {prompt_type}, provider: {provider})")
+        return valid_mcqs, None
+
+    except json.JSONDecodeError as e:
+        log_error(f"JSON parse error: {e}")
+        return [], "MCQ ফরম্যাটে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
+    except Exception as e:
+        log_error(f"AI image generation error: {e}")
+        return [], "MCQ তৈরি করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
+
+async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
+    """Generate MCQs from text — Multi-AI fallback chain + cache."""
+    try:
+        src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + f"_{prompt_type}"
+        cached = find_cached_mcq(src_hash, prompt_type)
+        if cached and cached.get('mcqs'):
+            log(f"⚡ Cache hit for text (prompt: {prompt_type})")
+            return clean_mcq_options(cached['mcqs']), None
+
+        prompts = get_prompts_from_db()
+        prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
+        prompt_text = prompt_text + '\n\nIMPORTANT (Language Auto-Detect): Detect the language of the source content. Generate ALL questions, options and explanations in that SAME language (English source -> English MCQ, Bengali source -> Bengali MCQ, any other language -> that language).'
+        full_prompt = f"{prompt_text}\n\n📄 INPUT TEXT:\n{text}"
+
+        response_text, provider = await ai_generate(full_prompt, None)
+        if not response_text:
+            return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
+
+        valid_mcqs = parse_mcq_json(response_text)
+        if 0 < len(valid_mcqs) < MIN_MCQ:
+            log(f"⚠️ Only {len(valid_mcqs)} MCQs (text) — retrying for more")
+            retry_prompt = full_prompt + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।"
+            rt, rp = await ai_generate(retry_prompt, None)
+            if rt:
+                retry_mcqs = parse_mcq_json(rt)
+                if len(retry_mcqs) > len(valid_mcqs):
+                    valid_mcqs = retry_mcqs
+                    provider = rp
+        if len(valid_mcqs) == 0:
+            return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
+        valid_mcqs = valid_mcqs[:MAX_MCQ]
+        log(f"✅ Generated {len(valid_mcqs)} MCQs from text (prompt: {prompt_type}, provider: {provider})")
+        return valid_mcqs, None
+
+    except json.JSONDecodeError as e:
+        log_error(f"JSON parse error: {e}")
+        return [], "MCQ ফরম্যাটে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
+    except Exception as e:
+        log_error(f"AI text generation error: {e}")
+        return [], "MCQ তৈরি করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
+
+async def download_image(url: str) -> Optional[bytes]:
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                return response.content
+        return None
+    except Exception as e:
+        log_error(f"download_image error: {e}")
+        return None
+
+# ============================================================
+# SECTION 12B: LIVE PROGRESS — preserved from v3.0
+# ============================================================
+
+PROGRESS_BAR_LEN = 7
+
+def _progress_bar(pct: int) -> str:
+    filled = int(round(PROGRESS_BAR_LEN * pct / 100))
+    return "▰" * filled + "▱" * (PROGRESS_BAR_LEN - filled)
+
+async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8) -> None:
+    """Edits a message every ~1.5s with live ETA countdown, % and MCQ count."""
+    start = time.time()
+    try:
+        while True:
+            elapsed = time.time() - start
+            pct = min(94, int(elapsed / total_eta * 100))
+            eta_left = max(1, int(total_eta - elapsed))
+            made = max(1, int(pct / 100 * 22))
+            text = (
+                f"🔄 {source_label} থেকে MCQ তৈরি হচ্ছে...\n"
+                f"⏱️ আনুমানিক সময়: {eta_left} সেকেন্ড\n"
+                f"📊 Progress: {_progress_bar(pct)} {pct}%\n"
+                f"✅ তৈরি হয়েছে: {made} টি MCQ"
+            )
+            try:
+                await edit_fn(text)
+            except Exception:
+                pass
+            await asyncio.sleep(1.5)
+    except asyncio.CancelledError:
+        pass
+
+async def send_countdown(chat_id: int) -> None:
+    """3-2-1 countdown (~1 sec total) before Poll/Quiz starts."""
+    try:
+        msg = await application.bot.send_message(chat_id=chat_id, text="3️⃣")
+        for t in ("2️⃣", "1️⃣"):
+            await asyncio.sleep(0.35)
+            try:
+                await msg.edit_text(t)
+            except Exception:
+                pass
+        await asyncio.sleep(0.3)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        log_error(f"Countdown error: {e}")
+
+# ============================================================
+# SECTION 13: COMMAND HANDLERS
+# ============================================================
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
-    log(f"📱 /start from {user['user_id']} ({user['first_name']})")
-    create_user(user['user_id'], user['first_name'], user['username'])
-    allowed, usage, limit, is_perm = check_access(user['user_id'])
+    user_id = user['user_id']
+    first_name = user['first_name']
+    log(f"📱 /start from {user_id} ({first_name})")
+    create_user(user_id, first_name, user['username'])
+
+    # v4.0: Share & Challenge deep link — /start quiz_<id>
+    if context.args and context.args[0].startswith('quiz_'):
+        quiz_id = context.args[0].replace('quiz_', '').strip()
+        mcq_data = await get_mcq(quiz_id)
+        if mcq_data:
+            mcqs = mcq_data['mcqs']
+            prompt_name = get_prompt_display_name(mcq_data.get('prompt_type', 'prompt_1'))
+            text = (f"🔥 Quiz Challenge গ্রহণ করো, {first_name}!\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📝 Total MCQ: {len(mcqs)}\n📋 Type: {prompt_name}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}")
+            kb = mcq_set_keyboard(quiz_id, user_id)
+            image_file_id = mcq_data.get('image_file_id')
+            try:
+                if image_file_id:
+                    await update.message.reply_photo(photo=image_file_id, caption=text, reply_markup=InlineKeyboardMarkup(kb))
+                else:
+                    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+            except Exception:
+                await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+            return
+        else:
+            await update.message.reply_text("❌ Quiz টি পাওয়া যায়নি বা মেয়াদোত্তীর্ণ।")
+
+    allowed, usage, limit, is_perm = check_access(user_id)
     status = "✅ Permitted" if is_perm else "🔒 Free"
-    welcome = f"""
-Assalamu Alaikum 🌙
-Atlas এ আপনাকে স্বাগতম, dear {user['first_name']}!
 
-একটি Image অথবা Text পাঠান —
-আমি সাথে সাথে MCQ বানিয়ে দিবো।
+    if is_admin(user_id):
+        welcome = f"""🔐 **ADMIN PANEL**
+━━━━━━━━━━━━━━━━━━━━━━
+👋 Welcome, {first_name}!
 
-📊 আজকের ব্যবহার: {usage}/{limit}
-📋 Status: {status}
+👥 **ইউজার ম্যানেজমেন্ট:**
+  /permit `<user_id>` — ইউজার পারমিট (100/day)
+  /permit remove `<user_id>` — পারমিট রিমুভ
+  /info — ইউজার ইউসেজ রিপোর্ট
 
-কমান্ডসমূহ:
-/all - আপনার সব তৈরি করা MCQ দেখুন
-/bm - বুকমার্ক করা MCQ এর PDF ডাউনলোড
-"""
-    await update.message.reply_text(welcome)
+⚙️ **সেটিংস:**
+  /limit `<count>` — সবার ডেইলি লিমিট
+  /limit `<user_id>` `<count>` — নির্দিষ্ট ইউজার লিমিট
+  /free `<count>` — ফ্রি লিমিট
+  /daily `<count>` — পারমিটেড লিমিট
+  /setneg `<value>` — নেগেটিভ মার্ক (-0.50)
+  /settimer `<seconds>` — কুইজ টাইমার
+  /tag `<text>` — কুইজ ট্যাগ (off দিলে রিমুভ)
+  /exp `<text>` — এক্সপ্লানেশন suffix
 
-# ============================================
-# COMMAND: /all
-# ============================================
-async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+📝 **প্রম্পট:**
+  /prompt — প্রম্পট লিস্ট/এডিট/অ্যাড
+
+📨 **ব্রডকাস্ট:**
+  /send — কোনো মেসেজে reply দিয়ে সবাইকে পাঠান
+
+📊 **অন্যান্য:**
+  /log — আজকের এরর লগ
+  /error — Latest error log (v4.0)
+  /class add — ফ্রী ক্লাস অ্যাড
+  /help — সব কমান্ডের বিস্তারিত
+
+━━━━━━━━━━━━━━━━━━━━━━
+📊 **Today:** {usage}/{limit} | 👥 **Status:** {status}"""
+    else:
+        welcome = f"""🌟 স্বাগতম {first_name}..!
+
+🚀 **ATLAS MCQ BOT** এ আপনাকে স্বাগতম!
+
+📸 একটি **Image/PDF** অথবা **Text** পাঠান — আমি সাথে সাথে MCQ বানিয়ে দিবো।
+
+📊 **আজকের ব্যবহার:** {usage}/{limit}
+📋 **Status:** {status}
+
+📋 **কমান্ড:**
+  /start — বট শুরু
+  /all — আপনার সব তৈরি করা MCQ দেখুন
+  /timer — 🍅 Pomodoro Study Timer
+  /revision — 🔁 আগের MCQ ঝালাই
+  /random — 🎲 Random MCQ Practice
+  /progress — 📊 নিজের অগ্রগতি দেখুন
+  /report — 📈 বিগত দিনের Report
+  /gpa — 🎯 MBBS GPA Score হিসাব
+  /bmexam — 🔖 Bookmark MCQ দিয়ে Exam
+  /class — 🎓 এটলাসের ফ্রী ক্লাস
+  /bm — বুকমার্ক করা MCQ এর PDF ডাউনলোড
+  /help — সাহায্য"""
+    await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
-    log(f"📚 /all from {user['user_id']}")
-    mcqs_data = get_user_mcqs(user['user_id'])
-    if not mcqs_data:
-        await update.message.reply_text("📭 আপনার কোনো সংরক্ষিত MCQ নেই।")
+    user_id = user['user_id']
+    if not is_admin(user_id):
+        help_text = (
+            "📋 <b>সাহায্য</b>\n\n"
+            "👥 <b>ইউজার কমান্ড:</b>\n"
+            "  /start — বট শুরু, স্বাগতম মেসেজ\n"
+            "  /all — আপনার সব তৈরি করা MCQ সেট দেখুন\n"
+            "  /timer — 🍅 Pomodoro Study Timer\n"
+            "  /revision — 🔁 All/Mistake/Special MCQ ঝালাই\n"
+            "  /random — 🎲 সব MCQ থেকে Random Practice\n"
+            "  /progress — 📊 Progress Chart + Analysis\n"
+            "  /report — 📈 ৩/৭/১৫/৩০ দিনের Report\n"
+            "  /gpa — 🎯 SSC+HSC GPA দিয়ে MBBS Score\n"
+            "  /bmexam — 🔖 Bookmark করা MCQ দিয়ে Exam\n"
+            "  /class — 🎓 এটলাসের ফ্রী ক্লাস (YouTube)\n"
+            "  /bm — বুকমার্ক করা MCQ এর PDF ডাউনলোড\n\n"
+            "📸 <b>কিভাবে MCQ বানাবেন:</b>\n"
+            "  1. একটি Image/PDF পাঠান\n"
+            "  2. MCQ টাইপ সিলেক্ট করুন (৪ ধরনের)\n"
+            "  3. MCQ রেডি! Poll/Quiz/Web Exam দিন\n"
+            "  4. 🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক PDF ও নিতে পারবেন!\n\n"
+            "📝 <b>MCQ টাইপ:</b>\n"
+            "  🩺 Medical Standard — সাধারণ মেডিকেল MCQ\n"
+            "  ✅ সত্য-মিথ্যা — True/False স্টাইল\n"
+            "  🔥 কঠিন প্রশ্ন — অ্যাডভান্সড লেভেল\n"
+            "  🎲 Mixed — সবগুলো মিলিয়ে\n\n"
+            "❓ <b>কোনো সমস্যা?</b> এডমিনের সাথে যোগাযোগ করুন।\n"
+            "🔗 Owner: @rafi_somc"
+        )
+        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
         return
-    await update.message.reply_text(f"📚 আপনার মোট {len(mcqs_data)} টি MCQ সেট আছে। লোড হচ্ছে...")
+    help_text = (
+        "📋 <b>ALL COMMANDS — ADMIN</b>\n\n"
+        "👥 <b>ইউজার কমান্ড:</b>\n"
+        "  /start, /all, /bm, /bmexam, /gpa, /timer, /revision, /random, /progress, /report, /class, /help\n\n"
+        "👨‍💼 <b>এডমিন কমান্ড:</b>\n"
+        "  /permit &lt;id&gt; — পারমিট (50/day)\n"
+        "  /permit remove &lt;id&gt; — পারমিট রিমুভ\n"
+        "  /info — ইউজার রিপোর্ট\n"
+        "  /limit &lt;count&gt; — সবার ডেইলি লিমিট\n"
+        "  /limit &lt;id&gt; &lt;count&gt; — নির্দিষ্ট ইউজার\n"
+        "  /free &lt;count&gt; — ফ্রি লিমিট\n"
+        "  /daily &lt;count&gt; — পারমিটেড লিমিট\n"
+        "  /setneg &lt;value&gt; — নেগেটিভ মার্ক\n"
+        "  /settimer &lt;sec&gt; — টাইমার\n"
+        "  /tag &lt;text&gt; — ট্যাগ (off=রিমুভ)\n"
+        "  /exp &lt;text&gt; — exp suffix (off=রিমুভ)\n"
+        "  /prompt — প্রম্পট ম্যানেজমেন্ট\n"
+        "  /send — ব্রডকাস্ট\n"
+        "  /log — এরর লগ\n"
+        "  /error — Latest error log\n"
+        "  /class add — ক্লাস অ্যাড\n"
+        "  /keys — AI Key স্ট্যাটাস\n"
+        "  /live — CSV থেকে Live Quiz"
+    )
+    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+
+async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    user_id = user['user_id']
+    log(f"📚 /all from {user_id}")
+    mcqs_data = get_user_mcqs(user_id)
+    if not mcqs_data:
+        await update.message.reply_text("📭 আপনার কোনো সংরক্ষিত MCQ নেই।\n\nএকটি Image বা Text পাঠিয়ে MCQ বানান!")
+        return
+    await update.message.reply_text(f"📚 আপনার মোট **{len(mcqs_data)}** টি MCQ সেট আছে। লোড হচ্ছে...", parse_mode=ParseMode.MARKDOWN)
     for i, mcq_data in enumerate(mcqs_data):
         try:
             mcqs = mcq_data['mcqs']
-            source_type = mcq_data.get('source_type', 'text')
             quiz_id = mcq_data['quiz_id']
+            prompt_type = mcq_data.get('prompt_type', 'prompt_1')
             count = len(mcqs)
             created = mcq_data.get('created_at', 'Unknown')
-            text = f"📦 MCQ Set #{i+1}\n📝 {count} টি প্রশ্ন\n📅 {created[:10] if created else 'Unknown'}\n🔄 Type: {source_type}"
+            prompt_name = get_prompt_display_name(prompt_type)
+            # v4.0: date + time both shown
+            created_str = f"{created[:10]} 🕐 {created[11:16]}" if created and len(str(created)) >= 16 else (created[:10] if created else 'Unknown')
+            text = f"📦 MCQ Set #{i+1}\n📝 {count} টি প্রশ্ন\n📋 Type: {prompt_name}\n🔄 Source: {mcq_data.get('source_type','text')}\n📅 {created_str}"
             keyboard = [
-                [
-                    InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"),
-                    InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}"),
-                ],
-                [
-                    InlineKeyboardButton("🌐 Website Exam", url=f"https://hamzaHF1-atlasbot.hf.space/exam/{quiz_id}")
-                ]
+                [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
+                [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+                [InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{quiz_id}"), share_button(quiz_id)],
             ]
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            image_file_id = mcq_data.get('image_file_id')
+            if image_file_id:
+                try:
+                    await update.message.reply_photo(photo=image_file_id, caption=text, reply_markup=InlineKeyboardMarkup(keyboard))
+                except Exception:
+                    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             await asyncio.sleep(0.5)
         except Exception as e:
             log_error(f"Error showing MCQ set {i}: {e}")
             continue
 
-# ============================================
-# COMMAND: /bm
-# ============================================
-async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     log(f"📑 /bm from {user['user_id']}")
     await update.message.reply_text(
-        "🔖 বুকমার্ক PDF ফিচার শীঘ্রই আসছে!\n\n"
-        "Website Exam এ গিয়ে প্রশ্ন বুকমার্ক করতে পারবেন।\n"
-        "তারপর /bm দিয়ে PDF ডাউনলোড করতে পারবেন।"
+        "🔖 **বুকমার্ক PDF**\n\nWeb Exam এ গিয়ে প্রশ্ন বুকমার্ক করতে পারবেন।\nতারপর এখান থেকে PDF ডাউনলোড করতে পারবেন।\n\n🌐 Web Exam দিতে MCQ সেট থেকে 'Web Exam' বাটনে ক্লিক করুন।\n\n💡 Bookmark MCQ দিয়ে Exam দিতে: /bmexam",
+        parse_mode=ParseMode.MARKDOWN
     )
 
-# ============================================
-# COMMAND: /info (Admin)
-# ============================================
-async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ── v4.0: /bmexam ──
+async def cmd_bmexam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    user_id = user['user_id']
+    log(f"🔖 /bmexam from {user_id}")
+    bms = get_all_bookmarks(user_id)
+    if not bms:
+        await update.message.reply_text("📭 আপনার কোনো Bookmark করা MCQ নেই।\n\n🌐 Web Exam এ গিয়ে 🔖 বাটনে চাপ দিয়ে প্রশ্ন Bookmark করুন!")
+        return
+    _pending_input[user_id] = {'type': 'bmexam_count'}
+    await update.message.reply_text(
+        f"🔖 **Bookmark Exam!**\n━━━━━━━━━━━━━━━━━━━━━━\n📦 আপনার মোট Bookmark করা MCQ: **{len(bms)}** টি\n\nকয়টা প্রশ্নে Exam দিতে চান?\nসংখ্যা লিখুন (যেমন: 5/10) অথবা সব প্রশ্নে দিতে \"All\" লিখুন",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# ── v4.0: /gpa ──
+async def cmd_gpa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    log(f"🎯 /gpa from {user['user_id']}")
+    _pending_input[user['user_id']] = {'type': 'gpa_ssc'}
+    await update.message.reply_text("🎯 **MBBS GPA Score Calculator**\n━━━━━━━━━━━━━━━━━━━━━━\n\n১) আপনার SSC GPA কত? (যেমন: 5.00)", parse_mode=ParseMode.MARKDOWN)
+
+# ── v4.0: /error (admin) ──
+async def cmd_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
-    report = get_usage_report()
-    if not report:
+    error_file = os.path.join(LOG_DIR, f"errors_{datetime.now(BD_TZ).strftime('%Y-%m-%d')}.log")
+    try:
+        if os.path.exists(error_file):
+            with open(error_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            if content.strip():
+                tail = content[-3800:]
+                await update.message.reply_text(f"🚨 Latest Errors:\n\n{tail}")
+            else:
+                await update.message.reply_text("✅ আজ কোনো error নেই!")
+        else:
+            await update.message.reply_text("✅ আজ কোনো error নেই!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Log read error: {e}")
+
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
+        return
+    try:
+        client = get_supabase()
+        all_rows = client.table('users').select('user_id,first_name,is_permitted,usage_count,daily_limit,practice_count').order('practice_count', desc=True).execute().data or []
+    except Exception as e:
+        log_error(f"/info query error: {e}")
+        all_rows = []
+    if not all_rows:
         await update.message.reply_text("📊 কোনো ইউজার ডাটা নেই।")
         return
-    text = "📊 *User Usage Report*\n\n"
-    for i, row in enumerate(report[:20], 1):
-        text += f"{i}. {row['first_name']} - {row['usage']}/{row['limit']} {row['status']}\n"
-    if len(report) > 20:
-        text += f"\n... আরো {len(report)-20} জন ইউজার"
-    text += f"\n\n🔄 Total Users: {len(report)}"
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-# ============================================
-# COMMAND: /permit (Admin)
-# ============================================
-async def cmd_permit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user_info(update)
-    if not is_admin(user['user_id']):
-        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
-        return
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /permit <user_id> বা /permit remove <user_id>")
-        return
-    if args[0].lower() == 'remove' and len(args) > 1:
-        target_id = int(args[1])
-        unpermit_user(target_id)
-        await update.message.reply_text(f"❌ User {target_id} permit removed.")
+    paid = sorted([r for r in all_rows if r.get('is_permitted')], key=lambda r: r.get('practice_count', 0), reverse=True)
+    free = sorted([r for r in all_rows if not r.get('is_permitted')], key=lambda r: r.get('practice_count', 0), reverse=True)
+    header = (
+        f"📊 <b>USER USAGE REPORT</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 <b>Total Users:</b> {len(all_rows)}\n"
+        f"🌟 <b>Permitted:</b> {len(paid)}\n"
+        f"🔒 <b>Free:</b> {len(free)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    permitted_text = "🌟 <b>PERMITTED USERS:</b>\n"
+    if not paid:
+        permitted_text += "  কোনো permitted ইউজার নেই।\n"
+    for i, r in enumerate(paid, 1):
+        permitted_text += f"{i}. {r.get('first_name','?')} (<code>{r.get('user_id')}</code>) — 📚 {r.get('practice_count',0)} | Today {r.get('usage_count',0)}/{r.get('daily_limit',0)}\n"
+    free_text = "\n🔒 <b>FREE USERS:</b>\n"
+    if not free:
+        free_text += "  কোনো free ইউজার নেই।\n"
+    for i, r in enumerate(free, 1):
+        free_text += f"{i}. {r.get('first_name','?')} (<code>{r.get('user_id')}</code>) — 📚 {r.get('practice_count',0)} | Today {r.get('usage_count',0)}/{r.get('daily_limit',0)}\n"
+    full_text = header + permitted_text + free_text
+    if len(full_text) <= 4000:
+        await update.message.reply_text(full_text, parse_mode=ParseMode.HTML)
     else:
-        target_id = int(args[0])
-        permit_user(target_id)
-        await update.message.reply_text(f"✅ User {target_id} permitted!")
+        await update.message.reply_text(header + permitted_text[:3800], parse_mode=ParseMode.HTML)
+        if free_text.strip():
+            await update.message.reply_text(free_text[:4000], parse_mode=ParseMode.HTML)
 
-# ============================================
-# COMMAND: /limit (Admin)
-# ============================================
-async def cmd_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_permit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: /limit <count> বা /limit <user_id> <count>")
+        await update.message.reply_text("Usage:\n`/permit <user_id>` — পারমিট\n`/permit remove <user_id>` — রিমুভ", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        if args[0].lower() == 'remove' and len(args) > 1:
+            target_id = int(args[1])
+            unpermit_user(target_id)
+            await update.message.reply_text(f"❌ User {target_id} permit removed.")
+            log(f"🔒 Permit removed: {target_id}")
+        else:
+            target_id = int(args[0])
+            existing = get_user(target_id)
+            if not existing:
+                create_user(target_id, f"User_{target_id}", "")
+            permit_user(target_id)
+            await update.message.reply_text(f"✅ User {target_id} permitted!\n📦 Premium Access: 50 pages/day\n🔄 Reset: প্রতি ২৪ ঘণ্টায়")
+            log(f"🔓 Permit granted: {target_id} (50/day premium)")
+    except ValueError:
+        await update.message.reply_text("❌ সঠিক User ID দিন। যেমন: /permit 123456789")
+
+async def cmd_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage:\n`/limit <count>` — সবার\n`/limit <user_id> <count>` — নির্দিষ্ট ইউজার", parse_mode=ParseMode.MARKDOWN)
         return
     if len(args) == 1:
         count = int(args[0])
         set_setting('daily_limit', count)
-        await update.message.reply_text(f"✅ সবার daily limit {count} সেট করা হয়েছে।")
+        await update.message.reply_text(f"✅ সবার daily limit **{count}** সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
     elif len(args) == 2:
         target_id = int(args[0])
         count = int(args[1])
         set_user_limit(target_id, count)
-        await update.message.reply_text(f"✅ User {target_id} এর limit {count} সেট করা হয়েছে।")
+        await update.message.reply_text(f"✅ User `{target_id}` এর limit **{count}** সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
 
-# ============================================
-# COMMAND: /free (Admin)
-# ============================================
-async def cmd_free(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: /free <count>")
+        current = get_setting('free_limit', DEFAULT_FREE_LIMIT)
+        await update.message.reply_text(f"বর্তমান free limit: **{current}**\nUsage: `/free <count>`", parse_mode=ParseMode.MARKDOWN)
         return
     count = int(args[0])
     set_setting('free_limit', count)
-    await update.message.reply_text(f"✅ Free users {count} বার use করতে পারবে।")
+    await update.message.reply_text(f"✅ Free users **{count}** বার use করতে পারবে।", parse_mode=ParseMode.MARKDOWN)
 
-# ============================================
-# COMMAND: /daily (Admin)
-# ============================================
-async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: /daily <count>")
+        current = get_setting('daily_limit', DEFAULT_DAILY_LIMIT)
+        await update.message.reply_text(f"বর্তমান permitted daily limit: **{current}**\nUsage: `/daily <count>`", parse_mode=ParseMode.MARKDOWN)
         return
     count = int(args[0])
     set_setting('daily_limit', count)
-    await update.message.reply_text(f"✅ Permitted users দৈনিক {count} বার use করতে পারবে।")
+    await update.message.reply_text(f"✅ Permitted users দৈনিক **{count}** বার use করতে পারবে।", parse_mode=ParseMode.MARKDOWN)
 
-# ============================================
-# COMMAND: /setneg (Admin)
-# ============================================
-async def cmd_setneg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_setneg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: /setneg <value>\nExample: /setneg -0.50")
+        current = get_setting('negative_mark', DEFAULT_NEGATIVE_MARK)
+        await update.message.reply_text(f"বর্তমান negative mark: **{current}**\nUsage: `/setneg -0.50`", parse_mode=ParseMode.MARKDOWN)
         return
     value = float(args[0])
     set_setting('negative_mark', value)
-    await update.message.reply_text(f"✅ Negative mark {value} সেট করা হয়েছে।")
+    await update.message.reply_text(f"✅ Negative mark **{value}** সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
 
-# ============================================
-# COMMAND: /settimer (Admin)
-# ============================================
-async def cmd_settimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_settimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: /settimer <seconds>\nExample: /settimer 30")
+        current = get_setting('timer_seconds', DEFAULT_TIMER)
+        await update.message.reply_text(f"বর্তমান timer: **{current}** সেকেন্ড\nUsage: `/settimer 30`", parse_mode=ParseMode.MARKDOWN)
         return
     seconds = int(args[0])
     set_setting('timer_seconds', seconds)
-    await update.message.reply_text(f"✅ Quiz timer {seconds} seconds সেট করা হয়েছে।")
+    await update.message.reply_text(f"✅ Quiz timer **{seconds}** সেকেন্ড সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
 
-# ============================================
-# COMMAND: /tag (Admin)
-# ============================================
-async def cmd_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
@@ -413,9 +1801,9 @@ async def cmd_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         current = get_setting('quiz_tag', '')
         if current:
-            await update.message.reply_text(f"📌 Current tag: [{current}]\n\nRemove করতে: /tag off")
+            await update.message.reply_text(f"📌 Current tag: **[{current}]**\n\nRemove করতে: `/tag off`", parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text("📌 কোনো tag সেট নেই।\nUsage: /tag ExamName")
+            await update.message.reply_text("📌 কোনো tag সেট নেই।\nUsage: `/tag ExamName`", parse_mode=ParseMode.MARKDOWN)
         return
     if args[0].lower() == 'off':
         set_setting('quiz_tag', '')
@@ -423,12 +1811,9 @@ async def cmd_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         tag = ' '.join(args)
         set_setting('quiz_tag', tag)
-        await update.message.reply_text(f"✅ Tag সেট: [{tag}]\n\nসব Quiz/Poll/Exam এ দেখাবে।")
+        await update.message.reply_text(f"✅ Tag সেট: **[{tag}]**\n\nসব Quiz/Poll/Exam এ দেখাবে।", parse_mode=ParseMode.MARKDOWN)
 
-# ============================================
-# COMMAND: /exp (Admin)
-# ============================================
-async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
@@ -437,9 +1822,9 @@ async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         current = get_setting('quiz_exp', '')
         if current:
-            await update.message.reply_text(f"📝 Current exp: {current}\n\nRemove করতে: /exp off")
+            await update.message.reply_text(f"📝 Current exp: **{current}**\n\nRemove করতে: `/exp off`", parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text("📝 কোনো exp text সেট নেই।\nUsage: /exp ExamName")
+            await update.message.reply_text("📝 কোনো exp text সেট নেই।\nUsage: `/exp ExamName`", parse_mode=ParseMode.MARKDOWN)
         return
     if args[0].lower() == 'off':
         set_setting('quiz_exp', '')
@@ -447,12 +1832,9 @@ async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         exp_text = ' '.join(args)
         set_setting('quiz_exp', exp_text)
-        await update.message.reply_text(f"✅ Exp text সেট: {exp_text}\n\nসব Explanation এর শেষে যোগ হবে।")
+        await update.message.reply_text(f"✅ Exp text সেট: **{exp_text}**", parse_mode=ParseMode.MARKDOWN)
 
-# ============================================
-# COMMAND: /log (Admin)
-# ============================================
-async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
@@ -460,80 +1842,140 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error_file = os.path.join(LOG_DIR, f"errors_{datetime.now(BD_TZ).strftime('%Y-%m-%d')}.log")
     try:
         if os.path.exists(error_file):
-            with open(error_file, "r") as f:
+            with open(error_file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            text = "📋 Recent Errors:\n\n" + "".join(lines[-10:]) if lines else "✅ No errors today!"
-            if len(text) > 4000:
-                text = text[-4000:]
-            await update.message.reply_text(text)
+            if lines:
+                text = "📋 **Recent Errors:**\n\n" + "".join(lines[-15:])
+                if len(text) > 4000:
+                    text = text[-4000:]
+                await update.message.reply_text(text)
+            else:
+                await update.message.reply_text("✅ আজ কোনো error নেই!")
         else:
             await update.message.reply_text("✅ আজ কোনো error নেই!")
     except Exception as e:
         await update.message.reply_text(f"❌ Log read error: {e}")
 
-# ============================================
-# HANDLE IMAGE MESSAGE
-# ============================================
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
-    log(f"🖼️ Image from {user['user_id']}")
-    allowed, usage, limit, is_perm = check_access(user['user_id'])
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
+        return
+    prompts = get_prompts_from_db()
+    keyboard = []
+    for key, prompt_data in prompts.items():
+        name = prompt_data.get('name', key)
+        keyboard.append([
+            InlineKeyboardButton(f"📝 {name}", callback_data=f"editprompt_{key}"),
+            InlineKeyboardButton("👁️ View", callback_data=f"viewprompt_{key}")
+        ])
+    keyboard.append([InlineKeyboardButton("➕ Add New Prompt", callback_data="addprompt")])
+    await update.message.reply_text(
+        "⚙️ **PROMPT MANAGEMENT**\n━━━━━━━━━━━━━━━━━━━━━━\n\nবর্তমান প্রম্পটসমূহ। এডিট/ভিউ করতে বাটনে ক্লিক করুন।",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
+        return
+    replied_msg = update.message.reply_to_message
+    if not replied_msg:
+        await update.message.reply_text("📨 **Broadcast Usage:**\n\n1. একটি মেসেজ/ইমিজ পাঠান\n2. সেই মেসেজে reply দিয়ে `/send` দিন\n3. সবার কাছে মেসেজটি পাঠানো হবে", parse_mode=ParseMode.MARKDOWN)
+        return
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text("❌ কোনো ইউজার নেই।")
+        return
+    keyboard = [[InlineKeyboardButton("✅ হ্যাঁ, পাঠান", callback_data="confirm_send"), InlineKeyboardButton("❌ বাতিল", callback_data="cancel_send")]]
+    context.user_data['broadcast_msg'] = replied_msg
+    context.user_data['broadcast_users'] = users
+    await update.message.reply_text(
+        f"📨 **Broadcast Confirm**\n\nসবার কাছে মেসেজ পাঠানো হবে।\n👥 Total Users: **{len(users)}**\n\nContinue?",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+# ============================================================
+# SECTION 14: MESSAGE HANDLERS
+# ============================================================
+
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    user_id = user['user_id']
+    log(f"🖼️ Image from {user_id} ({user['first_name']})")
+    allowed, usage, limit, is_perm = check_access(user_id)
     if not allowed:
         if is_perm:
             await update.message.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
         else:
             await update.message.reply_text(PREMIUM_MSG)
         return
-    eta = random.randint(5, 12)
-    end_time = (datetime.now(BD_TZ) + timedelta(seconds=eta)).strftime("%I:%M %p")
-    processing_text = PROCESSING_MSG.format(
-        first_name=user['first_name'],
-        attempt=usage + 1,
-        limit=limit,
-        eta=eta,
-        end_time=end_time
-    )
-    processing_msg = await update.message.reply_text(processing_text)
     try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = bytes(await file.download_as_bytearray())
-        if not image_bytes:
-            await processing_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        # v4.0: INSTANT acknowledgment (sub-second perceived response)
+        instant_msg = await update.message.reply_text("⚡ Image পেয়েছি! প্রসেস হচ্ছে...")
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            file = await context.bot.get_file(photo.file_id)
+            image_bytes = bytes(await file.download_as_bytearray())
+            file_id = photo.file_id
+        elif update.message.document:
+            document = update.message.document
+            file = await context.bot.get_file(document.file_id)
+            image_bytes = bytes(await file.download_as_bytearray())
+            file_id = document.file_id
+        else:
+            await instant_msg.edit_text("❌ দয়া করে একটি Image বা PDF পাঠান।")
             return
-        mcqs, error = await mcq_generator.generate_from_image(image_bytes)
-        if error:
-            await processing_msg.edit_text(f"❌ MCQ বানাতে সমস্যা হয়েছে: {error}\n\nআবার চেষ্টা করুন।")
-            return
-        quiz_id = save_mcq(user['user_id'], mcqs, 'image')
-        new_usage = increment_usage(user['user_id'])
-        success_text = f"✅ {len(mcqs)} টি MCQ তৈরি হয়েছে!\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}"
-        keyboard = [
-            [
-                InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"),
-                InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}"),
-            ],
-            [
-                InlineKeyboardButton("🌐 Website Exam", url=create_exam_link(quiz_id, mcqs))
-            ]
-        ]
-        await processing_msg.edit_text(success_text, reply_markup=InlineKeyboardMarkup(keyboard))
-        log(f"✅ Image MCQ generated: {quiz_id} ({len(mcqs)} questions)")
+        context.user_data['pending_image'] = image_bytes
+        context.user_data['pending_image_file_id'] = file_id
+        try:
+            await instant_msg.delete()
+        except Exception:
+            pass
+        prompts = get_prompts_from_db()
+        keyboard = []
+        for key, prompt_data in prompts.items():
+            name = prompt_data.get('name', key)
+            keyboard.append([InlineKeyboardButton(name, callback_data=f"genmcq_{key}")])
+        # v4.0: জ্ঞানমূলক / অনুধাবনমূলক buttons (image direct generation)
+        keyboard.append([
+            InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data="qaimg_k"),
+            InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data="qaimg_c"),
+        ])
+        await update.message.reply_photo(
+            photo=image_bytes,
+            caption=f"""🌟 স্বাগতম {user['first_name']}..!
+
+📸 আপনার Image থেকে MCQ বানাতে MCQ টাইপ সিলেক্ট করুন:
+
+🩺 **Medical Standard** — সাধারণ মেডিকেল MCQ
+✅ **সত্য-মিথ্যার প্রশ্ন** — True/False ফরম্যাট
+🔥 **কঠিন প্রশ্ন** — অ্যাডভান্সড লেভেল
+🎲 **Mixed** — সবগুলো মিলিয়ে
+
+🧠 **জ্ঞানমূলক** / 💡 **অনুধাবনমূলক** — সৃজনশীল PDF
+
+⏱️ Response Time: 2-4 sec""",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     except Exception as e:
         log_error(f"Image handler error: {e}")
-        try:
-            await processing_msg.edit_text(f"❌ একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।\nError: {str(e)[:100]}")
-        except:
-            pass
+        await safe_user_reply(update.message)
 
-# ============================================
-# HANDLE TEXT MESSAGE
-# ============================================
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
+    user_id = user['user_id']
     text = update.message.text
-    log(f"📝 Text from {user['user_id']} ({len(text)} chars)")
-    allowed, usage, limit, is_perm = check_access(user['user_id'])
+    log(f"📝 Text from {user_id} ({len(text)} chars)")
+    lines = [line for line in text.split('\n') if line.strip()]
+    word_count = len(text.split())
+    if len(lines) <= 3 and word_count < 30:
+        await update.message.reply_text(
+            "❌ **দু:খিত!** 😕\n\nআপনার Text এ Proper info নেই!\nআরো তথ্য দিন, আমি MCQ Practice Tool বানিয়ে দিবো 😃\n\n📝 **টিপস:**\n• কমপক্ষে ৪-৫ লাইন লিখুন\n• বিস্তারিত তথ্য দিন\n• গুরুত্বপূর্ণ পয়েন্ট উল্লেখ করুন\n• ৩০+ শব্দ দিন"
+        )
+        return
+    allowed, usage, limit, is_perm = check_access(user_id)
     if not allowed:
         if is_perm:
             await update.message.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
@@ -542,90 +1984,276 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     eta = random.randint(3, 8)
     end_time = (datetime.now(BD_TZ) + timedelta(seconds=eta)).strftime("%I:%M %p")
-    processing_text = PROCESSING_MSG.format(
-        first_name=user['first_name'],
-        attempt=usage + 1,
-        limit=limit,
-        eta=eta,
-        end_time=end_time
-    )
+    processing_text = PROCESSING_MSG.format(first_name=user['first_name'], attempt=usage+1, limit=limit, eta=eta, end_time=end_time)
     processing_msg = await update.message.reply_text(processing_text)
+    async def _edit_txt(t):
+        await processing_msg.edit_text(t)
+    prog_task = asyncio.create_task(live_progress_task(_edit_txt, "Text", total_eta=7))
     try:
-        mcqs, error = await mcq_generator.generate_from_text(text)
+        mcqs, error = await generate_mcq_from_text(text, 'prompt_1')
+        prog_task.cancel()
         if error:
             await processing_msg.edit_text(f"❌ MCQ বানাতে সমস্যা হয়েছে: {error}\n\nআবার চেষ্টা করুন।")
             return
-        quiz_id = save_mcq(user['user_id'], mcqs, 'text')
-        new_usage = increment_usage(user['user_id'])
-        success_text = f"✅ {len(mcqs)} টি MCQ তৈরি হয়েছে!\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}"
+        if not mcqs:
+            await processing_msg.edit_text("❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।")
+            return
+        src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + "_prompt_1"
+        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
+        new_usage = increment_usage(user_id)
+        user_data = get_user(user_id)
+        practice_no = user_data.get('practice_count', 1) if user_data else 1
+        caption = generate_caption(user, practice_no, len(mcqs), get_prompt_display_name('prompt_1'))
         keyboard = [
-            [
-                InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"),
-                InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}"),
-            ],
-            [
-                InlineKeyboardButton("🌐 Website Exam", url=create_exam_link(quiz_id, mcqs))
-            ]
+            [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
+            [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+            [share_button(quiz_id)],
         ]
-        await processing_msg.edit_text(success_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        try:
+            await processing_msg.edit_text(f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}", reply_markup=InlineKeyboardMarkup(keyboard))
+            sent_msg = processing_msg
+        except:
+            sent_msg = await update.message.reply_text(f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}", reply_markup=InlineKeyboardMarkup(keyboard))
+        try:
+            await sent_msg.pin(disable_notification=True)
+            client = get_supabase()
+            client.table('mcqs').update({'chat_id': sent_msg.chat_id, 'message_id': sent_msg.message_id}).eq('quiz_id', quiz_id).execute()
+        except Exception as e:
+            log_error(f"Pin message failed: {e}")
         log(f"✅ Text MCQ generated: {quiz_id} ({len(mcqs)} questions)")
     except Exception as e:
+        prog_task.cancel()
         log_error(f"Text handler error: {e}")
         try:
-            await processing_msg.edit_text(f"❌ একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।\nError: {str(e)[:100]}")
+            await processing_msg.edit_text(BUSY_MSG)
         except:
             pass
 
-# ============================================
-# HANDLE CALLBACK QUERIES
-# ============================================
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# SECTION 15: CALLBACK HANDLERS
+# ============================================================
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     data = query.data
     user = query.from_user
     chat_id = query.message.chat_id
     log(f"🔘 Callback: {data} from {user.id}")
-    await query.answer()
+    await query.answer()  # instant feedback to user
     try:
-        if data.startswith("poll_"):
-            quiz_id = data.replace("poll_", "")
-            await handle_poll_solve(query, quiz_id, user)
+        if data.startswith("genmcq_"):
+            await handle_mcq_generation(query, data.replace("genmcq_", ""), context)
+        elif data.startswith("qaimg_"):
+            await handle_creative_from_pending(query, data.replace("qaimg_", ""), context)
+        elif data.startswith("crpdf_k_"):
+            await handle_creative_pdf(query, data.replace("crpdf_k_", ""), "knowledge")
+        elif data.startswith("crpdf_c_"):
+            await handle_creative_pdf(query, data.replace("crpdf_c_", ""), "comprehension")
+        elif data.startswith("poll_"):
+            await handle_poll_solve(query, data.replace("poll_", ""), user)
         elif data.startswith("quiz_"):
-            quiz_id = data.replace("quiz_", "")
-            await handle_quiz_start(query, quiz_id, user, chat_id)
+            await handle_quiz_start(query, data.replace("quiz_", ""), user, chat_id)
         elif data.startswith("startquiz_"):
             await send_first_question(query, chat_id)
         elif data.startswith("again_"):
-            quiz_id = data.replace("again_", "")
-            await handle_poll_solve(query, quiz_id, user)
+            await handle_poll_solve(query, data.replace("again_", ""), user)
         elif data.startswith("newp_"):
-            await handle_new_practice(query, user, 'poll')
+            await handle_new_practice(query, user, 'poll', data.replace("newp_", ""))
         elif data.startswith("newq_"):
-            await handle_new_practice(query, user, 'quiz')
+            await handle_new_practice(query, user, 'quiz', data.replace("newq_", ""))
         elif data.startswith("retake_"):
-            quiz_id = data.replace("retake_", "")
-            await handle_quiz_start(query, quiz_id, user, chat_id)
+            await handle_quiz_start(query, data.replace("retake_", ""), user, chat_id)
+        elif data.startswith("mistake_"):
+            await handle_mistake_practice(query, user, chat_id, data.replace("mistake_", ""))
+        elif data.startswith("back_"):
+            await handle_back_to_source(query, data.replace("back_", ""))
+        elif data.startswith("del_"):
+            quiz_id = data.replace("del_", "")
+            kb = [[InlineKeyboardButton("✅ হ্যাঁ, Delete", callback_data=f"delc_{quiz_id}"),
+                   InlineKeyboardButton("↩️ না", callback_data="delno")]]
+            await query.message.reply_text("🗑️ এই MCQ সেটটি Delete করবেন? এটি আর ফেরত আসবে না।", reply_markup=InlineKeyboardMarkup(kb))
+        elif data.startswith("delc_"):
+            quiz_id = data.replace("delc_", "")
+            if delete_mcq(quiz_id, user.id):
+                await query.message.edit_text("✅ MCQ সেট Delete করা হয়েছে।")
+            else:
+                await query.message.edit_text("❌ Delete করা যায়নি। আবার চেষ্টা করুন।")
+        elif data == "delno":
+            await query.message.edit_text("↩️ Delete বাতিল করা হয়েছে।")
+        elif data.startswith("editprompt_"):
+            await handle_prompt_edit_start(query, data.replace("editprompt_", ""))
+        elif data.startswith("viewprompt_"):
+            await handle_prompt_view(query, data.replace("viewprompt_", ""))
+        elif data == "addprompt":
+            await handle_prompt_add(query)
+        elif data.startswith("pomo"):
+            await handle_pomodoro_callback(query, data)
+        elif data.startswith("rev_"):
+            await handle_revision_mode(query, data.replace("rev_", ""))
+        elif data.startswith("rep_"):
+            await handle_report_days(query, int(data.replace("rep_", "")))
+        elif data.startswith("cls_s_"):
+            await handle_class_subject(query, int(data.replace("cls_s_", "")), context)
+        elif data.startswith("prempdf_"):
+            await handle_premium_pdf(query, data.replace("prempdf_", ""))
+        elif data == "confirm_send":
+            await handle_broadcast_confirm(query, context)
+        elif data == "cancel_send":
+            await query.message.edit_text("❌ Broadcast বাতিল করা হয়েছে।")
+        else:
+            log(f"⚠️ Unknown callback: {data}")
     except Exception as e:
-        log_error(f"Callback error: {e}")
+        log_error(f"Callback error ({data}): {e}")
+        await safe_user_reply(query.message)
+
+# ============================================================
+# SECTION 16: MCQ GENERATION HANDLER + v4.0 CREATIVE PDF
+# ============================================================
+
+async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = query.from_user
+    user_id = user.id
+    image_bytes = context.user_data.get('pending_image')
+    if not image_bytes:
+        await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
+        return
+    async def _edit_cap(t):
+        await query.message.edit_caption(caption=t)
+    prog_task = asyncio.create_task(live_progress_task(_edit_cap, "Image", total_eta=8))
+    try:
+        mcqs, error = await generate_mcq_from_image(image_bytes, prompt_type)
+        prog_task.cancel()
+        if error:
+            await query.message.edit_caption(caption=f"❌ {error}")
+            return
+        if not mcqs:
+            await query.message.edit_caption(caption="❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।")
+            return
+        image_file_id = context.user_data.get('pending_image_file_id', '')
+        src_hash = hashlib.md5(image_bytes).hexdigest() + f"_{prompt_type}"
+        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='image', prompt_type=prompt_type, image_file_id=image_file_id, chat_id=None, message_id=None, source_hash=src_hash)
+        new_usage = increment_usage(user_id)
+        user_data = get_user(user_id)
+        practice_no = user_data.get('practice_count', 1) if user_data else 1
+        prompt_name = get_prompt_display_name(prompt_type)
+        allowed, usage, limit, is_perm = check_access(user_id)
+        caption = generate_caption({'first_name': user.first_name or 'User'}, practice_no, len(mcqs), prompt_name)
+        keyboard = mcq_set_keyboard(quiz_id, user_id)
+        full_caption = f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}"
+        await query.message.edit_caption(caption=full_caption, reply_markup=InlineKeyboardMarkup(keyboard))
         try:
-            await query.message.reply_text(f"❌ Error: {str(e)[:100]}")
-        except:
+            await query.message.pin(disable_notification=True)
+            pinned_msg_id = query.message.message_id
+            pinned_chat_id = query.message.chat_id
+            client = get_supabase()
+            client.table('mcqs').update({'chat_id': pinned_chat_id, 'message_id': pinned_msg_id}).eq('quiz_id', quiz_id).execute()
+            if quiz_id in _image_cache:
+                _image_cache[quiz_id]['chat_id'] = pinned_chat_id
+                _image_cache[quiz_id]['message_id'] = pinned_msg_id
+        except Exception as e:
+            log_error(f"Pin message failed: {e}")
+        context.user_data.pop('pending_image', None)
+        context.user_data.pop('pending_image_file_id', None)
+        log(f"✅ MCQ generated: {quiz_id} ({len(mcqs)} questions, prompt: {prompt_type})")
+    except Exception as e:
+        prog_task.cancel()
+        log_error(f"MCQ generation handler error: {e}")
+        try:
+            await query.message.edit_caption(caption=BUSY_MSG)
+        except Exception:
             pass
 
-# ============================================
-# POLL SOLVE
-# ============================================
-async def handle_poll_solve(query, quiz_id, user):
+# ── v4.0: Creative (জ্ঞানমূলক/অনুধাবনমূলক) from fresh image ──
+async def handle_creative_from_pending(query, ctype_short: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """User pressed জ্ঞানমূলক/অনুধাবনমূলক on a freshly sent image:
+       1) save image as a lightweight mcqs row (for file_id reference)
+       2) call exam_server creative-pdf API
+    """
+    user = query.from_user
+    ctype = "knowledge" if ctype_short == "k" else "comprehension"
+    label = "🧠 জ্ঞানমূলক" if ctype == "knowledge" else "💡 অনুধাবনমূলক"
+    image_file_id = context.user_data.get('pending_image_file_id', '')
+    if not image_file_id:
+        await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
+        return
+    # Save a stub row so exam_server can resolve image by quiz_id
+    quiz_id = await save_mcq(user_id=user.id, mcqs=[], source_type=f'creative_{ctype}', prompt_type='prompt_1',
+                       image_file_id=image_file_id, chat_id=query.message.chat_id, message_id=query.message.message_id)
+    await handle_creative_pdf(query, quiz_id, ctype)
+
+async def handle_creative_pdf(query, quiz_id: str, ctype: str) -> None:
+    """Calls exam_server /api/creative-pdf — sends premium PDF or explains why not possible."""
+    label = "🧠 জ্ঞানমূলক প্রশ্ন" if ctype == "knowledge" else "💡 অনুধাবনমূলক প্রশ্ন"
+    wait_msg = await query.message.reply_text(f"{label} **PDF তৈরি হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন (10-25 sec)", parse_mode=ParseMode.MARKDOWN)
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.get(f"{HF_SPACE_URL}/api/creative-pdf/{quiz_id}", params={"ctype": ctype})
+            ct = resp.headers.get("content-type", "")
+            if resp.status_code == 200 and "pdf" in ct:
+                pdf_file = BytesIO(resp.content)
+                prefix = "ATLAS_Gyanmulok" if ctype == "knowledge" else "ATLAS_Onudhabonmulok"
+                pdf_file.name = f"{prefix}_{quiz_id[:6]}.pdf"
+                header = "জ্ঞানমূলক প্রশ্ন [ATLAS]" if ctype == "knowledge" else "অনুধাবনমূলক প্রশ্ন [ATLAS]"
+                await query.message.chat.send_document(
+                    document=pdf_file,
+                    caption=f"📄 **{header}**\n🚀 সেরা গাইডলাইনে গোছানো প্রস্তুতি - এটলাস",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                try:
+                    await wait_msg.delete()
+                except Exception:
+                    pass
+                return
+            # JSON response = insufficient data explanation
+            try:
+                j = resp.json()
+                reason = j.get("reason") or j.get("message") or "তথ্য অপর্যাপ্ত।"
+            except Exception:
+                reason = "PDF তৈরি করা যায়নি।"
+            log_error(f"Creative PDF ({ctype}) failed for {quiz_id}: status={resp.status_code}, reason={reason}")
+            if any(c in reason for c in ("{", "'error'", "RESOURCE_EXHAUSTED", "Traceback")):
+                log_error(f"Creative PDF ({ctype}) raw error for {quiz_id}: {reason}")
+                reason = "এই মুহূর্তে AI সার্ভার ব্যস্ত আছে। কিছুক্ষণ পর আবার চেষ্টা করুন।"
+            await wait_msg.edit_text(
+                f"❌ {label} তৈরি করা যায়নি\n━━━━━━━━━━━━━━━━━━━━━━\n📋 কারণ: {reason}\n\n💡 Image এর শর্ত:\n• স্পষ্ট মূল বিষয় (Topic) থাকতে হবে\n• যথেষ্ট তথ্য থাকতে হবে\n• তথ্য সত্য ও শিক্ষামূলক হতে হবে\n• তথ্য পড়া যায় এমন হতে হবে"
+            )
+    except Exception as e:
+        log_error(f"Creative PDF error: {e}")
+        try:
+            await wait_msg.edit_text(BUSY_MSG)
+        except Exception:
+            pass
+
+# ============================================================
+# SECTION 17: POLL SOLVE HANDLER
+# ============================================================
+
+async def handle_poll_solve(query, quiz_id: str, user) -> None:
     log(f"📊 Poll solve: {quiz_id}")
-    mcq_data = get_mcq(quiz_id)
+    mcq_data = await get_mcq(quiz_id)
     if not mcq_data:
         await query.message.reply_text("❌ MCQ data পাওয়া যায়নি।")
         return
-    mcqs = apply_tag_exp(mcq_data['mcqs'])
+    mcqs = apply_tag_exp(clean_mcq_options(mcq_data['mcqs']))
     total = len(mcqs)
     settings = get_all_settings()
     timer = int(settings.get('timer_seconds', DEFAULT_TIMER))
-    await query.message.reply_text(f"📊 {total} টি Poll পাঠানো শুরু হচ্ছে...\n⏱️ প্রতিটিতে {timer} সেকেন্ড।")
+    image_file_id = mcq_data.get('image_file_id')
+    if image_file_id:
+        async def _send_pre_image():
+            await query.message.chat.send_photo(
+                photo=image_file_id,
+                caption=f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n⏱️ Per Question: {timer} sec\n📋 Type: {get_prompt_display_name(mcq_data.get('prompt_type','prompt_1'))}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        try:
+            asyncio.create_task(_send_pre_image())
+        except Exception as e:
+            log_error(f"Failed to send pre-poll image: {e}")
+    else:
+        await query.message.reply_text(f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n⏱️ Per Question: {timer} sec\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}", parse_mode=ParseMode.MARKDOWN)
+    await query.message.reply_text(f"📊 {total} টি Poll পাঠানো শুরু হচ্ছে... ⏱️ প্রতিটিতে {timer} সেকেন্ড।")
+    await send_countdown(query.message.chat_id)
     for i, mcq in enumerate(mcqs):
         try:
             q_text = format_poll_question(mcq, i + 1)
@@ -635,12 +2263,8 @@ async def handle_poll_solve(query, quiz_id, user):
             if correct_id >= len(options):
                 correct_id = 0
             await query.message.chat.send_poll(
-                question=q_text,
-                options=options,
-                type=Poll.QUIZ,
-                correct_option_id=correct_id,
-                explanation=exp_text,
-                is_anonymous=True,
+                question=q_text, options=options, type=Poll.QUIZ,
+                correct_option_id=correct_id, explanation=exp_text, is_anonymous=True,
             )
             if i < total - 1:
                 await asyncio.sleep(POLL_DELAY)
@@ -648,67 +2272,66 @@ async def handle_poll_solve(query, quiz_id, user):
             log_error(f"Poll {i+1} send error: {e}")
             continue
     keyboard = [
-        [
-            InlineKeyboardButton("🔄 Again Practice", callback_data=f"again_{quiz_id}"),
-            InlineKeyboardButton("🆕 New Practice", callback_data=f"newp_{quiz_id}")
-        ]
+        [InlineKeyboardButton("🔄 Again Practice", callback_data=f"again_{quiz_id}"), InlineKeyboardButton("🆕 New Practice", callback_data=f"newp_{quiz_id}")],
+        [InlineKeyboardButton("📸 Back to Source", callback_data=f"back_{quiz_id}")],
+        [share_button(quiz_id)],
+        [InlineKeyboardButton("🌐 Atlas Website", url="https://atlascourses.com"), InlineKeyboardButton("▶️ Atlas YouTube", url="https://www.youtube.com/@atlasprep")]
     ]
-    await query.message.chat.send_message(
-        f"✅ Total {total} টি poll পাঠানো হয়েছে।",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await query.message.chat.send_message(f"✅ Total {total} টি poll পাঠানো হয়েছে।", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ============================================
-# QUIZ SOLVE — Native Poll with auto-next
-# ============================================
-async def handle_quiz_start(query, quiz_id, user, chat_id):
+# ============================================================
+# SECTION 18: QUIZ SOLVE HANDLER
+# ============================================================
+
+async def handle_quiz_start(query, quiz_id: str, user, chat_id: int) -> None:
     log(f"📝 Quiz start: {quiz_id}")
-    mcq_data = get_mcq(quiz_id)
+    mcq_data = await get_mcq(quiz_id)
     if not mcq_data:
         await query.message.reply_text("❌ MCQ data পাওয়া যায়নি।")
         return
-    mcqs = mcq_data['mcqs']
+    mcqs = clean_mcq_options(mcq_data['mcqs'])
     random.shuffle(mcqs)
     mcqs = apply_tag_exp(mcqs)
     total = len(mcqs)
     settings = get_all_settings()
     timer = int(settings.get('timer_seconds', DEFAULT_TIMER))
-    neg_mark = float(settings.get('negative_mark', DEFAULT_NEGATIVE_MARK))
+    neg_mark = abs(float(settings.get('negative_mark', DEFAULT_NEGATIVE_MARK)))
     quiz_state = {
-        'quiz_id': quiz_id,
-        'mcqs': mcqs,
-        'current_index': 0,
-        'answers': {},
-        'correct': 0,
-        'wrong': 0,
-        'skipped': 0,
-        'start_time': time.time(),
-        'timer': timer,
-        'neg_mark': neg_mark,
-        'current_poll_id': None,
+        'quiz_id': quiz_id, 'mcqs': mcqs, 'current_index': 0, 'answers': {},
+        'correct': 0, 'wrong': 0, 'skipped': 0, 'start_time': time.time(),
+        'timer': timer, 'neg_mark': neg_mark, 'current_poll_id': None,
     }
     save_active_quiz(chat_id, quiz_state)
+    image_file_id = mcq_data.get('image_file_id')
+    prompt_name = get_prompt_display_name(mcq_data.get('prompt_type', 'prompt_1'))
     ready_text = (
-        f"📝 *Quiz Ready!*\n\n"
-        f"📋 Total Questions: {total}\n"
-        f"⏱️ Per Question: {timer} সেকেন্ড\n"
-        f"📊 Negative Mark: {neg_mark}\n\n"
-        f"প্রস্তুত? শুরু করুন! 🚀"
+        f"📝 **Quiz Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 Total Questions: {total}\n⏱️ Per Question: {timer} সেকেন্ড\n"
+        f"📊 Negative Mark: -{neg_mark}\n📋 Type: {prompt_name}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}\n\nপ্রস্তুত? শুরু করুন! 🚀"
     )
     keyboard = [[InlineKeyboardButton("▶️ Start Quiz", callback_data=f"startquiz_{quiz_id}")]]
-    await query.message.reply_text(ready_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    if image_file_id:
+        async def _send_ready_photo():
+            try:
+                await query.message.chat.send_photo(photo=image_file_id, caption=ready_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                await query.message.reply_text(ready_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        asyncio.create_task(_send_ready_photo())
+    else:
+        await query.message.reply_text(ready_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
-
-async def send_first_question(query, chat_id):
+async def send_first_question(query, chat_id: int) -> None:
     quiz = get_active_quiz(chat_id)
     if not quiz:
         await query.message.reply_text("❌ Quiz session expired। আবার শুরু করুন।")
         return
     quiz['current_index'] = 0
+    save_active_quiz(chat_id, quiz)
+    await send_countdown(chat_id)
     await send_quiz_poll(chat_id)
 
-
-async def send_quiz_poll(chat_id):
+async def send_quiz_poll(chat_id: int) -> None:
     quiz = get_active_quiz(chat_id)
     if not quiz:
         return
@@ -728,56 +2351,65 @@ async def send_quiz_poll(chat_id):
         correct_id = 0
     try:
         msg = await application.bot.send_poll(
-            chat_id=chat_id,
-            question=q_text,
-            options=options,
-            type=Poll.QUIZ,
-            correct_option_id=correct_id,
-            explanation=exp_text,
-            is_anonymous=False,
-            open_period=timer,
+            chat_id=chat_id, question=q_text, options=options, type=Poll.QUIZ,
+            correct_option_id=correct_id, explanation=exp_text, is_anonymous=False, open_period=timer,
         )
         poll_id = msg.poll.id
         quiz['current_poll_id'] = poll_id
         _poll_chat_map[poll_id] = chat_id
-        # Cancel old timer
         old_task = _timer_tasks.pop(chat_id, None)
         if old_task and not old_task.done():
             old_task.cancel()
-        # Start new timer (timer + 1s buffer)
-        task = asyncio.create_task(_quiz_timer_task(chat_id, timer + 1))
+        task = asyncio.create_task(_quiz_timer_task(chat_id, timer + 0.3))
         _timer_tasks[chat_id] = task
+        save_active_quiz(chat_id, quiz)
         log(f"📊 Quiz poll sent: Q{idx+1}/{total} chat={chat_id}")
     except Exception as e:
         log_error(f"Send quiz poll error: {e}")
         quiz['skipped'] += 1
         quiz['current_index'] += 1
+        save_active_quiz(chat_id, quiz)
+        await asyncio.sleep(0.5)
         await send_quiz_poll(chat_id)
 
-
-async def _quiz_timer_task(chat_id, delay):
-    """Auto-next after timer expires"""
+async def _quiz_timer_task(chat_id: int, delay: float) -> None:
     await asyncio.sleep(delay)
     quiz = get_active_quiz(chat_id)
     if not quiz:
         return
     log(f"⏱️ Timer expired chat={chat_id}, auto-next")
     quiz['skipped'] += 1
+    quiz['answers'][quiz['current_index']] = -1
     quiz['current_index'] += 1
+    save_active_quiz(chat_id, quiz)
     await send_quiz_poll(chat_id)
 
-
-async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle quiz poll answer → auto next"""
+async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     answer = update.poll_answer
     poll_id = answer.poll_id
+    user_id = answer.user.id
+    # v4.0: 6h check-in poll feedback
+    if poll_id in _checkin_polls:
+        _checkin_polls.pop(poll_id, None)
+        try:
+            fb = random.choice([
+                "💪 দারুণ! তোমার জবাব পেলাম! ধারাবাহিকতাই সাফল্যের চাবিকাঠি!",
+                "🌟 মাশাআল্লাহ! নিজের খবর জানানোর জন্য ধন্যবাদ!",
+                "🚀 Keep going! প্রতিদিন একটু একটু করেই বড় সাফল্য আসে!",
+            ])
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=f"{fb}\n\n{get_ayat(None)}\n\n📸 এখনই একটা Image পাঠিয়ে আজকের Practice শুরু করে ফেলো! 💪"
+            )
+        except Exception:
+            pass
+        return
     chat_id = _poll_chat_map.get(poll_id)
     if not chat_id:
         return
     quiz = get_active_quiz(chat_id)
     if not quiz:
         return
-    # Cancel timer
     task = _timer_tasks.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
@@ -786,7 +2418,7 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     mcq = quiz['mcqs'][idx]
     correct = mcq.get('answer', 0)
-    if answer.option_ids:
+    if answer.option_ids and len(answer.option_ids) > 0:
         chosen = answer.option_ids[0]
         quiz['answers'][idx] = chosen
         if chosen == correct:
@@ -797,11 +2429,11 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         quiz['skipped'] += 1
         quiz['answers'][idx] = -1
     quiz['current_index'] += 1
-    await asyncio.sleep(0.8)
+    save_active_quiz(chat_id, quiz)
     await send_quiz_poll(chat_id)
 
-
-async def end_quiz(chat_id):
+async def end_quiz(chat_id: int) -> None:
+    global _poll_chat_map
     quiz = get_active_quiz(chat_id)
     if not quiz:
         return
@@ -810,116 +2442,1541 @@ async def end_quiz(chat_id):
     wrong = quiz['wrong']
     skipped = quiz['skipped']
     time_taken = int(time.time() - quiz['start_time'])
-    neg_mark = abs(quiz['neg_mark'])
+    neg_mark = quiz['neg_mark']
     penalty = wrong * neg_mark
     final_mark = correct - penalty
     percentage = (correct / total * 100) if total > 0 else 0
     feedback = get_feedback(percentage)
-    ayat = random.choice(AYATS)
+    ayat = get_ayat(percentage)
     mins = time_taken // 60
     secs = time_taken % 60
     time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
     result_text = (
-        f"🎯 *QUIZ RESULT*\n"
-        f"{'━'*22}\n"
-        f"📝 Total: {total}\n"
-        f"✅ Right: {correct}\n"
-        f"❌ Wrong: {wrong}\n"
-        f"⏭️ Skipped: {skipped}\n"
-        f"⏱️ Time: {time_str}\n"
-        f"{'━'*22}\n"
-        f"📊 *Negative Mark:*\n"
-        f"❌ {wrong} × {neg_mark} = -{penalty:.2f}\n"
-        f"📊 Final Mark: *{final_mark:.2f}/{total}*\n"
-        f"{'━'*22}\n"
-        f"{feedback}\n\n"
-        f"📖 _{ayat}_"
+        f"🎯 **QUIZ RESULT**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Total: {total}\n✅ Right: {correct}\n❌ Wrong: {wrong}\n⏭️ Skipped: {skipped}\n⏱️ Time: {time_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 **Negative Mark:**\n❌ {wrong} × {neg_mark} = -{penalty:.2f}\n"
+        f"📊 Final Mark: **{final_mark:.2f}/{total}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{feedback}\n\n{ayat}"
     )
+    quiz_id = quiz['quiz_id']
+    _last_quiz_answers[chat_id] = {'answers': quiz['answers'], 'mcqs': quiz['mcqs']}
+    save_mistakes_from_quiz(chat_id, quiz)
     keyboard = [
-        [
-            InlineKeyboardButton("🔄 Same Quiz Retake", callback_data=f"retake_{quiz['quiz_id']}"),
-            InlineKeyboardButton("🆕 New Quiz (15)", callback_data=f"newq_{quiz['quiz_id']}"),
-        ],
-        [
-            InlineKeyboardButton("📊 New Poll (15)", callback_data=f"newp_{quiz['quiz_id']}")
-        ]
+        [InlineKeyboardButton("🔄 Quiz Again", callback_data=f"retake_{quiz_id}"), InlineKeyboardButton("🆕 New Quiz", callback_data=f"newq_{quiz_id}")],
+        [InlineKeyboardButton("❌ Mistake Practice", callback_data=f"mistake_{quiz_id}"), InlineKeyboardButton("📸 Back to Source", callback_data=f"back_{quiz_id}")],
+        [share_button(quiz_id)],
+        [InlineKeyboardButton("🌐 Atlas Website", url="https://atlascourses.com"), InlineKeyboardButton("▶️ Atlas YouTube", url="https://www.youtube.com/@atlasprep")]
     ]
     try:
-        save_result(
-            user_id=chat_id,
-            quiz_name=f"Quiz_{quiz['quiz_id'][:6]}",
-            total=total,
-            right=correct,
-            wrong=wrong,
-            skipped=skipped,
-            time_taken=time_taken,
-            mark=final_mark,
-            negative_mark=penalty
-        )
+        save_result(user_id=chat_id, quiz_id=quiz_id, quiz_name=f"Quiz_{quiz_id[:6]}", total=total, right=correct, wrong=wrong, skipped=skipped, time_taken=time_taken, mark=final_mark, negative_mark=penalty)
     except Exception as e:
         log_error(f"Save result error: {e}")
     try:
-        await application.bot.send_message(
-            chat_id=chat_id,
-            text=result_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await application.bot.send_message(chat_id=chat_id, text=result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         log_error(f"Send result error: {e}")
     remove_active_quiz(chat_id)
+    _poll_chat_map = {k: v for k, v in _poll_chat_map.items() if v != chat_id}
 
-# ============================================
-# NEW PRACTICE
-# ============================================
-async def handle_new_practice(query, user, mode='poll'):
-    chat_id = query.message.chat_id
-    await query.message.reply_text("🆕 নতুন MCQ তৈরি করা হচ্ছে...")
+# ============================================================
+# SECTION 19: NEW PRACTICE & MISTAKE PRACTICE — preserved
+# ============================================================
+
+async def handle_new_practice(query, user, mode: str, quiz_id: str) -> None:
+    log(f"🆕 New practice: {quiz_id} mode={mode}")
     try:
-        mcqs_data = get_user_mcqs(user.id)
-        if not mcqs_data:
-            await query.message.reply_text("❌ কোনো MCQ পাওয়া যায়নি।")
+        mcq_data = await get_mcq(quiz_id)
+        if not mcq_data:
+            await query.message.reply_text("❌ MCQ data পাওয়া যায়নি।")
             return
-        old_mcqs = mcqs_data[0]['mcqs']
-        random.shuffle(old_mcqs)
-        new_mcqs = old_mcqs[:NEW_PRACTICE_COUNT]
-        quiz_id = save_mcq(user.id, new_mcqs, 'practice')
+        image_file_id = mcq_data.get('image_file_id')
+        prompt_type = mcq_data.get('prompt_type', 'prompt_1')
+        prompt_name = get_prompt_display_name(prompt_type)
+        if not image_file_id:
+            await query.message.reply_text("❌ মূল ইমেজ পাওয়া যায়নি। নতুন ইমেজ পাঠান।")
+            return
+        wait_msg = await query.message.reply_text(
+            f"🔄 **নতুন MCQ তৈরি হচ্ছে...**\n\nএকই ইমেজ থেকে নতুন ১৫টি প্রশ্ন বানানো হচ্ছে।\n⏱️ অনুগ্রহ করে অপেক্ষা করুন... (2-5 sec)\n\n📋 Same Prompt Type: {prompt_name}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        try:
+            file = await application.bot.get_file(image_file_id)
+            image_bytes = bytes(await file.download_as_bytearray())
+        except Exception as e:
+            log_error(f"Failed to download image for new practice: {e}")
+            await wait_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে।")
+            return
+        mcqs, error = await generate_mcq_from_image(image_bytes, prompt_type)
+        if error or not mcqs:
+            err_msg = error or "MCQ তৈরি করতে সমস্যা হয়েছে।"
+            await wait_msg.edit_text(f"❌ {err_msg}")
+            return
+        random.shuffle(mcqs)
+        new_mcqs = apply_tag_exp(clean_mcq_options(mcqs[:NEW_PRACTICE_COUNT]))
+        new_quiz_id = await save_mcq(user_id=user.id, mcqs=new_mcqs, source_type='image', prompt_type=prompt_type, image_file_id=image_file_id, chat_id=None, message_id=None)
+        try:
+            await wait_msg.delete()
+        except:
+            pass
         if mode == 'quiz':
-            settings = get_all_settings()
-            timer = int(settings.get('timer_seconds', DEFAULT_TIMER))
-            neg_mark = float(settings.get('negative_mark', DEFAULT_NEGATIVE_MARK))
-            tagged = apply_tag_exp(new_mcqs)
-            random.shuffle(tagged)
+            chat_id = query.message.chat_id
             quiz_state = {
-                'quiz_id': quiz_id,
-                'mcqs': tagged,
-                'current_index': 0,
-                'answers': {},
-                'correct': 0,
-                'wrong': 0,
-                'skipped': 0,
-                'start_time': time.time(),
-                'timer': timer,
-                'neg_mark': neg_mark,
+                'quiz_id': new_quiz_id, 'mcqs': apply_tag_exp(new_mcqs), 'current_index': 0,
+                'answers': {}, 'correct': 0, 'wrong': 0, 'skipped': 0, 'start_time': time.time(),
+                'timer': int(get_setting('timer_seconds', DEFAULT_TIMER)),
+                'neg_mark': abs(float(get_setting('negative_mark', DEFAULT_NEGATIVE_MARK))),
                 'current_poll_id': None,
             }
             save_active_quiz(chat_id, quiz_state)
-            keyboard = [[InlineKeyboardButton("▶️ Start Quiz", callback_data=f"startquiz_{quiz_id}")]]
-            await query.message.reply_text(
-                f"✅ {len(new_mcqs)} টি নতুন MCQ রেডি!\n\n[▶️ Start Quiz] চাপুন।",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            keyboard = [[InlineKeyboardButton("▶️ Start Quiz", callback_data=f"startquiz_{new_quiz_id}")]]
+            await query.message.reply_text(f"✅ {len(new_mcqs)} টি নতুন MCQ রেডি!\n\n[▶️ Start Quiz] চাপুন।", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            class _Q:
-                message = query.message
-            await handle_poll_solve(_Q(), quiz_id, user)
+            await handle_poll_solve(query, new_quiz_id, user)
+        log(f"✅ New practice generated: {new_quiz_id}")
     except Exception as e:
         log_error(f"New practice error: {e}")
-        await query.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        await safe_user_reply(query.message)
 
-# ============================================
-# WEBHOOK HANDLER
-# ============================================
+async def handle_mistake_practice(query, user, chat_id: int, quiz_id: str) -> None:
+    log(f"❌ Mistake practice: {quiz_id}")
+    snap = _last_quiz_answers.get(chat_id, {})
+    # v4.0 FIX: use the exact mcqs+answers from the just-finished quiz (shuffled
+    # order), so wrong-question detection aligns correctly by index.
+    last_answers = snap.get('answers', {}) if isinstance(snap, dict) and 'answers' in snap else snap
+    quiz_mcqs = snap.get('mcqs') if isinstance(snap, dict) else None
+    if not last_answers:
+        await query.message.reply_text("❌ আগের কুইজের ডাটা পাওয়া যায়নি। আবার একটি Quiz শেষ করুন।")
+        return
+    if not quiz_mcqs:
+        mcq_data = await get_mcq(quiz_id)
+        if not mcq_data:
+            await query.message.reply_text("❌ MCQ data পাওয়া যায়নি।")
+            return
+        quiz_mcqs = mcq_data['mcqs']
+    wrong_mcqs = []
+    for idx, mcq in enumerate(quiz_mcqs):
+        user_answer = last_answers.get(idx, last_answers.get(str(idx)))
+        correct_answer = mcq.get('answer', 0)
+        if user_answer is not None and user_answer != -1 and user_answer != correct_answer:
+            clean = {k: v for k, v in mcq.items() if not k.startswith('_')}
+            wrong_mcqs.append(clean)
+    if not wrong_mcqs:
+        await query.message.reply_text("✅ কোনো ভুল উত্তর নেই! সব সঠিক ছিল! 🎉")
+        return
+    random.shuffle(wrong_mcqs)
+    tagged_mcqs = apply_tag_exp(clean_mcq_options(wrong_mcqs))
+    quiz_state = {
+        'quiz_id': quiz_id, 'mcqs': tagged_mcqs, 'current_index': 0,
+        'answers': {}, 'correct': 0, 'wrong': 0, 'skipped': 0, 'start_time': time.time(),
+        'timer': int(get_setting('timer_seconds', DEFAULT_TIMER)),
+        'neg_mark': abs(float(get_setting('negative_mark', DEFAULT_NEGATIVE_MARK))),
+        'current_poll_id': None,
+    }
+    save_active_quiz(chat_id, quiz_state)
+    keyboard = [[InlineKeyboardButton("▶️ Start Mistake Practice", callback_data=f"startquiz_{quiz_id}")]]
+    await query.message.reply_text(
+        f"❌ **Mistake Practice**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Only Wrong Questions: {len(wrong_mcqs)}\n⏱️ Per Question: {quiz_state['timer']} sec\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\nভুল থেকে শিখুন! 💪",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_back_to_source(query, quiz_id: str) -> None:
+    """v4.0: direct main image + buttons resent + reply-jump to pinned source."""
+    log(f"📸 Back to source: {quiz_id}")
+    mcq_data = await get_mcq(quiz_id)
+    if not mcq_data:
+        await query.message.reply_text("❌ সোর্স মেসেজ পাওয়া যায়নি।")
+        return
+    chat_id = mcq_data.get('chat_id')
+    message_id = mcq_data.get('message_id')
+    if not chat_id or not message_id:
+        cache = _image_cache.get(quiz_id, {})
+        chat_id = cache.get('chat_id')
+        message_id = cache.get('message_id')
+    image_file_id = mcq_data.get('image_file_id')
+    # 1) Best: resend the main source image WITH full buttons right here (direct access)
+    if image_file_id:
+        try:
+            kb = mcq_set_keyboard(quiz_id, query.from_user.id)
+            await query.message.chat.send_photo(
+                photo=image_file_id,
+                caption=f"📸 **আপনার মূল Source Image**\n📝 Total MCQ: {len(mcq_data.get('mcqs', []))}\n📋 Type: {get_prompt_display_name(mcq_data.get('prompt_type','prompt_1'))}",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        except Exception as e:
+            log_error(f"Back-to-source direct image failed: {e}")
+    # 2) Fallback: reply-jump to pinned message
+    if chat_id and message_id:
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text="📸 **Back to Source**\n\nউপরের reply করা মেসেজটিতে tap করুন — সরাসরি আপনার Source এ পৌঁছে যাবেন! 🚀",
+                reply_to_message_id=message_id,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        except Exception as e:
+            log_error(f"Back-to-source reply failed: {e}")
+    await query.message.reply_text("📸 **Back to Source**\n\nউপরে স্ক্রল করে Pinned মেসেজটি দেখুন। 📌", parse_mode=ParseMode.MARKDOWN)
+
+# ============================================================
+# SECTION 20: PROMPT MANAGEMENT HANDLERS — preserved
+# ============================================================
+
+_prompt_edit_state: Dict[int, str] = {}
+
+async def handle_prompt_edit_start(query, prompt_key: str) -> None:
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.message.reply_text("❌ Unauthorized")
+        return
+    prompts = get_prompts_from_db()
+    prompt_data = prompts.get(prompt_key, PROMPT_MAP.get(prompt_key, {}))
+    prompt_name = prompt_data.get('name', prompt_key)
+    prompt_text = prompt_data.get('text', '')
+    _prompt_edit_state[user_id] = prompt_key
+    await query.message.reply_text(
+        f"✏️ **Edit Prompt: {prompt_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n\n**Current Prompt:**\n```\n{prompt_text[:500]}...\n```\n\n📝 নতুন Prompt টেক্সট পাঠান:",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_prompt_view(query, prompt_key: str) -> None:
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.message.reply_text("❌ Unauthorized")
+        return
+    prompts = get_prompts_from_db()
+    prompt_data = prompts.get(prompt_key, PROMPT_MAP.get(prompt_key, {}))
+    prompt_name = prompt_data.get('name', prompt_key)
+    prompt_text = prompt_data.get('text', 'N/A')
+    if len(prompt_text) > 3500:
+        prompt_text = prompt_text[:3500] + "\n\n... (truncated)"
+    await query.message.reply_text(f"📝 **{prompt_name}**\n━━━━━━━━━━━━━━━━━━━━━━\n\n```\n{prompt_text}\n```", parse_mode=ParseMode.MARKDOWN)
+
+async def handle_prompt_add(query) -> None:
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.message.reply_text("❌ Unauthorized")
+        return
+    _prompt_edit_state[user_id] = 'new_prompt'
+    await query.message.reply_text(
+        "➕ **Add New Prompt**\n━━━━━━━━━━━━━━━━━━━━━━\n\nFormat:\nLine 1: Prompt Key (e.g., prompt_custom)\nLine 2: Display Name (e.g., Custom MCQ)\nLine 3+: Full Prompt Text\n\n```\nprompt_custom\nCustom MCQ\nYour full prompt text here...\n```",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_broadcast_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.message.reply_text("❌ Unauthorized")
+        return
+    replied_msg = context.user_data.get('broadcast_msg')
+    users = context.user_data.get('broadcast_users', [])
+    if not replied_msg or not users:
+        await query.message.edit_text("❌ Broadcast data expired। আবার চেষ্টা করুন।")
+        return
+    await query.message.edit_text(f"📨 পাঠানো শুরু... 0/{len(users)}")
+    success = 0
+    failed = 0
+    for i, user in enumerate(users):
+        try:
+            target_id = user['user_id']
+            if replied_msg.photo:
+                await application.bot.send_photo(chat_id=target_id, photo=replied_msg.photo[-1].file_id, caption=replied_msg.caption or "")
+            elif replied_msg.text:
+                await application.bot.send_message(chat_id=target_id, text=replied_msg.text)
+            elif replied_msg.document:
+                await application.bot.send_document(chat_id=target_id, document=replied_msg.document.file_id, caption=replied_msg.caption or "")
+            else:
+                failed += 1
+                continue
+            success += 1
+            if (i + 1) % 10 == 0:
+                try:
+                    await query.message.edit_text(f"📨 পাঠানো হচ্ছে... {success}/{len(users)}")
+                except:
+                    pass
+            await asyncio.sleep(0.05)
+        except Forbidden:
+            failed += 1
+            continue
+        except Exception as e:
+            log_error(f"Broadcast to {user['user_id']} failed: {e}")
+            failed += 1
+            continue
+    context.user_data.pop('broadcast_msg', None)
+    context.user_data.pop('broadcast_users', None)
+    await query.message.edit_text(
+        f"📨 **Broadcast Complete!**\n━━━━━━━━━━━━━━━━━━━━━━\n✅ Success: {success}\n❌ Failed: {failed}\n👥 Total: {len(users)}\n━━━━━━━━━━━━━━━━━━━━━━",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    log(f"📨 Broadcast done: {success}/{len(users)}")
+
+# ============================================================
+# SECTION 21: TEXT HANDLER FOR PROMPT EDITS — preserved
+# ============================================================
+
+async def handle_prompt_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in _prompt_edit_state:
+        return
+    prompt_key = _prompt_edit_state.pop(user_id)
+    text = update.message.text
+    if prompt_key == 'new_prompt':
+        lines = text.strip().split('\n')
+        if len(lines) < 3:
+            await update.message.reply_text("❌ Format: Line1=Key, Line2=Name, Line3+=Prompt Text")
+            return
+        new_key = lines[0].strip()
+        new_name = lines[1].strip()
+        new_text = '\n'.join(lines[2:])
+        update_prompt_in_db(new_key, new_name, new_text)
+        await update.message.reply_text(f"✅ New prompt **{new_name}** added!\nKey: `{new_key}`", parse_mode=ParseMode.MARKDOWN)
+        log(f"📝 New prompt added: {new_key}")
+    else:
+        prompts = get_prompts_from_db()
+        prompt_data = prompts.get(prompt_key, PROMPT_MAP.get(prompt_key, {}))
+        prompt_name = prompt_data.get('name', prompt_key)
+        update_prompt_in_db(prompt_key, prompt_name, text)
+        await update.message.reply_text(f"✅ Prompt **{prompt_name}** updated!", parse_mode=ParseMode.MARKDOWN)
+        log(f"📝 Prompt updated: {prompt_key}")
+    raise ApplicationHandlerStop
+
+# ============================================================
+# SECTION 21B: v3.0 FEATURES (preserved) + v4.0 additions
+# Pomodoro | Progress | Revision | Report | Random | Class | Premium PDF
+# Pending-input router (incl. bmexam_count, gpa) | /keys | schedulers
+# ============================================================
+
+POMODORO_IMAGE_PATH = "pomodoro.png"
+
+def _generate_pomodoro_image() -> BytesIO:
+    img = Image.new('RGB', (800, 400), color=(20, 20, 50))
+    draw = ImageDraw.Draw(img)
+    try:
+        draw.rounded_rectangle([20, 20, 780, 380], radius=30, fill=(30, 30, 70), outline=(100, 100, 200), width=2)
+    except AttributeError:
+        draw.rectangle([20, 20, 780, 380], fill=(30, 30, 70), outline=(100, 100, 200), width=2)
+    draw.ellipse([320, 30, 480, 190], fill=(220, 50, 50), outline=(180, 30, 30), width=3)
+    draw.ellipse([370, 20, 430, 45], fill=(50, 160, 50))
+    draw.ellipse([355, 65, 445, 155], fill=(240, 70, 70))
+    try:
+        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+        font_emoji = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+    except Exception:
+        font_large = ImageFont.load_default()
+        font_small = font_large
+        font_emoji = font_large
+    draw.text((400, 230), "ATLAS", fill=(255, 255, 255), font=font_large, anchor="mm")
+    draw.text((400, 280), "Pomodoro Study Timer", fill=(180, 180, 220), font=font_small, anchor="mm")
+    draw.text((400, 320), "Focus  |  Study  |  Achieve", fill=(120, 120, 180), font=font_emoji, anchor="mm")
+    draw.text((400, 360), "atlascourses.com", fill=(100, 100, 160), font=font_emoji, anchor="mm")
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+HADITHS = [
+    "🕌 রাসূলুল্লাহ ﷺ বলেছেন: “যে ব্যক্তি জ্ঞান অন্বেষণে কোনো পথ অবলম্বন করে, আল্লাহ তার জন্য জান্নাতের পথ সহজ করে দেন।” [সহীহ মুসলিম]",
+    "🕌 রাসূলুল্লাহ ﷺ বলেছেন: “জ্ঞান অর্জন করা প্রত্যেক মুসলিমের উপর ফরজ।” [ইবনে মাজাহ]",
+    "🕌 রাসূলুল্লাহ ﷺ বলেছেন: “দুটি নিয়ামত এমন আছে যাতে অনেক মানুষ ধোঁকায় আছে — সুস্থতা ও অবসর সময়।” [সহীহ বুখারী]",
+]
+POMO_MOTIVATION = ["🚀 Let's go!", "🔥 Keep going!", "💪 You're doing great!", "⚡ প্রায় অর্ধেক শেষ!", "🌟 দারুণ চলছে!", "🏁 প্রায় শেষ, হাল ছেড়ো না!"]
+
+_pomodoro_sessions: Dict[int, Dict] = {}
+_pending_input: Dict[int, Dict] = {}
+
+POMODORO_CAPTION = """🎯 **ATLAS Pomodoro Timer**
+━━━━━━━━━━━━━━━━━━━━━━
+
+✅ একটা timer select করো!
+
+📖 Work সময়ে পড়বে
+☕ Break সময়ে বিশ্রাম নেবে
+
+💡 সময় ধরে Smartly পড়ো!
+🚀 আশা করি পড়ায় গতি ফিরবে"""
+
+async def cmd_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    log(f"🍅 /timer from {user['user_id']}")
+    keyboard = [
+        [InlineKeyboardButton("⏱️ 15 মিনিট", callback_data="pomo_15"), InlineKeyboardButton("🍅 25 মিনিট", callback_data="pomo_25")],
+        [InlineKeyboardButton("📖 40 মিনিট", callback_data="pomo_40"), InlineKeyboardButton("🔥 60 মিনিট", callback_data="pomo_60")],
+        [InlineKeyboardButton("⚙️ Custom", callback_data="pomo_custom")],
+    ]
+    try:
+        pomo_img = _generate_pomodoro_image()
+        await update.message.reply_photo(photo=pomo_img, caption=POMODORO_CAPTION, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        log_error(f"Pomodoro image generation error, fallback to text: {e}")
+        await update.message.reply_text(POMODORO_CAPTION, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+def _pomo_text(first_name: str, total_sec: int, left_sec: int, paused: bool) -> str:
+    done = total_sec - left_sec
+    pct = min(100, int(done / total_sec * 100)) if total_sec else 0
+    bar_len = 12
+    filled = int(round(bar_len * pct / 100))
+    bar = "▰" * filled + "▱" * (bar_len - filled)
+    mins, secs = left_sec // 60, left_sec % 60
+    motiv = POMO_MOTIVATION[min(len(POMO_MOTIVATION) - 1, int(pct / 100 * len(POMO_MOTIVATION)))]
+    status = "⏸️ Timer Paused — বিশ্রাম চলছে" if paused else "📖 পড়ার সময় চলছে..."
+    return (
+        f"🌟 **ATLAS Pomodoro Timer** 🌟\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{status}\n\n"
+        f"{bar} {pct}%\n"
+        f"{motiv} {pct}%\n\n"
+        f"🌱 বাকি সময়: {mins} মিনিট {secs} সেকেন্ড\n\n"
+        f"🚀 সেরা গাইডলাইনে গোছানো প্রস্তুতি - এটলাস"
+    )
+
+def _pomo_keyboard(paused: bool):
+    if paused:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("▶️ আবার শুরু", callback_data="pomo_resume"), InlineKeyboardButton("⏹️ বন্ধ করো", callback_data="pomo_stop")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⏸️ থামাও", callback_data="pomo_pause"), InlineKeyboardButton("⏹️ বন্ধ করো", callback_data="pomo_stop")]])
+
+async def start_pomodoro(chat_id: int, first_name: str, minutes: int) -> None:
+    old = _pomodoro_sessions.pop(chat_id, None)
+    if old and old.get('task') and not old['task'].done():
+        old['task'].cancel()
+    total = minutes * 60
+    ayat = get_ayat(None)
+    hadith = random.choice(HADITHS)
+    msg = await application.bot.send_message(
+        chat_id=chat_id,
+        text=_pomo_text(first_name, total, total, False) + f"\n\n🔗 **আজকের আয়াত:**\n{ayat}\n\n🔗 **আজকের হাদিস:**\n{hadith}",
+        reply_markup=_pomo_keyboard(False), parse_mode=ParseMode.MARKDOWN
+    )
+    sess = {'total': total, 'left': total, 'paused': False, 'msg_id': msg.message_id,
+            'first_name': first_name, 'ayat': ayat, 'hadith': hadith, 'task': None,
+            'last_render': total}
+    sess['task'] = asyncio.create_task(_pomodoro_loop(chat_id))
+    _pomodoro_sessions[chat_id] = sess
+    log(f"🍅 Pomodoro started: {minutes}m chat={chat_id}")
+
+async def _pomodoro_edit(chat_id: int) -> None:
+    sess = _pomodoro_sessions.get(chat_id)
+    if not sess:
+        return
+    text = _pomo_text(sess['first_name'], sess['total'], sess['left'], sess['paused'])
+    text += f"\n\n🔗 **আজকের আয়াত:**\n{sess['ayat']}\n\n🔗 **আজকের হাদিস:**\n{sess['hadith']}"
+    try:
+        await application.bot.edit_message_text(chat_id=chat_id, message_id=sess['msg_id'], text=text,
+                                                reply_markup=_pomo_keyboard(sess['paused']), parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+async def _pomodoro_loop(chat_id: int) -> None:
+    """v4.0 FIX: ticks every 1 second so countdown decreases smoothly (1s steps).
+    Telegram edit rate-limit respected by editing the message only every ~5s,
+    but the countdown value itself decrements by 1s continuously."""
+    try:
+        last_edit = 0
+        while True:
+            await asyncio.sleep(1)
+            sess = _pomodoro_sessions.get(chat_id)
+            if not sess:
+                return
+            if not sess['paused']:
+                sess['left'] = max(0, sess['left'] - 1)
+            if sess['left'] <= 0:
+                await _pomodoro_finish(chat_id)
+                return
+            last_edit += 1
+            # edit message every 5s (rate-limit safe) OR on last 10s every 2s for smooth feel
+            interval = 2 if sess['left'] <= 10 else 5
+            if last_edit >= interval:
+                last_edit = 0
+                await _pomodoro_edit(chat_id)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log_error(f"Pomodoro loop error: {e}")
+
+async def _pomodoro_finish(chat_id: int) -> None:
+    sess = _pomodoro_sessions.pop(chat_id, None)
+    if not sess:
+        return
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, 100%", callback_data="pomofb_yes100")],
+        [InlineKeyboardButton("🟡 Yes, Not 100%", callback_data="pomofb_yesnot")],
+        [InlineKeyboardButton("❌ No", callback_data="pomofb_no")],
+    ]
+    try:
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=f"শুভকামনা প্রিয় {sess['first_name']}... 🙌\n\nতোমার টাইম শেষ হয়েছে। যে উদ্দেশ্যে টাইম সেট করেছিলে কাজটি কি শেষ হয়েছে?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        log_error(f"Pomodoro finish msg error: {e}")
+
+POMO_FEEDBACK = {
+    'yes100': "🏆 **মাশাআল্লাহ! অসাধারণ!** 🎉\n\nতুমি প্রমাণ করলে তুমি পারো! এই consistency টা ধরে রাখো — সাফল্য তোমার হাতের নাগালে।\n\n💡 একটা ছোটো break নিয়ে আবার /timer দিয়ে পরের সেশন শুরু করো! 🚀",
+    'yesnot': "👏 **Good job! এগিয়ে যাচ্ছো!**\n\nশেষ হয়নি তাতে কি? অর্ধেক কাজ হয়ে যাওয়াও একটা জয়। পরের সেশনে বাকিটা শেষ করে ফেলো!\n\n💡 Tips: পরেরবার একটু বড় timer নাও — /timer 🍅",
+    'no': "🌱 **সমস্যা নেই, হাল ছেড়ো না!**\n\nশুরুটাই আসল। বসেছিলে — এটাই অনেকের চেয়ে এগিয়ে। এখন distraction গুলো সরিয়ে আবার বসো।\n\n💪 ছোটো করে শুরু করো — 15 মিনিটের timer দিয়ে দেখো: /timer",
+}
+
+async def handle_pomodoro_callback(query, data: str) -> None:
+    chat_id = query.message.chat_id
+    user = query.from_user
+    if data == "pomo_custom":
+        _pending_input[user.id] = {'type': 'pomo_custom'}
+        await query.message.reply_text("⚙️ কত মিনিটের timer চাও? সংখ্যা লিখো (যেমন: 30)")
+        return
+    if data in ("pomo_15", "pomo_25", "pomo_40", "pomo_60"):
+        await start_pomodoro(chat_id, user.first_name or "User", int(data.split("_")[1]))
+        return
+    sess = _pomodoro_sessions.get(chat_id)
+    if data == "pomo_pause":
+        if sess:
+            sess['paused'] = True
+            await _pomodoro_edit(chat_id)
+        return
+    if data == "pomo_resume":
+        if sess:
+            sess['paused'] = False
+            await _pomodoro_edit(chat_id)
+        return
+    if data == "pomo_stop":
+        old = _pomodoro_sessions.pop(chat_id, None)
+        if old and old.get('task') and not old['task'].done():
+            old['task'].cancel()
+        await query.message.reply_text("⏹️ Timer বন্ধ করা হয়েছে। আবার শুরু করতে: /timer")
+        return
+    if data.startswith("pomofb_"):
+        fb = POMO_FEEDBACK.get(data.replace("pomofb_", ""), "")
+        if fb:
+            await query.message.reply_text(fb, parse_mode=ParseMode.MARKDOWN)
+
+# ------------------------------------------------------------
+# MISTAKES PERSISTENCE (for /revision) — preserved
+# ------------------------------------------------------------
+
+def save_mistakes_from_quiz(user_id: int, quiz: Dict) -> None:
+    try:
+        client = get_supabase()
+        rows = []
+        now = datetime.now(BD_TZ).isoformat()
+        for idx, mcq in enumerate(quiz.get('mcqs', [])):
+            ans = quiz.get('answers', {}).get(idx, quiz.get('answers', {}).get(str(idx)))
+            if ans is None:
+                continue
+            correct = mcq.get('answer', 0)
+            clean = {k: v for k, v in mcq.items() if not k.startswith('_')}
+            if ans == -1:
+                rows.append({'user_id': user_id, 'quiz_id': quiz.get('quiz_id', ''), 'question_data': json.dumps(clean, ensure_ascii=False), 'status': 'skip', 'created_at': now})
+            elif ans != correct:
+                rows.append({'user_id': user_id, 'quiz_id': quiz.get('quiz_id', ''), 'question_data': json.dumps(clean, ensure_ascii=False), 'status': 'wrong', 'created_at': now})
+        if rows:
+            client.table('mistakes').insert(rows).execute()
+            for r in rows:
+                mirror_insert('mistakes', r)
+            log(f"💾 Mistakes saved: {len(rows)} for user {user_id}")
+    except Exception as e:
+        log_error(f"save_mistakes_from_quiz error: {e}")
+
+def get_mistake_mcqs(user_id: int, statuses: List[str]) -> List[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('mistakes').select('question_data,status').eq('user_id', user_id).in_('status', statuses).order('created_at', desc=True).limit(500).execute()
+        mcqs, seen = [], set()
+        for row in (result.data or []):
+            q = json.loads(row['question_data']) if isinstance(row['question_data'], str) else row['question_data']
+            key = q.get('question', '')[:120]
+            if key and key not in seen:
+                seen.add(key)
+                mcqs.append(q)
+        return mcqs
+    except Exception as e:
+        log_error(f"get_mistake_mcqs error: {e}")
+        return []
+
+def get_all_user_mcq_pool(user_id: int) -> List[Dict]:
+    pool, seen = [], set()
+    for mset in get_user_mcqs(user_id):
+        for q in mset.get('mcqs', []):
+            key = q.get('question', '')[:120]
+            if key and key not in seen:
+                seen.add(key)
+                pool.append(q)
+    return pool
+
+# ------------------------------------------------------------
+# /revision — preserved
+# ------------------------------------------------------------
+
+REVISION_LABELS = {'all': '📚 All MCQ', 'mistake': '❌ Mistake Practice', 'special': '⭐ Special Practice', 'random': '🎲 Random'}
+
+async def cmd_revision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    log(f"🔁 /revision from {user['user_id']}")
+    keyboard = [
+        [InlineKeyboardButton("📚 All MCQ", callback_data="rev_all")],
+        [InlineKeyboardButton("❌ Mistake Practice (Only Wrong)", callback_data="rev_mistake")],
+        [InlineKeyboardButton("⭐ Special Practice (Wrong + Skip)", callback_data="rev_special")],
+    ]
+    await update.message.reply_text(
+        f"🌟 **Welcome to Revision Mood, {user['first_name']}!**\n━━━━━━━━━━━━━━━━━━━━━━\n\nএই অব্দি আগের বানানো সকল MCQ গুলো নিয়ে ঝালাই হয়ে যাক! 💪",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_revision_mode(query, mode: str) -> None:
+    user_id = query.from_user.id
+    if mode == 'all':
+        pool = get_all_user_mcq_pool(user_id)
+    elif mode == 'mistake':
+        pool = get_mistake_mcqs(user_id, ['wrong'])
+    else:
+        pool = get_mistake_mcqs(user_id, ['wrong', 'skip'])
+    if not pool:
+        await query.message.reply_text("📭 এই ক্যাটাগরিতে কোনো MCQ নেই। আগে কিছু practice করুন!")
+        return
+    _pending_input[user_id] = {'type': 'rev_count', 'mode': mode}
+    await query.message.reply_text(
+        f"{REVISION_LABELS[mode]}\n📦 Total MCQ আছে: **{len(pool)}** টি\n\nএখান থেকে কয়টা MCQ practice করতে চান?\nসংখ্যা লিখুন (যেমন: 2/5/8)\nসব practice করতে চাইলে \"All\" লিখুন",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def _start_practice_set(message, user, mode: str, count_text: str, mcqs_override: List[Dict] = None) -> None:
+    """Shared by /revision, /random, /bmexam: builds saved MCQ set + Quiz/Poll/Web Exam."""
+    user_id = user.id if hasattr(user, 'id') else user['user_id']
+    first_name = getattr(user, 'first_name', None) or (user.get('first_name') if isinstance(user, dict) else 'User') or 'User'
+    if mcqs_override is not None:
+        pool = mcqs_override
+    elif mode == 'all':
+        pool = get_all_user_mcq_pool(user_id)
+    elif mode == 'mistake':
+        pool = get_mistake_mcqs(user_id, ['wrong'])
+    elif mode == 'special':
+        pool = get_mistake_mcqs(user_id, ['wrong', 'skip'])
+    elif mode == 'bookmark':
+        pool = get_all_bookmarks(user_id)
+    else:
+        pool = get_all_user_mcq_pool(user_id)
+    if not pool:
+        await message.reply_text("📭 কোনো MCQ পাওয়া যায়নি।")
+        return
+    ct = count_text.strip().lower()
+    if ct == 'all':
+        count = len(pool)
+    else:
+        try:
+            count = max(1, min(len(pool), int(re.sub(r'[^0-9]', '', ct) or '0')))
+        except Exception:
+            count = 0
+    if count <= 0:
+        await message.reply_text("❌ সঠিক সংখ্যা লিখুন অথবা \"All\" লিখুন।")
+        return
+    random.shuffle(pool)
+    selected = apply_tag_exp(clean_mcq_options(pool[:count]))
+    src = {'random': 'random', 'bookmark': 'bookmark_exam'}.get(mode, f'revision_{mode}')
+    quiz_id = await save_mcq(user_id=user_id, mcqs=selected, source_type=src, prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None)
+    label = REVISION_LABELS.get(mode, '🔖 Bookmark Exam' if mode == 'bookmark' else mode)
+    emoji = "🚀" if mode in ('random', 'bookmark') else "⚡"
+    keyboard = [
+        [InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}"), InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}")],
+        [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}")],
+        [share_button(quiz_id)],
+    ]
+    await message.reply_text(
+        f"{emoji} **Type:** {label}\n🔗 **MCQ:** {len(selected)}\n\n🚀 Are you ready, Dear {first_name}?",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+# ------------------------------------------------------------
+# /random — preserved
+# ------------------------------------------------------------
+
+async def cmd_random(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    log(f"🎲 /random from {user['user_id']}")
+    pool = get_all_user_mcq_pool(user['user_id'])
+    if not pool:
+        await update.message.reply_text("📭 আপনার কোনো সংরক্ষিত MCQ নেই। আগে Image/Text পাঠিয়ে MCQ বানান!")
+        return
+    _pending_input[user['user_id']] = {'type': 'rand_count'}
+    await update.message.reply_text(
+        f"🎲 **Random Practice!**\n📦 আপনার মোট MCQ: **{len(pool)}** টি\n\nকয়টা MCQ practice করতে চান? সংখ্যা লিখুন (অথবা \"All\")",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# ------------------------------------------------------------
+# /progress — preserved
+# ------------------------------------------------------------
+
+def build_progress_chart(results: List[Dict]) -> Optional[bytes]:
+    try:
+        from PIL import ImageDraw
+        data = list(reversed(results[:10]))
+        W, H, PAD = 900, 480, 60
+        img = Image.new('RGB', (W, H), (16, 18, 38))
+        d = ImageDraw.Draw(img)
+        d.text((PAD, 18), "ATLAS Progress  -  Last Practices (%)", fill=(180, 180, 255))
+        chart_h = H - 2 * PAD - 20
+        base_y = H - PAD
+        n = max(1, len(data))
+        bw = max(20, int((W - 2 * PAD) / n * 0.55))
+        gap = int((W - 2 * PAD) / n)
+        for gy in range(0, 101, 25):
+            y = base_y - int(chart_h * gy / 100)
+            d.line([(PAD, y), (W - PAD, y)], fill=(40, 44, 80))
+            d.text((10, y - 7), f"{gy}", fill=(120, 120, 170))
+        for i, r in enumerate(data):
+            total = r.get('total', 1) or 1
+            pct = max(0, min(100, (r.get('correct', 0) / total) * 100))
+            x = PAD + i * gap + (gap - bw) // 2
+            y = base_y - int(chart_h * pct / 100)
+            color = (76, 217, 130) if pct >= 75 else (255, 196, 61) if pct >= 50 else (255, 95, 95)
+            d.rectangle([x, y, x + bw, base_y], fill=color)
+            d.text((x, y - 18), f"{int(pct)}%", fill=(230, 230, 255))
+            d.text((x, base_y + 8), str(r.get('created_at', ''))[5:10], fill=(150, 150, 200))
+        buf = BytesIO()
+        img.save(buf, format='PNG')
+        return buf.getvalue()
+    except Exception as e:
+        log_error(f"build_progress_chart error: {e}")
+        return None
+
+async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    user_id = user['user_id']
+    log(f"📊 /progress from {user_id}")
+    results = get_user_results(user_id, limit=50)
+    udata = get_user(user_id) or {}
+    if not results:
+        await update.message.reply_text("📭 এখনো কোনো Quiz result জমা হয়নি। আগে কিছু practice করুন!")
+        return
+    total_attempts = len(results)
+    total_q = sum(r.get('total', 0) for r in results)
+    total_right = sum(r.get('correct', 0) for r in results)
+    total_wrong = sum(r.get('wrong', 0) for r in results)
+    total_skip = sum(r.get('skipped', 0) for r in results)
+    avg = (total_right / total_q * 100) if total_q else 0
+    recent5 = results[:5]
+    recent_avg = (sum(r.get('correct', 0) for r in recent5) / max(1, sum(r.get('total', 0) for r in recent5))) * 100
+    trend = "📈 উন্নতি হচ্ছে!" if recent_avg >= avg else "📉 একটু নেমেছে — আরো ফোকাস!"
+    best = max(results, key=lambda r: (r.get('correct', 0) / max(1, r.get('total', 1))))
+    best_pct = best.get('correct', 0) / max(1, best.get('total', 1)) * 100
+    text = (
+        f"📊 **{user['first_name']} এর Progress Report**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 Total Practice: **{total_attempts}** বার\n"
+        f"📝 Total Question: **{total_q}**\n"
+        f"✅ Right: **{total_right}** | ❌ Wrong: **{total_wrong}** | ⏭️ Skip: **{total_skip}**\n"
+        f"📈 Overall Accuracy: **{avg:.1f}%**\n"
+        f"🔥 Recent 5 Avg: **{recent_avg:.1f}%** — {trend}\n"
+        f"🏆 Best Score: **{best_pct:.0f}%** ({str(best.get('created_at',''))[:10]})\n"
+        f"📚 Lifetime Practice Count: **{udata.get('practice_count', 0)}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{get_feedback(avg)}\n\n{get_ayat(avg)}"
+    )
+    chart = build_progress_chart(results)
+    if chart:
+        try:
+            await update.message.reply_photo(photo=chart, caption=text, parse_mode=ParseMode.MARKDOWN)
+            return
+        except Exception as e:
+            log_error(f"Progress chart send failed: {e}")
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# ------------------------------------------------------------
+# /report — preserved
+# ------------------------------------------------------------
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    user_id = user['user_id']
+    log(f"📈 /report from {user_id}")
+    udata = get_user(user_id) or {}
+    practiced = udata.get('practice_count', 0)
+    limit = udata.get('daily_limit', DEFAULT_DAILY_LIMIT)
+    try:
+        created = udata.get('created_at') or udata.get('last_reset')
+        days_active = max(1, (datetime.now(BD_TZ).date() - datetime.fromisoformat(str(created)[:10]).date()).days + 1)
+    except Exception:
+        days_active = 1
+    opportunity = days_active * limit
+    keyboard = [
+        [InlineKeyboardButton("📅 ৩ দিন", callback_data="rep_3"), InlineKeyboardButton("📅 ৭ দিন", callback_data="rep_7")],
+        [InlineKeyboardButton("📅 ১৫ দিন", callback_data="rep_15"), InlineKeyboardButton("📅 ৩০ দিন", callback_data="rep_30")],
+    ]
+    await update.message.reply_text(
+        f"📈 **তোমার বিগত দিনগুলোর সকল report জমা আছে।**\nReport দেখে নিজের অবস্থা যাচাই করো!\n━━━━━━━━━━━━━━━━━━━━━━\n\n✅ এই অব্দি যতবার practice করেছ: **{practiced}** বার\n📊 যতবার করার সুযোগ ছিল: **~{opportunity}** বার\n\n🔗 বিগত কত দিনের Report দেখতে চাও?",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_report_days(query, days: int) -> None:
+    user_id = query.from_user.id
+    try:
+        client = get_supabase()
+        cutoff = (datetime.now(BD_TZ) - timedelta(days=days)).isoformat()
+        result = client.table('results').select('*').eq('user_id', user_id).gte('created_at', cutoff).order('created_at', desc=True).limit(60).execute()
+        rows = result.data or []
+    except Exception as e:
+        log_error(f"report query error: {e}")
+        rows = []
+    if not rows:
+        await query.message.reply_text(f"📭 বিগত {days} দিনে কোনো practice record নেই।")
+        return
+    text = f"📈 **বিগত {days} দিনের Report** ({len(rows)} টি practice)\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, r in enumerate(rows[:25], 1):
+        ts = str(r.get('created_at', ''))
+        date_part, time_part = ts[:10], ts[11:16]
+        total = r.get('total', 0)
+        pct = (r.get('correct', 0) / max(1, total)) * 100
+        text += f"{i}. 📅 {date_part} 🕒 {time_part}\n   ✅ {r.get('correct',0)} | ❌ {r.get('wrong',0)} | ⏭️ {r.get('skipped',0)} | 🎯 {pct:.0f}% | Mark: {r.get('mark',0)}\n"
+    if len(rows) > 25:
+        text += f"\n... আরো {len(rows)-25} টি record"
+    total_q = sum(r.get('total', 0) for r in rows)
+    total_r = sum(r.get('correct', 0) for r in rows)
+    avg = (total_r / total_q * 100) if total_q else 0
+    text += f"\n━━━━━━━━━━━━━━━━━━━━━━\n📊 **{days} দিনের Avg Accuracy: {avg:.1f}%**\n\n{get_feedback(avg)}"
+    await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# ------------------------------------------------------------
+# /class — preserved
+# ------------------------------------------------------------
+
+def get_classes() -> List[Dict]:
+    try:
+        client = get_supabase()
+        result = client.table('classes').select('*').order('id', desc=False).execute()
+        return result.data or []
+    except Exception as e:
+        log_error(f"get_classes error: {e}")
+        return []
+
+async def cmd_class(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    user_id = user['user_id']
+    log(f"🎓 /class from {user_id}")
+    if is_admin(user_id) and context.args and context.args[0].lower() == 'add':
+        _pending_input[user_id] = {'type': 'class_add'}
+        await update.message.reply_text(
+            "➕ **Add Class**\n\nFormat (এক লাইনে, | দিয়ে আলাদা):\n`Subject Name | Chapter Name | YouTube Link`\n\nযেমন:\n`Biology | Chapter 1 | https://youtube.com/watch?v=xxxx`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    rows = get_classes()
+    if not rows:
+        msg = "📭 এখনো কোনো class add করা হয়নি।"
+        if is_admin(user_id):
+            msg += "\n\n🔧 Add করতে: `/class add`"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        return
+    subjects = []
+    for r in rows:
+        if r['subject'] not in subjects:
+            subjects.append(r['subject'])
+    keyboard = [[InlineKeyboardButton(f"📘 {sub}", callback_data=f"cls_s_{i}")] for i, sub in enumerate(subjects)]
+    context.bot_data['class_subjects'] = subjects
+    extra = "\n\n🔧 Admin: `/class add` দিয়ে নতুন class যোগ করুন" if is_admin(user_id) else ""
+    await update.message.reply_text(
+        f"🚀 **এটলাসের সকল ফ্রী ক্লাস করতে তোমাকে স্বাগতম প্রিয় শিক্ষার্থী {user['first_name']}!**\n\n📚 Subject সিলেক্ট করো:{extra}",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_class_subject(query, idx: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    subjects = context.bot_data.get('class_subjects', [])
+    if idx >= len(subjects):
+        await query.message.reply_text("❌ Subject পাওয়া যায়নি। আবার /class দিন।")
+        return
+    subject = subjects[idx]
+    rows = [r for r in get_classes() if r['subject'] == subject]
+    keyboard = [[InlineKeyboardButton(f"▶️ {r['chapter']}", url=r['link'])] for r in rows]
+    await query.message.reply_text(
+        f"📘 **{subject}**\n\n👇 Chapter এ click করলেই YouTube এ class শুরু হবে:",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
+    )
+
+# ------------------------------------------------------------
+# Premium PDF (calls exam_server /api/premium-pdf) — preserved
+# ------------------------------------------------------------
+
+async def handle_premium_pdf(query, quiz_id: str) -> None:
+    log(f"💎 Premium PDF: {quiz_id}")
+    mcq_data = await get_mcq(quiz_id)
+    if not mcq_data:
+        await query.message.reply_text("❌ MCQ data পাওয়া যায়নি।")
+        return
+    wait_msg = await query.message.reply_text("💎 **Premium PDF তৈরি হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন (10-20 sec)", parse_mode=ParseMode.MARKDOWN)
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.get(f"{HF_SPACE_URL}/api/premium-pdf/{quiz_id}")
+            ct = resp.headers.get("content-type", "")
+            if resp.status_code == 200 and "pdf" in ct:
+                pdf_bytes = resp.content
+            else:
+                try:
+                    j = resp.json()
+                    reason = j.get("message") or j.get("reason") or f"status {resp.status_code}"
+                except Exception:
+                    reason = f"status {resp.status_code}, non-JSON response"
+                raise Exception(f"PDF API failed: {reason}")
+        pdf_file = BytesIO(pdf_bytes)
+        pdf_file.name = f"ATLAS_Practice_Sheet_{quiz_id[:6]}.pdf"
+        await query.message.chat.send_document(
+            document=pdf_file,
+            caption="💎 **ATLAS Practice Sheet (Premium PDF)**\n🚀 সেরা গাইডলাইনে গোছানো প্রস্তুতি - এটলাস",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        log_error(f"Premium PDF error: {e}")
+        try:
+            await wait_msg.edit_text(f"❌ **Premium PDF তৈরি করা যায়নি**\n📋 কারণ: {str(e)[:200]}", parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+
+# ------------------------------------------------------------
+# v4.0: /keys — owner-only model+key analytics (single message)
+# ------------------------------------------------------------
+
+async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
+        return
+    _reset_provider_stats_if_new_day()
+    # Build key inventory from env (reflects HF secrets live on restart)
+    inventory = [
+        ("gemini", GEMINI_KEYS),
+        ("groq", GROQ_KEYS),
+        ("nvidia", NVIDIA_KEYS),
+        ("openrouter-qwen", OPENROUTER_KEYS),
+        ("nemotron", NEMOTRON_KEYS or OPENROUTER_KEYS),
+        ("gemma", GEMMA_KEYS or OPENROUTER_KEYS),
+    ]
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+    lines = [f"🔑 **ATLAS AI KEYS & QUOTA**", f"📅 {today} (BD)", "━━━━━━━━━━━━━━━━━━━━━━"]
+    total_ok = total_fail = 0
+    total_keys = 0
+    total_active = 0
+    total_healthy = 0
+    total_exhausted = 0
+    total_idle = 0
+    for provider, keys in inventory:
+        hint = PROVIDER_QUOTA_HINTS.get(provider, {})
+        plabel = hint.get("label", provider)
+        reset = hint.get("reset", "—")
+        rpd = hint.get("rpd", "?")
+        pstat = _provider_stats.get(provider, {})
+        n_keys = len(keys)
+        total_keys += n_keys
+        if n_keys == 0:
+            lines.append(f"\n*{plabel}*\n  ⚪ কোনো key সেট নেই")
+            continue
+        rpd_int = rpd if isinstance(rpd, int) else 0
+        lines.append(f"\n*{plabel}*  (RPD≈{rpd}/key · reset: {reset})")
+        for i, k in enumerate(keys):
+            klabel = f"{provider}#{i+1}"
+            ks = pstat.get(klabel, {})
+            ok = ks.get("ok", 0)
+            fail = ks.get("fail", 0)
+            exhausted = ks.get("exhausted", False)
+            last = ks.get("last", "—")
+            total_ok += ok
+            total_fail += fail
+            used_today = ok + fail
+            remaining = max(0, rpd_int - used_today) if rpd_int > 0 else "?"
+            if exhausted:
+                status = "🔴 Exhausted"
+                total_exhausted += 1
+                remaining = 0
+            elif ok > 0 or fail > 0:
+                status = "🟢 Active"
+                total_active += 1
+                total_healthy += 1
+            else:
+                status = "⚪ Idle (untested)"
+                total_active += 1
+                total_idle += 1
+            lines.append(f"  {i+1}. `{_key_prefix(k)}` {status}")
+            lines.append(f"     ✅{ok} ❌{fail} | 📊 Used:{used_today}/{rpd} | 🟩 বাকি:{remaining} | 🕐{last}")
+    # Overall daily attempt capacity estimate
+    cap = 0
+    for provider, keys in inventory:
+        rpd = PROVIDER_QUOTA_HINTS.get(provider, {}).get("rpd", 0)
+        if isinstance(rpd, int):
+            # avoid double counting openrouter shared keys
+            if provider in ("nemotron", "gemma") and not (NEMOTRON_KEYS if provider=="nemotron" else GEMMA_KEYS):
+                continue
+            cap += rpd * len(keys)
+    images_per_day = cap  # 1 attempt ≈ 1 image/text generation
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 **Summary**")
+    lines.append(f"  🔑 Total keys: {total_keys}")
+    lines.append(f"  🟢 Healthy (used today, no quota issue): {total_healthy}")
+    lines.append(f"  ⚪ Untested (not used yet): {total_idle}")
+    lines.append(f"  🔴 Exhausted/Problem: {total_exhausted}")
+    lines.append(f"  ✅ Today success: {total_ok} · ❌ fail: {total_fail}")
+    lines.append(f"  📈 আনুমানিক দৈনিক capacity: ~{cap} attempts")
+    lines.append(f"  🖼️ আনুমানিক দৈনিক image/text MCQ: ~{images_per_day} টি")
+    lines.append(f"\n💡 HF Secrets এ নতুন key যোগ করে restart দিলে এখানে auto update হবে।")
+    text = "\n".join(lines)
+    # Telegram 4096-char limit: chunk safely
+    if len(text) <= 4000:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 3900:
+                await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+
+# ------------------------------------------------------------
+# v4.0: PENDING INPUT ROUTER (pomo/rev/rand/class + bmexam_count + gpa)
+# ------------------------------------------------------------
+
+async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    state = _pending_input.get(user_id)
+    if not state:
+        return
+    text = (update.message.text or '').strip()
+    stype = state['type']
+    # gpa_ssc keeps state alive for a second question, so don't pop prematurely there
+    if stype != 'gpa_ssc':
+        _pending_input.pop(user_id, None)
+    try:
+        if stype == 'pomo_custom':
+            try:
+                minutes = max(1, min(10000, int(re.sub(r'[^0-9]', '', text) or '0')))
+            except Exception:
+                minutes = 0
+            if minutes <= 0:
+                await update.message.reply_text("❌ সঠিক সংখ্যা লিখুন (যেমন: 30)। আবার /timer দিন।")
+            else:
+                await start_pomodoro(update.effective_chat.id, update.effective_user.first_name or "User", minutes)
+        elif stype == 'rev_count':
+            await _start_practice_set(update.message, update.effective_user, state['mode'], text)
+        elif stype == 'rand_count':
+            await _start_practice_set(update.message, update.effective_user, 'random', text)
+        elif stype == 'bmexam_count':
+            await _start_practice_set(update.message, update.effective_user, 'bookmark', text)
+        elif stype == 'gpa_ssc':
+            # validate SSC GPA then ask HSC
+            try:
+                ssc = float(re.sub(r'[^0-9.]', '', text) or '0')
+            except Exception:
+                ssc = 0
+            if ssc <= 0 or ssc > 5:
+                _pending_input.pop(user_id, None)
+                await update.message.reply_text("❌ সঠিক SSC GPA লিখুন (0.00 - 5.00)। আবার /gpa দিন।")
+            else:
+                _pending_input[user_id] = {'type': 'gpa_hsc', 'ssc': ssc}
+                await update.message.reply_text("২) আপনার HSC GPA কত? (যেমন: 5.00)")
+        elif stype == 'gpa_hsc':
+            try:
+                hsc = float(re.sub(r'[^0-9.]', '', text) or '0')
+            except Exception:
+                hsc = 0
+            ssc = state.get('ssc', 0)
+            if hsc <= 0 or hsc > 5:
+                await update.message.reply_text("❌ সঠিক HSC GPA লিখুন (0.00 - 5.00)। আবার /gpa দিন।")
+            else:
+                # MBBS admission: SSC GPA×8 + HSC GPA×12 = /100
+                ssc_part = ssc * 8
+                hsc_part = hsc * 12
+                score = ssc_part + hsc_part
+                kata = 100 - score
+                await update.message.reply_text(
+                    f"🎯 **MBBS GPA Score Result**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📘 SSC GPA: {ssc:.2f} × 8 = **{ssc_part:.2f}**\n"
+                    f"📗 HSC GPA: {hsc:.2f} × 12 = **{hsc_part:.2f}**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🚀 **MBBS ভর্তি পরীক্ষায় আপনার GPA Score: ({score:.2f}/100)**\n"
+                    f"✅ **কাটা যাবে: ({kata:.2f})**\n\n"
+                    f"💪 বাকি {kata:.0f} নম্বরের জন্য MCQ practice চালিয়ে যান!",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        elif stype == 'class_add':
+            parts = [p.strip() for p in text.split('|')]
+            if len(parts) < 3 or not parts[2].startswith('http'):
+                await update.message.reply_text("❌ Format ভুল। আবার `/class add` দিন।\nFormat: `Subject | Chapter | YouTube Link`", parse_mode=ParseMode.MARKDOWN)
+            else:
+                client = get_supabase()
+                row = {'subject': parts[0], 'chapter': parts[1], 'link': parts[2], 'created_at': datetime.now(BD_TZ).isoformat()}
+                client.table('classes').insert(row).execute()
+                mirror_insert('classes', row)
+                await update.message.reply_text(f"✅ Class added!\n📘 {parts[0]} → {parts[1]}\n🔗 {parts[2]}")
+                log(f"🎓 Class added: {parts[0]} / {parts[1]}")
+    except Exception as e:
+        log_error(f"Pending input error ({stype}): {e}")
+        await safe_user_reply(update.message)
+    raise ApplicationHandlerStop
+
+# ============================================================
+# SECTION 21C: v4.0 BACKGROUND TASKS (check-in + keep-alive)
+# ============================================================
+
+async def keepalive_task() -> None:
+    """Self-ping HF Space /health every ~10 min for 24/7 uptime."""
+    await asyncio.sleep(60)
+    log("💓 Keep-alive task started")
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                await client.get(f"{HF_SPACE_URL}/health")
+        except Exception:
+            pass
+        await asyncio.sleep(600)
+
+def _get_active_checkin_users() -> List[int]:
+    """Active = used bot on >=2 distinct days within last 3 days (via results table)."""
+    try:
+        client = get_supabase()
+        cutoff = (datetime.now(BD_TZ) - timedelta(days=3)).isoformat()
+        rows = client.table('results').select('user_id,created_at').gte('created_at', cutoff).limit(5000).execute().data or []
+        daymap: Dict[int, set] = {}
+        for r in rows:
+            uid = r.get('user_id')
+            day = str(r.get('created_at', ''))[:10]
+            if uid and day:
+                daymap.setdefault(uid, set()).add(day)
+        return [uid for uid, days in daymap.items() if len(days) >= 2]
+    except Exception as e:
+        log_error(f"_get_active_checkin_users error: {e}")
+        return []
+
+async def checkin_scheduler() -> None:
+    """Every 6h send a check-in poll to active users. OFF 12am-7am BD."""
+    await asyncio.sleep(120)
+    log("🔔 Check-in scheduler started")
+    while True:
+        try:
+            now = datetime.now(BD_TZ)
+            if 0 <= now.hour < 7:
+                # sleep until 7am BD
+                nxt = now.replace(hour=7, minute=0, second=0, microsecond=0)
+                await asyncio.sleep(max(60, (nxt - now).total_seconds()))
+                continue
+            users = _get_active_checkin_users()
+            log(f"🔔 Check-in: {len(users)} active users")
+            for uid in users:
+                try:
+                    msg = await application.bot.send_poll(
+                        chat_id=uid,
+                        question="📚 আজকে পড়াশোনা কেমন চলছে?",
+                        options=["🔥 পুরোদমে চলছে", "🙂 মোটামুটি", "😅 এখনো শুরু করিনি", "💪 মোটিভেশন দরকার"],
+                        is_anonymous=False,
+                    )
+                    _checkin_polls[msg.poll.id] = uid
+                    await asyncio.sleep(0.1)
+                except Forbidden:
+                    continue
+                except Exception:
+                    continue
+        except Exception as e:
+            log_error(f"checkin_scheduler error: {e}")
+        await asyncio.sleep(6 * 3600)  # every 6 hours
+
+# ============================================================
+# SECTION 22: SYSTEM & SETUP
+# ============================================================
+
+async def daily_reset_scheduler() -> None:
+    log("⏰ Daily reset scheduler started")
+    while True:
+        try:
+            now = datetime.now(BD_TZ)
+            midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            wait_seconds = (midnight - now).total_seconds()
+            log(f"⏰ Next daily reset in {wait_seconds/3600:.1f} hours")
+            await asyncio.sleep(wait_seconds)
+            log("🔄 Running daily reset...")
+            reset_daily_usage()
+            try:
+                await enforce_quotas()
+                log("✅ Storage quota enforcement complete")
+            except Exception as qe:
+                log_error(f"enforce_quotas error: {qe}")
+            log("✅ Daily reset complete!")
+        except Exception as e:
+            log_error(f"Daily reset scheduler error: {e}")
+            await asyncio.sleep(60)
+
+# ============================================================
+# SECTION: /pin — Owner Bot Status Dashboard
+# ============================================================
+
+async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু Owner ব্যবহার করতে পারবেন।")
+        return
+    try:
+        now = datetime.now(BD_TZ)
+        if _bot_start_time:
+            uptime_delta = now - _bot_start_time
+            days = uptime_delta.days
+            hours, rem = divmod(uptime_delta.seconds, 3600)
+            mins, secs = divmod(rem, 60)
+            uptime_parts = []
+            if days > 0:
+                uptime_parts.append(f"{days} দিন")
+            if hours > 0:
+                uptime_parts.append(f"{hours} ঘণ্টা")
+            if mins > 0:
+                uptime_parts.append(f"{mins} মিনিট")
+            uptime_parts.append(f"{secs} সেকেন্ড")
+            uptime_str = " ".join(uptime_parts)
+            start_str = _bot_start_time.strftime("%Y-%m-%d %I:%M:%S %p")
+        else:
+            uptime_str = "অজানা"
+            start_str = "অজানা"
+
+        try:
+            client = get_supabase()
+            all_users = client.table('users').select('user_id,first_name,is_permitted,usage_count,daily_limit,last_reset').execute().data or []
+        except Exception:
+            all_users = []
+        total_users = len(all_users)
+        permitted_users = sum(1 for u in all_users if u.get('is_permitted'))
+        free_users = total_users - permitted_users
+        today_str = now.strftime('%Y-%m-%d')
+        active_today = sum(1 for u in all_users if u.get('usage_count', 0) > 0)
+
+        _reset_provider_stats_if_new_day()
+        inventory = [
+            ("gemini", GEMINI_KEYS),
+            ("groq", GROQ_KEYS),
+            ("nvidia", NVIDIA_KEYS),
+            ("openrouter-qwen", OPENROUTER_KEYS),
+            ("nemotron", NEMOTRON_KEYS or OPENROUTER_KEYS),
+            ("gemma", GEMMA_KEYS or OPENROUTER_KEYS),
+        ]
+        total_keys = 0
+        active_keys = 0
+        exhausted_keys = 0
+        total_req_ok = 0
+        total_req_fail = 0
+        key_lines = []
+        for provider, keys in inventory:
+            hint = PROVIDER_QUOTA_HINTS.get(provider, {})
+            plabel = hint.get("label", provider)
+            n = len(keys)
+            total_keys += n
+            if n == 0:
+                continue
+            pstat = _provider_stats.get(provider, {})
+            p_active = 0
+            p_exhausted = 0
+            p_ok = 0
+            p_fail = 0
+            for i, k in enumerate(keys):
+                klabel = f"{provider}#{i+1}"
+                ks = pstat.get(klabel, {})
+                ok = ks.get("ok", 0)
+                fail = ks.get("fail", 0)
+                p_ok += ok
+                p_fail += fail
+                if ks.get("exhausted"):
+                    p_exhausted += 1
+                    exhausted_keys += 1
+                else:
+                    p_active += 1
+                    active_keys += 1
+            total_req_ok += p_ok
+            total_req_fail += p_fail
+            key_lines.append(f"  {plabel}: {n} keys (🟢{p_active} 🔴{p_exhausted}) ✅{p_ok} ❌{p_fail}")
+
+        pomo_count = len(_pomodoro_sessions)
+        active_quizzes = len(_timer_tasks)
+
+        text = (
+            f"📌 <b>ATLAS BOT — STATUS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🟢 <b>Bot Status:</b> Active\n"
+            f"🕐 <b>চালু হয়েছে:</b> {start_str} (BD)\n"
+            f"⏱️ <b>Uptime:</b> {uptime_str}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 <b>USERS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  📊 Total Users: <b>{total_users}</b>\n"
+            f"  🌟 Permitted: <b>{permitted_users}</b>\n"
+            f"  🔒 Free: <b>{free_users}</b>\n"
+            f"  🔥 আজ Active: <b>{active_today}</b>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔑 <b>AI KEYS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  🔑 Total Keys: <b>{total_keys}</b>\n"
+            f"  🟢 Active: <b>{active_keys}</b>\n"
+            f"  🔴 Exhausted: <b>{exhausted_keys}</b>\n"
+            f"  ✅ আজ Success: <b>{total_req_ok}</b>\n"
+            f"  ❌ আজ Fail: <b>{total_req_fail}</b>\n\n"
+        )
+        for line in key_lines:
+            text += line + "\n"
+        text += (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ <b>LIVE SESSIONS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  🍅 Pomodoro চলছে: <b>{pomo_count}</b>\n"
+            f"  📝 Quiz চলছে: <b>{active_quizzes}</b>\n\n"
+            f"📅 <b>Date:</b> {now.strftime('%Y-%m-%d %I:%M %p')} (BD)"
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log_error(f"cmd_pin error: {e}")
+        await update.message.reply_text("⏳ সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+
+# ============================================================
+# SECTION: LIVE QUIZ (CSV-based, auto-pin pre-message)
+# ============================================================
+
+_live_quiz_sessions: Dict[int, Dict] = {}
+
+async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
+        return
+    reply = update.message.reply_to_message
+    if not reply or not reply.document:
+        await update.message.reply_text(
+            "📋 <b>Live Quiz - ব্যবহার:</b>\n\n"
+            "1. একটি CSV ফাইল আপলোড করুন\n"
+            "2. সেই ফাইলে reply দিয়ে /live লিখুন\n\n"
+            "<b>CSV Format:</b>\n"
+            "<code>question,option_a,option_b,option_c,option_d,answer,explanation</code>\n\n"
+            "answer = 0(A), 1(B), 2(C), 3(D)\n"
+            "explanation ঐচ্ছিক",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    file_name = reply.document.file_name or ""
+    if not file_name.lower().endswith('.csv'):
+        await update.message.reply_text("❌ শুধু CSV ফাইল সাপোর্টেড। .csv এক্সটেনশনের ফাইল দিন।")
+        return
+    try:
+        wait_msg = await update.message.reply_text("⏳ CSV ফাইল পড়া হচ্ছে...")
+        file = await reply.document.get_file()
+        file_bytes = bytes(await file.download_as_bytearray())
+        csv_text = file_bytes.decode('utf-8-sig')
+        reader = csv.reader(StringIO(csv_text))
+        rows = list(reader)
+        if len(rows) < 2:
+            await wait_msg.edit_text("❌ CSV ফাইলে কোনো প্রশ্ন পাওয়া যায়নি। Header + data rows থাকতে হবে।")
+            return
+        header = [h.strip().lower() for h in rows[0]]
+        mcqs = []
+        for row_num, row in enumerate(rows[1:], 2):
+            if len(row) < 5:
+                continue
+            try:
+                q = row[0].strip()
+                opts = [row[1].strip(), row[2].strip(), row[3].strip(), row[4].strip()]
+                ans = int(row[5].strip()) if len(row) > 5 and row[5].strip().isdigit() else 0
+                exp = row[6].strip() if len(row) > 6 else ""
+                if not q or not all(opts):
+                    continue
+                mcqs.append({
+                    'question': q,
+                    'options': opts,
+                    'answer': min(ans, 3),
+                    'explanation': exp,
+                })
+            except Exception:
+                continue
+        if not mcqs:
+            await wait_msg.edit_text("❌ CSV থেকে কোনো valid MCQ parse করা যায়নি। Format চেক করুন।")
+            return
+        chat_id = update.effective_chat.id
+        settings = get_all_settings()
+        timer = int(settings.get('timer_seconds', DEFAULT_TIMER))
+        pre_text = (
+            f"🔴 <b>LIVE QUIZ শুরু হচ্ছে!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📝 মোট প্রশ্ন: <b>{len(mcqs)}</b>\n"
+            f"⏱️ প্রতি প্রশ্নে: <b>{timer}</b> সেকেন্ড\n"
+            f"📄 Source: <b>{file_name}</b>\n\n"
+            f"⚡ প্রস্তুত হও! কিছুক্ষণের মধ্যেই প্রশ্ন আসবে!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        pre_msg = await application.bot.send_message(
+            chat_id=chat_id, text=pre_text, parse_mode=ParseMode.HTML
+        )
+        try:
+            await application.bot.pin_chat_message(
+                chat_id=chat_id, message_id=pre_msg.message_id, disable_notification=False
+            )
+        except Exception as pin_err:
+            log_error(f"Live quiz pin error: {pin_err}")
+        await wait_msg.edit_text(f"✅ {len(mcqs)} টি প্রশ্ন পাওয়া গেছে! Live Quiz শুরু হচ্ছে...")
+        await send_countdown(chat_id)
+        for i, mcq in enumerate(mcqs):
+            try:
+                q_text = f"প্রশ্ন {i+1}/{len(mcqs)}\n\n{mcq['question']}"
+                if len(q_text) > 300:
+                    q_text = q_text[:297] + "..."
+                exp_text = mcq.get('explanation', '')
+                if len(exp_text) > 200:
+                    exp_text = exp_text[:197] + "..."
+                options = mcq['options'][:4]
+                correct_id = mcq.get('answer', 0)
+                if correct_id >= len(options):
+                    correct_id = 0
+                await application.bot.send_poll(
+                    chat_id=chat_id, question=q_text, options=options,
+                    type=Poll.QUIZ, correct_option_id=correct_id,
+                    explanation=exp_text or None, is_anonymous=True,
+                    open_period=timer,
+                )
+                if i < len(mcqs) - 1:
+                    await asyncio.sleep(timer + 1)
+            except Exception as e:
+                log_error(f"Live quiz Q{i+1} error: {e}")
+                continue
+        done_text = (
+            f"✅ <b>LIVE QUIZ শেষ!</b>\n\n"
+            f"📝 মোট {len(mcqs)} টি প্রশ্ন পাঠানো হয়েছে।\n"
+            f"📊 উপরে scroll করে সব answer দেখুন!"
+        )
+        await application.bot.send_message(chat_id=chat_id, text=done_text, parse_mode=ParseMode.HTML)
+        log(f"🔴 Live Quiz completed: {len(mcqs)} questions, chat={chat_id}")
+    except Exception as e:
+        log_error(f"cmd_live error: {e}")
+        await update.message.reply_text("⏳ কিছু একটা সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন। 🙏")
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))[:1500] if err else str(context.error)
+    log_error(f"Uncaught handler error: {err}\n{tb}")
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "⏳ কিছু একটা সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন। 🙏"
+            )
+    except Exception:
+        pass
+
+async def register_handlers() -> None:
+    application.add_error_handler(global_error_handler)
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CommandHandler("all", cmd_all))
+    application.add_handler(CommandHandler("bm", cmd_bm))
+    application.add_handler(CommandHandler("bmexam", cmd_bmexam))
+    application.add_handler(CommandHandler("gpa", cmd_gpa))
+    application.add_handler(CommandHandler("info", cmd_info))
+    application.add_handler(CommandHandler("permit", cmd_permit))
+    application.add_handler(CommandHandler("limit", cmd_limit))
+    application.add_handler(CommandHandler("free", cmd_free))
+    application.add_handler(CommandHandler("daily", cmd_daily))
+    application.add_handler(CommandHandler("setneg", cmd_setneg))
+    application.add_handler(CommandHandler("settimer", cmd_settimer))
+    application.add_handler(CommandHandler("tag", cmd_tag))
+    application.add_handler(CommandHandler("exp", cmd_exp))
+    application.add_handler(CommandHandler("log", cmd_log))
+    application.add_handler(CommandHandler("error", cmd_error))
+    application.add_handler(CommandHandler("keys", cmd_keys))
+    application.add_handler(CommandHandler("prompt", cmd_prompt))
+    application.add_handler(CommandHandler("send", cmd_send))
+    application.add_handler(CommandHandler("timer", cmd_timer))
+    application.add_handler(CommandHandler("live", cmd_live))
+    application.add_handler(CommandHandler("pin", cmd_pin))
+    application.add_handler(CommandHandler("progress", cmd_progress))
+    application.add_handler(CommandHandler("revision", cmd_revision))
+    application.add_handler(CommandHandler("report", cmd_report))
+    application.add_handler(CommandHandler("random", cmd_random))
+    application.add_handler(CommandHandler("class", cmd_class))
+    application.add_handler(PollAnswerHandler(handle_poll_answer))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_image))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pending_input), group=0)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt_edit_text), group=1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text), group=2)
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    log("✅ All handlers registered")
+
+async def set_bot_commands() -> None:
+    """User menu = user commands only. Owner gets full set via owner-scope."""
+    try:
+        user_commands = [
+            BotCommand("start", "🤖 বট শুরু / স্বাগতম"),
+            BotCommand("all", "📚 আমার সব MCQ সেট দেখুন"),
+            BotCommand("bmexam", "🔖 Bookmark MCQ দিয়ে Exam"),
+            BotCommand("gpa", "🎯 MBBS GPA Score হিসাব"),
+            BotCommand("timer", "🍅 Pomodoro Study Timer"),
+            BotCommand("revision", "🔁 আগের MCQ ঝালাই"),
+            BotCommand("random", "🎲 Random MCQ Practice"),
+            BotCommand("progress", "📊 নিজের অগ্রগতি দেখুন"),
+            BotCommand("report", "📈 বিগত দিনের Report"),
+            BotCommand("class", "🎓 এটলাসের ফ্রী ক্লাস"),
+            BotCommand("bm", "🔖 Bookmark PDF ডাউনলোড"),
+            BotCommand("help", "❓ সাহায্য"),
+        ]
+        await application.bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+        # Owner gets everything (user + admin)
+        if OWNER_ID:
+            from telegram import BotCommandScopeChat
+            owner_commands = user_commands + [
+                BotCommand("info", "👥 ইউজার রিপোর্ট"),
+                BotCommand("keys", "🔑 AI Keys/Quota analytics"),
+                BotCommand("permit", "✅ ইউজার পারমিট"),
+                BotCommand("limit", "⚙️ লিমিট সেট"),
+                BotCommand("free", "🔢 ফ্রি লিমিট"),
+                BotCommand("daily", "🔢 পারমিটেড লিমিট"),
+                BotCommand("setneg", "➖ নেগেটিভ মার্ক"),
+                BotCommand("settimer", "⏱️ কুইজ টাইমার"),
+                BotCommand("tag", "🏷️ কুইজ ট্যাগ"),
+                BotCommand("exp", "📝 Exp suffix"),
+                BotCommand("prompt", "📋 প্রম্পট ম্যানেজ"),
+                BotCommand("send", "📨 ব্রডকাস্ট"),
+                BotCommand("log", "📋 এরর লগ"),
+                BotCommand("error", "🚨 Latest error"),
+            ]
+            try:
+                await application.bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=OWNER_ID))
+            except Exception as e:
+                log_error(f"Owner command scope set failed: {e}")
+        log("✅ Bot commands set (user menu + owner full)")
+    except Exception as e:
+        log_error(f"Failed to set commands: {e}")
+
+async def setup_bot() -> None:
+    global application, BOT_USERNAME
+    log("🚀 Setting up bot application...")
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .base_url(f"{CF_WORKER_URL}/bot")
+        .base_file_url(f"{CF_WORKER_URL}/file/bot")
+        .connect_timeout(30)
+        .read_timeout(60)
+        .write_timeout(60)
+        .build()
+    )
+    await register_handlers()
+    await set_bot_commands()
+    # fetch bot username for deep links (Share & Challenge)
+    try:
+        me = await application.bot.get_me()
+        BOT_USERNAME = me.username or ""
+        log(f"🤖 Bot username: @{BOT_USERNAME}")
+    except Exception as e:
+        log_error(f"get_me failed: {e}")
+    asyncio.create_task(daily_reset_scheduler())
+    asyncio.create_task(keepalive_task())
+    asyncio.create_task(checkin_scheduler())
+    log("✅ Bot setup complete!")
+
+# ============================================================
+# SECTION 23: WEBHOOK SETUP
+# ============================================================
+
 _bot_loop = None
 
 def setup_webhook_route(fastapi_app):
@@ -934,53 +3991,59 @@ def setup_webhook_route(fastapi_app):
         data = await request.json()
         if data and application and _bot_loop:
             update = Update.de_json(data, application.bot)
-            asyncio.run_coroutine_threadsafe(
-                application.process_update(update),
-                _bot_loop
-            )
+            asyncio.run_coroutine_threadsafe(application.process_update(update), _bot_loop)
         return PlainTextResponse('OK')
 
-# ============================================
-# MAIN
-# ============================================
-async def main():
-    global _bot_loop
+# ============================================================
+# SECTION 24: MAIN ENTRY POINT
+# ============================================================
+
+async def main() -> None:
+    global _bot_loop, _bot_start_time
     _bot_loop = asyncio.get_event_loop()
-
+    _bot_start_time = datetime.now(BD_TZ)
     log("=" * 60)
-    log("🚀 ATLAS MCQ BOT STARTING (WEBHOOK MODE)")
+    log("🚀 ATLAS MCQ BOT STARTING (WEBHOOK MODE) - v4.0")
     log("=" * 60)
-
     log("📦 Initializing database...")
     init_database()
-
+    get_supabase_backup()
+    bind_supabase(get_supabase)
+    if d1_enabled():
+        await bootstrap_d1_schema()
+        log("✅ D1 dual storage enabled")
+    else:
+        log("ℹ️ D1 not configured — running Supabase-only")
+    log("🤖 Setting up Gemini...")
+    setup_gemini()
     log("🤖 Setting up bot...")
     await setup_bot()
-
     await application.initialize()
     await application.start()
-
-    webhook_url = f"https://atlas-bot-proxy.hamza818483.workers.dev/webhook/{BOT_TOKEN}"
+    webhook_url = f"{CF_WORKER_URL}/webhook/{BOT_TOKEN}"
     try:
-        await application.bot.set_webhook(max_connections=40,
-            url=webhook_url,
+        await application.bot.set_webhook(
+            max_connections=40, url=webhook_url,
             allowed_updates=["message", "callback_query", "poll_answer", "poll"],
             drop_pending_updates=True
         )
         log(f"✅ Webhook set: {webhook_url}")
     except Exception as e:
         log_error(f"Webhook set failed: {e}")
-
     from exam_server import app as fastapi_app
     setup_webhook_route(fastapi_app)
-
     log("🌐 Starting exam+webhook server on port 7860...")
     import uvicorn
     config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=7860, log_level="warning")
     server = uvicorn.Server(config)
-
     log("✅ Bot is running in webhook mode!")
+    log("=" * 60)
     await server.serve()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log("🛑 Bot stopped by user")
+    except Exception as e:
+        log_error(f"Fatal error: {e}")

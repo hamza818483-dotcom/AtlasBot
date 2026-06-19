@@ -11,6 +11,33 @@ export default {
     const url = new URL(request.url);
 
     // ============================================
+    // 0. D1 QUERY ROUTE — used by storage.py (ATLAS dual storage)
+    // POST /d1/query   Header: X-D1-Token: {D1_TOKEN}
+    // Body: {"sql": "...", "params": [...]}
+    // ============================================
+    if (request.method === 'POST' && url.pathname === '/d1/query') {
+      const token = request.headers.get('X-D1-Token') || '';
+      if (token !== env.D1_TOKEN) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      try {
+        const { sql, params } = await request.json();
+        const stmt = env.DB.prepare(sql);
+        const bound = (params && params.length) ? stmt.bind(...params) : stmt;
+        const result = await bound.all();
+        return new Response(JSON.stringify({
+          ok: true,
+          results: result.results || [],
+          meta: result.meta || {}
+        }), { headers: { 'Content-Type': 'application/json' } });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: String(e) }), {
+          status: 500, headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // ============================================
     // 1. WEBHOOK — Telegram sends updates here
     // POST /webhook/{BOT_TOKEN}
     // ============================================

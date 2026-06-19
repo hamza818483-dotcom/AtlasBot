@@ -26,3 +26,4 @@ AI-powered MCQ generator using Gemini 2.5 Flash
 - /all - View all MCQs
 - /bm - Bookmark PDF
 - /info - Usage report (Admin)
+# Thu Jun 11 14:42:27 +06 2026
