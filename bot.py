@@ -408,7 +408,25 @@ def parse_mcq_json(response_text: str) -> List[Dict]:
         if "Extra data" in str(je) and je.pos > 0:
             mcqs = json.loads(t[:je.pos])
         else:
-            raise
+            # Try fixing common AI JSON issues: trailing commas, incomplete entries
+            fixed = re.sub(r',\s*([}\]])', r'\1', t)
+            fixed = re.sub(r',\s*$', ']', fixed)
+            try:
+                mcqs = json.loads(fixed)
+            except json.JSONDecodeError:
+                # Last resort: find all complete JSON objects via regex
+                obj_pattern = re.findall(r'\{[^{}]*"question"[^{}]*"options"[^{}]*"answer"[^{}]*\}', t, re.DOTALL)
+                if obj_pattern:
+                    mcqs = []
+                    for obj_str in obj_pattern:
+                        try:
+                            mcqs.append(json.loads(obj_str))
+                        except json.JSONDecodeError:
+                            continue
+                    if not mcqs:
+                        raise
+                else:
+                    raise
     valid = []
     for mcq in mcqs:
         if all(k in mcq for k in ['question', 'options', 'answer']):
@@ -1302,18 +1320,21 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         log_error(f"AI image generation error: {e}")
         return [], "MCQ তৈরি করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
 
-async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
+async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maximize: bool = False) -> Tuple[List[Dict], Optional[str]]:
     """Generate MCQs from text — Multi-AI fallback chain + cache."""
     try:
-        src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + f"_{prompt_type}"
+        cache_suffix = f"_{prompt_type}_{'max' if maximize else 'sel'}"
+        src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + cache_suffix
         cached = find_cached_mcq(src_hash, prompt_type)
         if cached and cached.get('mcqs'):
-            log(f"⚡ Cache hit for text (prompt: {prompt_type})")
+            log(f"⚡ Cache hit for text (prompt: {prompt_type}, max={maximize})")
             return clean_mcq_options(cached['mcqs']), None
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
         prompt_text = prompt_text + '\n\nIMPORTANT (Language Auto-Detect): Detect the language of the source content. Generate ALL questions, options and explanations in that SAME language (English source -> English MCQ, Bengali source -> Bengali MCQ, any other language -> that language).'
+        if maximize:
+            prompt_text += TEXT_MAX_MCQ_EXTRA
         full_prompt = f"{prompt_text}\n\n📄 INPUT TEXT:\n{text}"
 
         response_text, provider = await ai_generate(full_prompt, None)
@@ -2020,52 +2041,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             await update.message.reply_text(PREMIUM_MSG)
         return
-    eta = random.randint(3, 8)
-    end_time = (datetime.now(BD_TZ) + timedelta(seconds=eta)).strftime("%I:%M %p")
-    processing_text = PROCESSING_MSG.format(first_name=user['first_name'], attempt=usage+1, limit=limit, eta=eta, end_time=end_time)
-    processing_msg = await update.message.reply_text(processing_text)
-    async def _edit_txt(t):
-        await processing_msg.edit_text(t)
-    prog_task = asyncio.create_task(live_progress_task(_edit_txt, "Text", total_eta=7))
-    try:
-        mcqs, error = await generate_mcq_from_text(text, 'prompt_1')
-        prog_task.cancel()
-        if error:
-            await processing_msg.edit_text(f"❌ MCQ বানাতে সমস্যা হয়েছে: {error}\n\nআবার চেষ্টা করুন।")
-            return
-        if not mcqs:
-            await processing_msg.edit_text("❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।")
-            return
-        src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + "_prompt_1"
-        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
-        new_usage = increment_usage(user_id)
-        user_data = get_user(user_id)
-        practice_no = user_data.get('practice_count', 1) if user_data else 1
-        caption = generate_caption(user, practice_no, len(mcqs), get_prompt_display_name('prompt_1'))
-        keyboard = [
-            [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
-            [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
-            [share_button(quiz_id)],
-        ]
-        try:
-            await processing_msg.edit_text(f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}", reply_markup=InlineKeyboardMarkup(keyboard))
-            sent_msg = processing_msg
-        except:
-            sent_msg = await update.message.reply_text(f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}", reply_markup=InlineKeyboardMarkup(keyboard))
-        try:
-            await sent_msg.pin(disable_notification=True)
-            client = get_supabase()
-            client.table('mcqs').update({'chat_id': sent_msg.chat_id, 'message_id': sent_msg.message_id}).eq('quiz_id', quiz_id).execute()
-        except Exception as e:
-            log_error(f"Pin message failed: {e}")
-        log(f"✅ Text MCQ generated: {quiz_id} ({len(mcqs)} questions)")
-    except Exception as e:
-        prog_task.cancel()
-        log_error(f"Text handler error: {e}")
-        try:
-            await processing_msg.edit_text(BUSY_MSG)
-        except:
-            pass
+    context.user_data['pending_text'] = text
+    keyboard = [
+        [InlineKeyboardButton("⚡ Maximum MCQ", callback_data="txtmcq_max")],
+        [InlineKeyboardButton("⚡ Selected MCQ", callback_data="txtmcq_sel")],
+    ]
+    await update.message.reply_text(
+        f"📝 **Text পেয়েছি!** ({len(lines)} লাইন, {word_count} শব্দ)\n\n"
+        "MCQ টাইপ সিলেক্ট করুন:\n\n"
+        "⚡ **Maximum MCQ** — প্রতিটি লাইন থেকে সর্বোচ্চ সংখ্যক MCQ\n"
+        "⚡ **Selected MCQ** — গুরুত্বপূর্ণ তথ্য থেকে নির্বাচিত MCQ\n\n"
+        "⏱️ Response Time: 3-8 sec",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 # ============================================================
 # SECTION 15: CALLBACK HANDLERS
@@ -2079,7 +2068,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     log(f"🔘 Callback: {data} from {user.id}")
     await query.answer()  # instant feedback to user
     try:
-        if data.startswith("genmcq_"):
+        if data.startswith("txtmcq_"):
+            await handle_text_mcq_generation(query, data.replace("txtmcq_", ""), context)
+        elif data.startswith("genmcq_"):
             await handle_mcq_generation(query, data.replace("genmcq_", ""), context)
         elif data.startswith("qaimg_"):
             await handle_creative_from_pending(query, data.replace("qaimg_", ""), context)
@@ -2147,6 +2138,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ============================================================
 # SECTION 16: MCQ GENERATION HANDLER + v4.0 CREATIVE PDF
 # ============================================================
+
+TEXT_MAX_MCQ_EXTRA = "\n\n🔴 MAXIMUM MODE: তোমাকে অবশ্যই INPUT TEXT এর প্রতিটি লাইন ও প্রতিটি তথ্য থেকে সর্বোচ্চ সংখ্যক MCQ বানাতে হবে। কোনো তথ্য বাদ দেওয়া যাবে না। একটি তথ্যকে ঘুরিয়ে-ফিরিয়ে একাধিক MCQ বানাও। সর্বনিম্ন ২৫ থেকে ৩৫ টি MCQ দাও।"
+
+async def handle_text_mcq_generation(query, mode: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = query.from_user
+    user_id = user.id
+    text = context.user_data.get('pending_text')
+    if not text:
+        await query.message.edit_text("❌ Text ডাটা পাওয়া যায়নি। আবার Text পাঠান।")
+        return
+    async def _edit_txt(t):
+        try:
+            await query.message.edit_text(t)
+        except Exception:
+            pass
+    prog_task = asyncio.create_task(live_progress_task(_edit_txt, "Text", total_eta=8))
+    try:
+        is_max = (mode == "max")
+        mcqs, error = await generate_mcq_from_text(text, 'prompt_1', maximize=is_max)
+        prog_task.cancel()
+        if error:
+            await query.message.edit_text(f"❌ MCQ বানাতে সমস্যা হয়েছে: {error}\n\nআবার চেষ্টা করুন।")
+            return
+        if not mcqs:
+            await query.message.edit_text("❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।")
+            return
+        src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + f"_prompt_1_{'max' if is_max else 'sel'}"
+        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
+        new_usage = increment_usage(user_id)
+        user_data = get_user(user_id)
+        practice_no = user_data.get('practice_count', 1) if user_data else 1
+        mode_label = "Maximum MCQ" if is_max else "Selected MCQ"
+        caption = generate_caption({'first_name': user.first_name or 'User'}, practice_no, len(mcqs), mode_label)
+        allowed, usage, limit, is_perm = check_access(user_id)
+        keyboard = mcq_set_keyboard(quiz_id, user_id)
+        full_caption = f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}"
+        await query.message.edit_text(full_caption, reply_markup=InlineKeyboardMarkup(keyboard))
+        try:
+            await query.message.pin(disable_notification=True)
+            client = get_supabase()
+            client.table('mcqs').update({'chat_id': query.message.chat_id, 'message_id': query.message.message_id}).eq('quiz_id', quiz_id).execute()
+        except Exception as e:
+            log_error(f"Pin message failed: {e}")
+        context.user_data.pop('pending_text', None)
+        log(f"✅ Text MCQ generated ({mode}): {quiz_id} ({len(mcqs)} questions)")
+    except Exception as e:
+        prog_task.cancel()
+        log_error(f"Text MCQ handler error: {e}")
+        try:
+            await query.message.edit_text(BUSY_MSG)
+        except Exception:
+            pass
 
 async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = query.from_user
