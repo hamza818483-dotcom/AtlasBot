@@ -333,15 +333,23 @@ def save_result_to_db(user_id: int, cache_id: str, user_name: str, topic: str,
 def save_bookmark_to_db(user_id: int, cache_id: str, question_index: int,
                         question_data: Dict, topic: str = '', page: int = 0) -> tuple:
     try:
+        now = datetime.now(BD_TZ)
         row = {
             'user_id': user_id, 'cache_id': cache_id,
             'question_index': question_index,
             'question_data': json.dumps(question_data, ensure_ascii=False),
             'topic': topic, 'page': page,
-            'created_at': datetime.now(BD_TZ).isoformat()
+            'created_at': int(now.timestamp())
         }
         client = get_supabase()
-        client.table('bookmarks').insert(row).execute()
+        try:
+            client.table('bookmarks').insert(row).execute()
+        except Exception as e1:
+            if "22P02" in str(e1) or "invalid input syntax" in str(e1):
+                row['created_at'] = now.isoformat()
+                client.table('bookmarks').insert(row).execute()
+            else:
+                raise e1
         _mirror_insert('bookmarks', row)
         return True, ""
     except Exception as e:
@@ -2277,7 +2285,7 @@ def _ensure_supabase_bookmarks_table():
         test_row = {
             'user_id': -1, 'cache_id': '_rls_test_', 'question_index': -1,
             'question_data': '{}', 'topic': '', 'page': 0,
-            'created_at': datetime.now(BD_TZ).isoformat()
+            'created_at': int(datetime.now(BD_TZ).timestamp())
         }
         client = get_supabase()
         client.table('bookmarks').insert(test_row).execute()
