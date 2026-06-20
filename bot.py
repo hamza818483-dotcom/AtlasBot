@@ -1101,12 +1101,20 @@ def get_user_results(user_id: int, limit: int = 10) -> List[Dict]:
 def add_bookmark(user_id: int, cache_id: str, question_index: int, question_data: Dict, topic: str = '', page: int = 0) -> bool:
     try:
         client = get_supabase()
+        now = datetime.now(BD_TZ)
         row = {
             'user_id': user_id, 'cache_id': cache_id, 'question_index': question_index,
             'question_data': json.dumps(question_data, ensure_ascii=False),
-            'topic': topic, 'page': page, 'created_at': datetime.now(BD_TZ).isoformat()
+            'topic': topic, 'page': page, 'created_at': int(now.timestamp())
         }
-        client.table('bookmarks').insert(row).execute()
+        try:
+            client.table('bookmarks').insert(row).execute()
+        except Exception as e1:
+            if "22P02" in str(e1) or "invalid input syntax" in str(e1):
+                row['created_at'] = now.isoformat()
+                client.table('bookmarks').insert(row).execute()
+            else:
+                raise e1
         mirror_insert('bookmarks', row)
         return True
     except Exception as e:
