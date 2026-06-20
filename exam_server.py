@@ -331,7 +331,7 @@ def save_result_to_db(user_id: int, cache_id: str, user_name: str, topic: str,
         return False
 
 def save_bookmark_to_db(user_id: int, cache_id: str, question_index: int,
-                        question_data: Dict, topic: str = '', page: int = 0) -> bool:
+                        question_data: Dict, topic: str = '', page: int = 0) -> tuple:
     try:
         row = {
             'user_id': user_id, 'cache_id': cache_id,
@@ -343,10 +343,13 @@ def save_bookmark_to_db(user_id: int, cache_id: str, question_index: int,
         client = get_supabase()
         client.table('bookmarks').insert(row).execute()
         _mirror_insert('bookmarks', row)
-        return True
+        return True, ""
     except Exception as e:
-        print(f"save_bookmark error: {e}")
-        return False
+        err = str(e)
+        print(f"save_bookmark error: {err}")
+        if "row-level security" in err.lower() or "rls" in err.lower() or "policy" in err.lower() or "42501" in err:
+            return False, "RLS_BLOCKED"
+        return False, err
 
 def delete_bookmark_from_db(user_id: int, cache_id: str, question_index: int) -> bool:
     try:
@@ -646,9 +649,11 @@ async def api_bookmark_add(request: Request):
         if not user_id:
             print(f"[bookmark] WARN: user_id=0, skipping save")
             return {"success": False, "message": "user_id missing"}
-        ok = save_bookmark_to_db(user_id, cache_id, question_index, question_data, topic, page)
-        print(f"[bookmark] save user={user_id} cache={cache_id[:8]} qi={question_index} ok={ok}")
-        return {"success": ok}
+        ok, err = save_bookmark_to_db(user_id, cache_id, question_index, question_data, topic, page)
+        print(f"[bookmark] save user={user_id} cache={cache_id[:8]} qi={question_index} ok={ok} err={err}")
+        if not ok and err == "RLS_BLOCKED":
+            return {"success": False, "message": "RLS blocked — Supabase SQL Editor এ গিয়ে রান করুন: ALTER TABLE bookmarks DISABLE ROW LEVEL SECURITY;"}
+        return {"success": ok, "message": err if not ok else ""}
     except Exception as e:
         print(f"[bookmark] ERROR: {e}")
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
@@ -778,15 +783,39 @@ async def api_save_answers(request: Request):
     answers = body.get("answers", {}) or {}
     if cache_id in exam_store:
         exam_store[cache_id]["last_answers"] = answers
+        asyncio.ensure_future(_precache_solve_pdf(cache_id))
         return {"ok": True}
     return JSONResponse({"ok": False})
 
+async def _precache_solve_pdf(cache_id: str):
+    """Pre-render Solve PDF in background so it's instant when user clicks."""
+    try:
+        data = _get_exam(cache_id)
+        if not data:
+            return
+        answers = data.get("last_answers", {}) or {}
+        html = generate_solve_pdf_html(data, answers)
+        pdf_bytes = await _render_pdf(html)
+        if cache_id in exam_store:
+            exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
+            print(f"[solve-pdf] pre-cached for {cache_id[:8]} ({len(pdf_bytes)} bytes)")
+    except Exception as e:
+        print(f"[solve-pdf] pre-cache error: {e}")
+
 @app.get("/api/solve-pdf-direct/{cache_id}")
 async def api_solve_pdf_direct(cache_id: str):
-    """Instant PDF link (like Premium PDF) — reads last saved answers for this exam."""
+    """Instant PDF link (like Premium PDF) — serves pre-cached PDF when available."""
     data = _get_exam(cache_id)
     if not data:
         return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
+    cached = data.get("cached_solve_pdf")
+    if cached:
+        print(f"[solve-pdf] serving cached for {cache_id[:8]}")
+        return Response(
+            content=cached,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="ATLAS_Solve_{cache_id[:8]}.pdf"'}
+        )
     answers = data.get("last_answers", {}) or {}
     html = generate_solve_pdf_html(data, answers)
     try:
@@ -795,6 +824,8 @@ async def api_solve_pdf_direct(cache_id: str):
         print(f"Solve PDF direct render error: {e}")
         traceback.print_exc()
         return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
+    if cache_id in exam_store:
+        exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -1846,11 +1877,11 @@ function toggleBm(qi) {
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({user_id:USER_ID,cache_id:CFG.cacheId,question_index:qi,question_data:questions[qi],topic:CFG.topic||'',page:CFG.page||0})
     }).then(function(r){return r.json();}).then(function(d){
-        if(!d.success){showToast('⚠️ বুকমার্ক সেভ ব্যর্থ');bookmarks[qi]=!bookmarks[qi];
+        if(!d.success){showToast('⚠️ '+(d.message||'বুকমার্ক সেভ ব্যর্থ'));bookmarks[qi]=!bookmarks[qi];
             if(btn)btn.className='bm-btn'+(bookmarks[qi]?' active':'');
             if(btnR)btnR.className='bm-btn'+(bookmarks[qi]?' active':'');
         }
-    }).catch(function(){showToast('⚠️ বুকমার্ক সেভ ব্যর্থ');});
+    }).catch(function(){showToast('⚠️ নেটওয়ার্ক ত্রুটি — আবার চেষ্টা করুন');});
 }
 
 function openNav() {
@@ -2231,21 +2262,35 @@ def _ensure_supabase_bookmarks_table():
     try:
         client = get_supabase()
         client.table('bookmarks').select('id').limit(1).execute()
-        print("[startup] bookmarks table OK")
+        print("[startup] bookmarks table OK (SELECT works)")
     except Exception as e:
-        print(f"[startup] bookmarks table check failed: {e}")
-        print("[startup] Attempting to create bookmarks table via RPC...")
-        try:
-            client = get_supabase()
-            client.postgrest.rpc('', {}).execute()
-        except Exception:
-            pass
-        print("[startup] ⚠️ If bookmarks don't save, create the table manually in Supabase SQL Editor:")
+        err = str(e)
+        print(f"[startup] bookmarks table check failed: {err}")
+        print("[startup] ⚠️ If bookmarks don't save, run in Supabase SQL Editor:")
         print("""  CREATE TABLE IF NOT EXISTS bookmarks (
     id BIGSERIAL PRIMARY KEY, user_id BIGINT, cache_id TEXT,
     question_index INTEGER, question_data TEXT, topic TEXT, page INTEGER, created_at TEXT
   );
-  CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id);""")
+  CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id);
+  ALTER TABLE bookmarks DISABLE ROW LEVEL SECURITY;""")
+    try:
+        test_row = {
+            'user_id': -1, 'cache_id': '_rls_test_', 'question_index': -1,
+            'question_data': '{}', 'topic': '', 'page': 0,
+            'created_at': datetime.now(BD_TZ).isoformat()
+        }
+        client = get_supabase()
+        client.table('bookmarks').insert(test_row).execute()
+        client.table('bookmarks').delete().eq('user_id', -1).eq('cache_id', '_rls_test_').execute()
+        print("[startup] bookmarks INSERT/DELETE OK (RLS not blocking)")
+    except Exception as e:
+        err = str(e)
+        print(f"[startup] ⚠️ bookmarks WRITE BLOCKED: {err}")
+        if "row-level security" in err.lower() or "rls" in err.lower() or "policy" in err.lower() or "42501" in err:
+            print("[startup] 🔴 RLS is ENABLED on bookmarks table! Bookmarks will NOT save!")
+            print("[startup] 🔴 FIX: Run in Supabase SQL Editor: ALTER TABLE bookmarks DISABLE ROW LEVEL SECURITY;")
+        else:
+            print("[startup] 🔴 Bookmark writes failing for unknown reason — check Supabase permissions")
 
 @app.on_event("startup")
 async def startup():
