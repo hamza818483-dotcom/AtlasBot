@@ -643,9 +643,14 @@ async def api_bookmark_add(request: Request):
         question_data = body.get("question_data", {})
         topic = body.get("topic", "")
         page = body.get("page", 0)
+        if not user_id:
+            print(f"[bookmark] WARN: user_id=0, skipping save")
+            return {"success": False, "message": "user_id missing"}
         ok = save_bookmark_to_db(user_id, cache_id, question_index, question_data, topic, page)
+        print(f"[bookmark] save user={user_id} cache={cache_id[:8]} qi={question_index} ok={ok}")
         return {"success": ok}
     except Exception as e:
+        print(f"[bookmark] ERROR: {e}")
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 @app.delete("/api/bookmark")
@@ -1783,8 +1788,9 @@ function updateHdrTimer() {
 
 function updateHdrProg() {
     const answered = Object.keys(userAnswers).length;
-    const pct = CFG.total ? Math.round(answered/CFG.total*100) : 0;
-    document.getElementById('hdrProg').textContent = answered+'/'+CFG.total+' ('+pct+'%)';
+    const total = questions.length;
+    const pct = total ? Math.round(answered/total*100) : 0;
+    document.getElementById('hdrProg').textContent = answered+'/'+total+' ('+pct+'%)';
     document.getElementById('hdrBarFill').style.width = pct+'%';
 }
 
@@ -1859,7 +1865,7 @@ function openNav() {
     });
     document.getElementById('navGrid').innerHTML=html;
     const ans=Object.keys(userAnswers).length;
-    document.getElementById('navStats').textContent='✅ '+ans+' উত্তর | ⬜ '+(CFG.total-ans)+' বাকি';
+    document.getElementById('navStats').textContent='✅ '+ans+' উত্তর | ⬜ '+(questions.length-ans)+' বাকি';
     document.getElementById('navOverlay').classList.add('open');
 }
 function closeNav(){ document.getElementById('navOverlay').classList.remove('open'); }
@@ -1937,10 +1943,10 @@ function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,moti
     let html='';
     html+='<div class="result-score-card">';
     html+='<div class="result-name">📝 '+CFG.topic+'</div>';
-    html+='<div><span class="result-big">'+finFinal.toFixed(2)+'</span><span class="result-denom">/'+CFG.total+'</span></div>';
+    html+='<div><span class="result-big">'+finFinal.toFixed(2)+'</span><span class="result-denom">/'+questions.length+'</span></div>';
     html+='<div class="result-total-lbl">Final Score ('+pct+'%)</div>';
     if (isSecondTimer) {
-        html+='<div class="timer2-result">⏱️ আপনি সেকেন্ড টাইমার হওয়ায় ৩% মার্ক কেটে:<br>Final Result: '+finFinal.toFixed(2)+'/'+CFG.total+'</div>';
+        html+='<div class="timer2-result">⏱️ আপনি সেকেন্ড টাইমার হওয়ায় ৩% মার্ক কেটে:<br>Final Result: '+finFinal.toFixed(2)+'/'+questions.length+'</div>';
     }
     html+='</div>';
     html+='<div class="result-grid">';
@@ -1955,7 +1961,7 @@ function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,moti
     } else {
         html+='<div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-'+neg.toFixed(2)+' ('+wrong+'×'+CFG.negPerWrong+')</span></div>';
     }
-    html+='<div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">'+finFinal.toFixed(2)+'/'+CFG.total+' ('+pct+'%)</span></div>';
+    html+='<div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">'+finFinal.toFixed(2)+'/'+questions.length+' ('+pct+'%)</span></div>';
     html+='<div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>'+mins+'m '+secs+'s</span></div>';
     if(motivation||ayat){
         html+='<div class="mot-box" id="motBox"><div class="mot-grade">'+motivation+'</div><div class="mot-divider"></div>';
@@ -1969,8 +1975,8 @@ function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,moti
     html+='<button class="result-btn success" onclick="solvePDF()">📄 Solve PDF</button>';
     html+='<button class="result-btn primary" id="newExamBtn" onclick="startNewExam()">🆕 New Exam</button>';
     if(CFG.hasSource) html+='<button class="result-btn" id="backSrcBtn" onclick="backToSource()">↩️ Back to Source</button>';
-    html+='<button class="result-btn danger" onclick="mistakePractice()">❌ Mistake Practice (Only Wrong) - ('+wrong+')</button>';
-    html+='<button class="result-btn purple" onclick="specialPractice()">🔥 Special Practice (Wrong+Skip) - ('+(wrong+skipped)+')</button>';
+    html+='<button class="result-btn danger" onclick="mistakePractice()">❌ Mistake Practice (Only Wrong) - ('+wrong+'/'+questions.length+')</button>';
+    html+='<button class="result-btn purple" onclick="specialPractice()">🔥 Special Practice (Wrong+Skip) - ('+(wrong+skipped)+'/'+questions.length+')</button>';
     html+='<button class="result-btn" onclick="openLink(CFG.websiteUrl)">🌐 ATLAS Website</button>';
     html+='<button class="result-btn" onclick="openLink(CFG.youtubeUrl)">▶️ YouTube Channel</button>';
     html+='<button class="result-btn" onclick="openLink(CFG.whatsappUrl)">💬 WhatsApp</button>';
@@ -2076,40 +2082,78 @@ function _startPractice(filtered){
 }
 
 function startNewExam(){
-    const btn=document.getElementById('newExamBtn');
-    if(btn){btn.disabled=true;btn.textContent='⏳ নতুন MCQ তৈরি হচ্ছে...';}
-    const ctrl = new AbortController();
-    const tid = setTimeout(()=>ctrl.abort(), 120000);
-    let dots=0;
-    const dotTimer = setInterval(()=>{
-        dots=(dots+1)%4;
-        if(btn) btn.textContent='⏳ তৈরি হচ্ছে'+'.'.repeat(dots+1);
-    }, 800);
+    var ov=document.getElementById('newExamOverlay');
+    if(!ov){
+        var d=document.createElement('div');
+        d.id='newExamOverlay';
+        d.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,10,30,0.95);z-index:9999;display:flex;align-items:center;justify-content:center;';
+        d.innerHTML='<div style="text-align:center;max-width:360px;padding:30px;background:var(--card-bg,#1a1a3e);border-radius:20px;border:1px solid var(--accent,#5a5fe0)">'
+            +'<div style="font-size:40px;margin-bottom:12px">🧠</div>'
+            +'<div style="font-size:18px;font-weight:700;color:var(--accent,#5a5fe0);margin-bottom:8px">নতুন MCQ তৈরি হচ্ছে...</div>'
+            +'<div id="neProgressLabel" style="font-size:13px;color:var(--text-secondary,#aaa);margin-bottom:14px">AI থেকে প্রশ্ন জেনারেট করা হচ্ছে</div>'
+            +'<div style="background:rgba(90,95,224,0.15);border-radius:10px;height:18px;overflow:hidden;margin-bottom:8px">'
+            +'<div id="neBarFill" style="height:100%;width:0%;background:linear-gradient(90deg,#5a5fe0,#7b61ff);border-radius:10px;transition:width 0.5s"></div></div>'
+            +'<div id="neTimerLabel" style="font-size:12px;color:var(--text-secondary,#aaa);margin-bottom:16px">⏱️ 0 সেকেন্ড</div>'
+            +'<button id="neStartBtn" disabled onclick="neGoToExam()" style="width:100%;padding:14px;border:none;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;'
+            +'background:rgba(90,95,224,0.3);color:rgba(255,255,255,0.4);pointer-events:none">🚀 Start Exam</button>'
+            +'</div>';
+        document.body.appendChild(d);
+        ov=d;
+    }
+    ov.style.display='flex';
+    var elapsed=0, neReady=false, neUrl='';
+    var neTimer=setInterval(function(){
+        elapsed++;
+        var el=document.getElementById('neTimerLabel');
+        if(el) el.textContent='⏱️ '+elapsed+' সেকেন্ড';
+        var bar=document.getElementById('neBarFill');
+        if(bar&&!neReady){
+            var pct=Math.min(90,Math.round((elapsed/60)*90));
+            bar.style.width=pct+'%';
+        }
+        var lbl=document.getElementById('neProgressLabel');
+        if(lbl&&!neReady){
+            var msgs=['AI থেকে প্রশ্ন জেনারেট করা হচ্ছে','MCQ ফরম্যাট চেক হচ্ছে','অপশন ভেরিফাই হচ্ছে','প্রায় শেষ হয়ে আসছে'];
+            lbl.textContent=msgs[Math.min(Math.floor(elapsed/8),msgs.length-1)];
+        }
+    },1000);
+    var ctrl=new AbortController();
+    var tid=setTimeout(function(){ctrl.abort();},120000);
     fetch('/api/new-exam',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID}),
         signal:ctrl.signal
-    }).then(r=>{
+    }).then(function(r){
         if(!r.ok) throw new Error('HTTP '+r.status);
         return r.json();
-    }).then(d=>{
-        clearTimeout(tid); clearInterval(dotTimer);
-        if(d.ok && d.new_cache_id){
-            if(btn) btn.textContent='✅ হয়ে গেছে! যাচ্ছি...';
-            setTimeout(()=>{
-                window.location.href='/exam/'+d.new_cache_id+'?uid='+USER_ID+'&name='+encodeURIComponent(USER_NAME);
-            }, 400);
+    }).then(function(d){
+        clearTimeout(tid);
+        if(d.ok&&d.new_cache_id){
+            neReady=true;
+            neUrl='/exam/'+d.new_cache_id+'?uid='+USER_ID+'&name='+encodeURIComponent(USER_NAME);
+            var bar=document.getElementById('neBarFill');
+            if(bar) bar.style.width='100%';
+            var lbl=document.getElementById('neProgressLabel');
+            if(lbl){lbl.textContent='✅ '+(d.count||'')+ ' টি MCQ তৈরি হয়েছে!';lbl.style.color='#4ade80';}
+            var btn=document.getElementById('neStartBtn');
+            if(btn){btn.disabled=false;btn.style.background='linear-gradient(135deg,#22c55e,#16a34a)';btn.style.color='#fff';btn.style.pointerEvents='auto';btn.style.boxShadow='0 0 20px rgba(34,197,94,0.4)';}
+            clearInterval(neTimer);
+            window._neUrl=neUrl;
         } else {
-            showToast(d.message||'❌ তৈরি করা যায়নি।', 4000);
-            if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
+            clearInterval(neTimer);
+            showToast(d.message||'❌ তৈরি করা যায়নি।',4000);
+            ov.style.display='none';
         }
-    }).catch(e=>{
-        clearTimeout(tid); clearInterval(dotTimer);
-        const msg = e.name==='AbortError' ? '⏱️ Timeout — আবার চেষ্টা করো' : '❌ Network error';
-        showToast(msg, 4000);
-        if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
+    }).catch(function(e){
+        clearTimeout(tid);clearInterval(neTimer);
+        var msg=e.name==='AbortError'?'⏱️ Timeout — আবার চেষ্টা করো':'❌ Network error';
+        showToast(msg,4000);
+        ov.style.display='none';
     });
+}
+function neGoToExam(){
+    if(window._neUrl) window.location.href=window._neUrl;
 }
 
 function backToSource(){
@@ -2133,7 +2177,19 @@ function backToSource(){
 }
 
 function solvePDF(){
-    window.open('/api/solve-pdf-direct/'+CFG.cacheId, '_blank');
+    var btn=document.querySelector('.result-btn.success');
+    if(btn){btn.disabled=true;btn.textContent='⏳ PDF তৈরি হচ্ছে...';}
+    fetch('/api/solve-pdf-direct/'+CFG.cacheId).then(function(r){
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        return r.blob();
+    }).then(function(blob){
+        var url=URL.createObjectURL(blob);
+        window.open(url,'_blank');
+        if(btn){btn.disabled=false;btn.textContent='📄 Solve PDF';}
+    }).catch(function(){
+        window.open('/api/solve-pdf-direct/'+CFG.cacheId,'_blank');
+        if(btn){btn.disabled=false;btn.textContent='📄 Solve PDF';}
+    });
 }
 
 function openLink(url){ if(url) window.open(url,'_blank'); }
@@ -2171,6 +2227,26 @@ init();
 # ============================================================
 # SECTION 13: STARTUP
 # ============================================================
+def _ensure_supabase_bookmarks_table():
+    try:
+        client = get_supabase()
+        client.table('bookmarks').select('id').limit(1).execute()
+        print("[startup] bookmarks table OK")
+    except Exception as e:
+        print(f"[startup] bookmarks table check failed: {e}")
+        print("[startup] Attempting to create bookmarks table via RPC...")
+        try:
+            client = get_supabase()
+            client.postgrest.rpc('', {}).execute()
+        except Exception:
+            pass
+        print("[startup] ⚠️ If bookmarks don't save, create the table manually in Supabase SQL Editor:")
+        print("""  CREATE TABLE IF NOT EXISTS bookmarks (
+    id BIGSERIAL PRIMARY KEY, user_id BIGINT, cache_id TEXT,
+    question_index INTEGER, question_data TEXT, topic TEXT, page INTEGER, created_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id);""")
+
 @app.on_event("startup")
 async def startup():
     print("=" * 60)
@@ -2178,6 +2254,7 @@ async def startup():
     print("=" * 60)
     setup_gemini()
     get_supabase_backup()
+    _ensure_supabase_bookmarks_table()
     print("✅ Exam Server Ready! (Creative PDF + Full-page Premium PDF)")
     print("=" * 60)
 
