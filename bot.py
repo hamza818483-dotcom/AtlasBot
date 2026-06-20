@@ -225,30 +225,39 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
     tries = max(1, len(GEMINI_KEYS))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
-        try:
-            contents = [prompt_text]
-            if image_bytes:
-                contents.append(Image.open(BytesIO(image_bytes)))
-            loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    temperature=0.7, top_p=0.95, top_k=40,
-                    max_output_tokens=8192,
-                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                )
-            ))
-            if resp and resp.text:
-                _track_attempt("gemini", klabel, ok=True)
-                return resp.text
-            _track_attempt("gemini", klabel, ok=False)
-        except Exception as e:
-            log_error(f"Gemini attempt {attempt+1} failed: {e}")
-            es = str(e).lower()
-            exhausted = any(s in es for s in ("quota", "429", "resource_exhausted"))
-            _track_attempt("gemini", klabel, ok=False, exhausted=exhausted)
-            rotate_gemini_key()
+        for retry in range(2):
+            try:
+                contents = [prompt_text]
+                if image_bytes:
+                    contents.append(Image.open(BytesIO(image_bytes)))
+                loop = asyncio.get_event_loop()
+                resp = await loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=0.7, top_p=0.95, top_k=40,
+                        max_output_tokens=8192,
+                        thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                    )
+                ))
+                if resp and resp.text:
+                    _track_attempt("gemini", klabel, ok=True)
+                    return resp.text
+                _track_attempt("gemini", klabel, ok=False)
+                break
+            except Exception as e:
+                es = str(e).lower()
+                exhausted = any(s in es for s in ("quota", "429", "resource_exhausted"))
+                if exhausted:
+                    _track_attempt("gemini", klabel, ok=False, exhausted=True)
+                    break
+                if "500" in es or "503" in es or "timeout" in es or "unavailable" in es:
+                    if retry == 0:
+                        await asyncio.sleep(1)
+                        continue
+                _track_attempt("gemini", klabel, ok=False, exhausted=False)
+                break
+        rotate_gemini_key()
     return None
 
 def _b64_data_url(image_bytes: bytes) -> str:
@@ -310,7 +319,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                               prompt_text: str, image_bytes: Optional[bytes],
                               extra_headers: Dict = None,
                               provider: str = "", key_label: str = "") -> Tuple[Optional[str], bool]:
-    """Generic OpenAI-compatible chat call. Returns (text, quota_exhausted)."""
+    """Generic OpenAI-compatible chat call with retry. Returns (text, quota_exhausted)."""
     content: Any
     if image_bytes:
         content = [
@@ -328,25 +337,33 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
         "temperature": 0.7,
         "max_tokens": 8192,
     }
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
-            if r.status_code == 200:
-                data = r.json()
-                txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if txt:
-                    _track_attempt(provider, key_label, ok=True)
-                    return txt, False
-                return None, False
-            if r.status_code == 429:
-                _track_attempt(provider, key_label, ok=False, exhausted=True)
-                log_error(f"{provider} {model} quota/429: {r.text[:150]}")
-                return None, True
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if txt:
+                        _track_attempt(provider, key_label, ok=True)
+                        return txt, False
+                    return None, False
+                if r.status_code == 429:
+                    _track_attempt(provider, key_label, ok=False, exhausted=True)
+                    return None, True
+                if r.status_code in (500, 502, 503) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                _track_attempt(provider, key_label, ok=False)
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+                continue
             _track_attempt(provider, key_label, ok=False)
-            log_error(f"OpenAI-compat {model} status {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        _track_attempt(provider, key_label, ok=False)
-        log_error(f"OpenAI-compat {model} error: {e}")
+        except Exception as e:
+            _track_attempt(provider, key_label, ok=False)
+            break
     return None, False
 
 async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> Tuple[Optional[str], str]:
@@ -697,6 +714,7 @@ _timer_tasks: Dict[int, asyncio.Task] = {}
 _poll_chat_map: Dict[str, int] = {}
 _image_cache: Dict[str, Dict] = {}
 _last_quiz_answers: Dict[int, Dict] = {}
+_challenge_map: Dict[int, Dict] = {}
 _checkin_polls: Dict[str, int] = {}  # v4.0: poll_id -> user_id for 6h check-in
 _bot_start_time: Optional[datetime] = None
 
@@ -1259,19 +1277,91 @@ def clean_mcq_options(mcqs: List[Dict]) -> List[Dict]:
         out.append(m2)
     return out
 
-def share_button(quiz_id: str) -> InlineKeyboardButton:
-    """v4.0: Share & Challenge deep-link button."""
+def share_button(quiz_id: str, sender_id: int = 0) -> InlineKeyboardButton:
+    """v4.0: Share & Challenge deep-link button with sender tracking."""
     uname = BOT_USERNAME or "atlasprepbot"
+    dl = f"quiz_{quiz_id}" if not sender_id else f"quiz_{quiz_id}_c{sender_id}"
     return InlineKeyboardButton("🔗 Share & Challenge Your Friend",
-                                url=f"https://t.me/share/url?url=https://t.me/{uname}?start=quiz_{quiz_id}&text=🔥 ATLAS Quiz Challenge! তুমিও Solve করে দেখাও!")
+                                url=f"https://t.me/share/url?url=https://t.me/{uname}?start={dl}&text=🔥 ATLAS Quiz Challenge! তুমিও Solve করে দেখাও!")
 
 def mcq_set_keyboard(quiz_id: str, user_id: int = 0) -> List[List[InlineKeyboardButton]]:
+    challenge = _challenge_map.get(user_id)
+    challenger_param = ""
+    if challenge and challenge.get('quiz_id') == quiz_id:
+        challenger_param = f"&challenger={challenge['sender_id']}"
     return [
         [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
-        [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+        [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}{challenger_param}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
         [InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data=f"crpdf_k_{quiz_id}"), InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data=f"crpdf_c_{quiz_id}")],
-        [share_button(quiz_id)],
+        [share_button(quiz_id, user_id)],
     ]
+
+def _get_result_for_quiz(user_id: int, quiz_id: str) -> Optional[Dict]:
+    try:
+        client = get_supabase()
+        r = client.table('results').select('*').eq('user_id', user_id).eq('quiz_id', quiz_id).order('created_at', desc=True).limit(1).execute()
+        return r.data[0] if r.data else None
+    except Exception:
+        return None
+
+async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: str, receiver_result: Dict) -> None:
+    try:
+        sender_result = _get_result_for_quiz(sender_id, quiz_id)
+        if not sender_result:
+            return
+        try:
+            sender_info = get_supabase().table('users').select('first_name').eq('user_id', sender_id).limit(1).execute()
+            sender_name = sender_info.data[0]['first_name'] if sender_info.data else f"User#{sender_id}"
+        except Exception:
+            sender_name = f"User#{sender_id}"
+        try:
+            recv_info = get_supabase().table('users').select('first_name').eq('user_id', receiver_id).limit(1).execute()
+            recv_name = recv_info.data[0]['first_name'] if recv_info.data else f"User#{receiver_id}"
+        except Exception:
+            recv_name = f"User#{receiver_id}"
+        s_correct = sender_result.get('correct', 0)
+        s_wrong = sender_result.get('wrong', 0)
+        s_mark = sender_result.get('mark', 0)
+        s_total = sender_result.get('total', 0)
+        s_time = sender_result.get('time_taken', 0)
+        r_correct = receiver_result.get('correct', 0)
+        r_wrong = receiver_result.get('wrong', 0)
+        r_mark = receiver_result.get('mark', 0)
+        r_total = receiver_result.get('total', 0)
+        r_time = receiver_result.get('time_taken', 0)
+        s_pct = round(s_correct / s_total * 100) if s_total else 0
+        r_pct = round(r_correct / r_total * 100) if r_total else 0
+        if r_mark > s_mark:
+            winner, loser = recv_name, sender_name
+            verdict = f"🏆 {recv_name} জিতেছে!"
+        elif s_mark > r_mark:
+            winner, loser = sender_name, recv_name
+            verdict = f"🏆 {sender_name} জিতেছে!"
+        else:
+            verdict = "🤝 ড্র হয়েছে!"
+        s_tstr = f"{s_time//60}m {s_time%60}s" if s_time >= 60 else f"{s_time}s"
+        r_tstr = f"{r_time//60}m {r_time%60}s" if r_time >= 60 else f"{r_time}s"
+        comp = (
+            f"⚔️ <b>CHALLENGE COMPARISON</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 <b>{sender_name}</b>\n"
+            f"   ✅ {s_correct} | ❌ {s_wrong} | 📊 {s_mark:.2f}/{s_total} ({s_pct}%)\n"
+            f"   ⏱️ {s_tstr}\n\n"
+            f"👤 <b>{recv_name}</b>\n"
+            f"   ✅ {r_correct} | ❌ {r_wrong} | 📊 {r_mark:.2f}/{r_total} ({r_pct}%)\n"
+            f"   ⏱️ {r_tstr}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{verdict}\n━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        try:
+            await application.bot.send_message(chat_id=receiver_id, text=comp, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        try:
+            await application.bot.send_message(chat_id=sender_id, text=comp, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+    except Exception as e:
+        log_error(f"Challenge comparison error: {e}")
 
 # ============================================================
 # SECTION 12: MCQ GENERATOR (v4.0 — Multi-AI fallback + cache)
@@ -1437,14 +1527,34 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log(f"📱 /start from {user_id} ({first_name})")
     create_user(user_id, first_name, user['username'])
 
-    # v4.0: Share & Challenge deep link — /start quiz_<id>
+    # v4.0: Share & Challenge deep link — /start quiz_<id> or /start quiz_<id>_c<sender_id>
     if context.args and context.args[0].startswith('quiz_'):
-        quiz_id = context.args[0].replace('quiz_', '').strip()
+        raw = context.args[0][5:]  # remove 'quiz_' prefix
+        sender_id = 0
+        if '_c' in raw:
+            parts = raw.rsplit('_c', 1)
+            quiz_id = parts[0].strip()
+            try:
+                sender_id = int(parts[1])
+            except (ValueError, IndexError):
+                sender_id = 0
+        else:
+            quiz_id = raw.strip()
+        if sender_id and sender_id != user_id:
+            _challenge_map[user_id] = {'quiz_id': quiz_id, 'sender_id': sender_id}
         mcq_data = await get_mcq(quiz_id)
         if mcq_data:
             mcqs = mcq_data['mcqs']
             prompt_name = get_prompt_display_name(mcq_data.get('prompt_type', 'prompt_1'))
-            text = (f"🔥 Quiz Challenge গ্রহণ করো, {first_name}!\n"
+            challenge_line = ""
+            if sender_id and sender_id != user_id:
+                try:
+                    si = get_supabase().table('users').select('first_name').eq('user_id', sender_id).limit(1).execute()
+                    sn = si.data[0]['first_name'] if si.data else "Friend"
+                except Exception:
+                    sn = "Friend"
+                challenge_line = f"\n⚔️ Challenge from: {sn}"
+            text = (f"🔥 Quiz Challenge গ্রহণ করো, {first_name}!{challenge_line}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📝 Total MCQ: {len(mcqs)}\n📋 Type: {prompt_name}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}")
@@ -1606,7 +1716,7 @@ async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             keyboard = [
                 [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
                 [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
-                [InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{quiz_id}"), share_button(quiz_id)],
+                [InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{quiz_id}"), share_button(quiz_id, user_id)],
             ]
             image_file_id = mcq_data.get('image_file_id')
             if image_file_id:
@@ -2355,7 +2465,7 @@ async def handle_poll_solve(query, quiz_id: str, user) -> None:
     keyboard = [
         [InlineKeyboardButton("🔄 Again Practice", callback_data=f"again_{quiz_id}"), InlineKeyboardButton("🆕 New Practice", callback_data=f"newp_{quiz_id}")],
         [InlineKeyboardButton("📸 Back to Source", callback_data=f"back_{quiz_id}")],
-        [share_button(quiz_id)],
+        [share_button(quiz_id, user.id if user else 0)],
         [InlineKeyboardButton("🌐 Atlas Website", url="https://atlascourses.com"), InlineKeyboardButton("▶️ Atlas YouTube", url="https://www.youtube.com/@atlasprep")]
     ]
     await query.message.chat.send_message(f"✅ Total {total} টি poll পাঠানো হয়েছে।", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2441,7 +2551,7 @@ async def send_quiz_poll(chat_id: int) -> None:
         old_task = _timer_tasks.pop(chat_id, None)
         if old_task and not old_task.done():
             old_task.cancel()
-        task = asyncio.create_task(_quiz_timer_task(chat_id, timer + 0.3))
+        task = asyncio.create_task(_quiz_timer_task(chat_id, timer + 0.1))
         _timer_tasks[chat_id] = task
         save_active_quiz(chat_id, quiz)
         log(f"📊 Quiz poll sent: Q{idx+1}/{total} chat={chat_id}")
@@ -2547,7 +2657,7 @@ async def end_quiz(chat_id: int) -> None:
     keyboard = [
         [InlineKeyboardButton("🔄 Quiz Again", callback_data=f"retake_{quiz_id}"), InlineKeyboardButton("🆕 New Quiz", callback_data=f"newq_{quiz_id}")],
         [InlineKeyboardButton("❌ Mistake Practice", callback_data=f"mistake_{quiz_id}"), InlineKeyboardButton("📸 Back to Source", callback_data=f"back_{quiz_id}")],
-        [share_button(quiz_id)],
+        [share_button(quiz_id, chat_id)],
         [InlineKeyboardButton("🌐 Atlas Website", url="https://atlascourses.com"), InlineKeyboardButton("▶️ Atlas YouTube", url="https://www.youtube.com/@atlasprep")]
     ]
     try:
@@ -2558,6 +2668,10 @@ async def end_quiz(chat_id: int) -> None:
         await application.bot.send_message(chat_id=chat_id, text=result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         log_error(f"Send result error: {e}")
+    challenge = _challenge_map.pop(chat_id, None)
+    if challenge and challenge.get('quiz_id') == quiz_id:
+        recv_res = {'correct': correct, 'wrong': wrong, 'mark': final_mark, 'total': total, 'time_taken': time_taken}
+        asyncio.create_task(_send_challenge_comparison(chat_id, challenge['sender_id'], quiz_id, recv_res))
     remove_active_quiz(chat_id)
     _poll_chat_map = {k: v for k, v in _poll_chat_map.items() if v != chat_id}
 
@@ -3168,7 +3282,7 @@ async def _start_practice_set(message, user, mode: str, count_text: str, mcqs_ov
     keyboard = [
         [InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}"), InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}")],
         [InlineKeyboardButton("🌐 Web Exam", url=f"{HF_SPACE_URL}/exam/{quiz_id}?uid={user_id}")],
-        [share_button(quiz_id)],
+        [share_button(quiz_id, user_id)],
     ]
     await message.reply_text(
         f"{emoji} **Type:** {label}\n🔗 **MCQ:** {len(selected)}\n\n🚀 Are you ready, Dear {first_name}?",
