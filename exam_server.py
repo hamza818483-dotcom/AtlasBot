@@ -413,6 +413,54 @@ async def _tg_send_message(chat_id: int, text: str, reply_to: int = None,
         print(f"_tg_send_message error: {e}")
     return None
 
+async def _send_web_challenge_comparison(receiver_id: int, sender_id: int, cache_id: str,
+                                          r_correct: int, r_wrong: int, r_total: int, r_time: int):
+    try:
+        client = get_supabase()
+        sr = client.table('results').select('*').eq('user_id', sender_id).eq('quiz_id', cache_id).order('created_at', desc=True).limit(1).execute()
+        if not sr.data:
+            return
+        s = sr.data[0]
+        s_correct, s_wrong, s_total = s.get('correct', 0), s.get('wrong', 0), s.get('total', 0)
+        s_mark, s_time = s.get('mark', 0), s.get('time_taken', 0)
+        r_neg = r_wrong * NEGATIVE_MARK
+        r_mark = r_correct - r_neg
+        try:
+            si = client.table('users').select('first_name').eq('user_id', sender_id).limit(1).execute()
+            sender_name = si.data[0]['first_name'] if si.data else f"User#{sender_id}"
+        except Exception:
+            sender_name = f"User#{sender_id}"
+        try:
+            ri = client.table('users').select('first_name').eq('user_id', receiver_id).limit(1).execute()
+            recv_name = ri.data[0]['first_name'] if ri.data else f"User#{receiver_id}"
+        except Exception:
+            recv_name = f"User#{receiver_id}"
+        s_pct = round(s_correct / s_total * 100) if s_total else 0
+        r_pct = round(r_correct / r_total * 100) if r_total else 0
+        if r_mark > s_mark:
+            verdict = f"🏆 {recv_name} জিতেছে!"
+        elif s_mark > r_mark:
+            verdict = f"🏆 {sender_name} জিতেছে!"
+        else:
+            verdict = "🤝 ড্র হয়েছে!"
+        s_tstr = f"{s_time//60}m {s_time%60}s" if s_time >= 60 else f"{s_time}s"
+        r_tstr = f"{r_time//60}m {r_time%60}s" if r_time >= 60 else f"{r_time}s"
+        comp = (
+            f"⚔️ <b>CHALLENGE COMPARISON</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 <b>{sender_name}</b>\n"
+            f"   ✅ {s_correct} | ❌ {s_wrong} | 📊 {s_mark:.2f}/{s_total} ({s_pct}%)\n"
+            f"   ⏱️ {s_tstr}\n\n"
+            f"👤 <b>{recv_name}</b>\n"
+            f"   ✅ {r_correct} | ❌ {r_wrong} | 📊 {r_mark:.2f}/{r_total} ({r_pct}%)\n"
+            f"   ⏱️ {r_tstr}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{verdict}\n━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        await _tg_send_message(receiver_id, comp, parse_mode="HTML")
+        await _tg_send_message(sender_id, comp, parse_mode="HTML")
+    except Exception as e:
+        print(f"Web challenge comparison error: {e}")
+
 # ============================================================
 # SECTION 8: AYATS & MOTIVATION
 # ============================================================
@@ -521,12 +569,12 @@ async def health():
     return PlainTextResponse("OK")
 
 @app.get("/exam/{cache_id}", response_class=HTMLResponse)
-async def serve_exam(cache_id: str, uid: int = 0, name: str = ""):
+async def serve_exam(cache_id: str, uid: int = 0, name: str = "", challenger: int = 0):
     data = _get_exam(cache_id)
     if not data:
         return HTMLResponse(_not_found_html(), status_code=404)
     user_name = (name or "").strip()
-    return HTMLResponse(generate_exam_html(cache_id, data, uid, user_name))
+    return HTMLResponse(generate_exam_html(cache_id, data, uid, user_name, challenger))
 
 @app.get("/api/exam/{cache_id}")
 async def api_exam(cache_id: str):
@@ -570,6 +618,7 @@ async def api_result(request: Request):
     wrong = int(body.get("wrong", 0))
     skipped = int(body.get("skipped", 0))
     time_taken = int(body.get("time_taken", 0))
+    challenger_id = int(body.get("challenger_id", 0) or 0)
     total = correct + wrong + skipped
     data = _get_exam(cache_id)
     topic = data.get("topic", "ATLAS Exam") if data else "ATLAS Exam"
@@ -578,6 +627,9 @@ async def api_result(request: Request):
         save_result_to_db(user_id, cache_id, user_name, topic, page, total, correct, wrong, skipped, time_taken)
     except Exception as e:
         print(f"Save result warning: {e}")
+    if challenger_id and user_id and challenger_id != user_id:
+        asyncio.create_task(_send_web_challenge_comparison(
+            user_id, challenger_id, cache_id, correct, wrong, total, time_taken))
     motivation, ayat = _pick_feedback(correct, total)
     return {"motivation": motivation, "ayat": ayat}
 
@@ -741,7 +793,7 @@ async def api_solve_pdf_direct(cache_id: str):
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="ATLAS_Solve_{cache_id[:8]}.pdf"'}
+        headers={"Content-Disposition": f'inline; filename="ATLAS_Solve_{cache_id[:8]}.pdf"'}
     )
 
 # ============================================================
@@ -1357,7 +1409,7 @@ html,body{{font-family:'Noto Sans Bengali',sans-serif;color:#1a1a1a;background:#
 # ============================================================
 # SECTION 12.1: EXAM HTML (preserved from v2.4 — unchanged behavior)
 # ============================================================
-def generate_exam_html(cache_id: str, data: Dict, uid: int = 0, name: str = "") -> str:
+def generate_exam_html(cache_id: str, data: Dict, uid: int = 0, name: str = "", challenger: int = 0) -> str:
     mcqs = data["mcqs"]
     total = len(mcqs)
     topic = data.get("topic", "ATLAS Exam")
@@ -1376,6 +1428,7 @@ def generate_exam_html(cache_id: str, data: Dict, uid: int = 0, name: str = "") 
         "mcqs": mcqs, "negPerWrong": NEGATIVE_MARK, "secPerQ": SEC_PER_QUESTION,
         "hasSource": bool(chat_id and message_id), "promptDisplay": prompt_display,
         "hfSpaceUrl": HF_SPACE_URL,
+        "challengerId": challenger,
         "websiteUrl": "https://atlascourses.com",
         "youtubeUrl": "https://www.youtube.com/@atlasprep",
         "whatsappUrl": "https://wa.me/8801999681290",
@@ -1630,7 +1683,7 @@ let submitted = false;
 let totalSec = 30, totalLeft = 30, totalTimer = null;
 let isSecondTimer = false;
 let USER_NAME = '__USER_NAME_SAFE__';
-const USER_ID = (CFG && CFG.userId) ? CFG.userId : 0;
+const USER_ID = (CFG && CFG.userId !== undefined && CFG.userId !== null) ? Number(CFG.userId) : 0;
 
 function init() {
     try {
@@ -1775,6 +1828,7 @@ function lockQuestion(qi, chosen) {
 }
 
 function toggleBm(qi) {
+    if(!USER_ID){showToast('⚠️ বুকমার্ক সেভ করতে Bot থেকে Web Exam খুলুন');return;}
     bookmarks[qi] = !bookmarks[qi];
     const btn = document.getElementById('bmBtn'+qi);
     if (btn) btn.className = 'bm-btn'+(bookmarks[qi]?' active':'');
@@ -1785,7 +1839,12 @@ function toggleBm(qi) {
         method: bookmarks[qi]?'POST':'DELETE',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({user_id:USER_ID,cache_id:CFG.cacheId,question_index:qi,question_data:questions[qi],topic:CFG.topic||'',page:CFG.page||0})
-    }).catch(()=>{});
+    }).then(function(r){return r.json();}).then(function(d){
+        if(!d.success){showToast('⚠️ বুকমার্ক সেভ ব্যর্থ');bookmarks[qi]=!bookmarks[qi];
+            if(btn)btn.className='bm-btn'+(bookmarks[qi]?' active':'');
+            if(btnR)btnR.className='bm-btn'+(bookmarks[qi]?' active':'');
+        }
+    }).catch(function(){showToast('⚠️ বুকমার্ক সেভ ব্যর্থ');});
 }
 
 function openNav() {
@@ -1852,10 +1911,9 @@ function doSubmit() {
     let timer2Neg = 0;
     let timer2Main = correct;
     if (isSecondTimer) {
-        // 2nd timer rule: Final = main - (wrong x 0.25) - (main x 3%)
         timer2Neg = parseFloat((wrong*0.25).toFixed(2));
         timer2Main = parseFloat((correct - timer2Neg).toFixed(2));
-        timer2Deduction = parseFloat((timer2Main * 0.03).toFixed(2));
+        timer2Deduction = parseFloat((questions.length * 0.03).toFixed(2));
         finAfterTimer2 = parseFloat((timer2Main - timer2Deduction).toFixed(2));
     }
     _saveAnswerSnapshot();
@@ -1863,7 +1921,7 @@ function doSubmit() {
     renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,'','',timer2Deduction,finAfterTimer2);
     fetch('/api/exam/result',{
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID,user_name:USER_NAME,correct,wrong,skipped,time_taken:timeTaken})
+        body: JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID,user_name:USER_NAME,correct,wrong,skipped,time_taken:timeTaken,challenger_id:CFG.challengerId||0})
     }).then(r=>r.json()).then(d=>{
         const motBox = document.getElementById('motBox');
         if (motBox && (d.motivation || d.ayat)) {
@@ -1893,7 +1951,7 @@ function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,moti
     if (isSecondTimer) {
         const t2neg = parseFloat((wrong*0.25).toFixed(2));
         html+='<div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-'+t2neg.toFixed(2)+' ('+wrong+'×0.25)</span></div>';
-        html+='<div class="info-row2"><span>⏱️ 2nd Timer (-3%)</span><span style="color:var(--error)">-'+timer2Ded.toFixed(2)+'</span></div>';
+        html+='<div class="info-row2"><span>⏱️ 2nd Timer (-3% of '+questions.length+')</span><span style="color:var(--error)">-'+timer2Ded.toFixed(2)+'</span></div>';
     } else {
         html+='<div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-'+neg.toFixed(2)+' ('+wrong+'×'+CFG.negPerWrong+')</span></div>';
     }
@@ -1971,7 +2029,15 @@ function filt(e,t){
 }
 
 let lastAnswers={};
-function _saveAnswerSnapshot(){ lastAnswers={...userAnswers}; }
+function _saveAnswerSnapshot(){
+    lastAnswers={};
+    for(var k in userAnswers){ if(userAnswers.hasOwnProperty(k)) lastAnswers[Number(k)]=userAnswers[k]; }
+}
+
+function _getCorrectIdx(q){
+    if(typeof q.answer==='string') return {'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0;
+    return (typeof q.answer==='number')?q.answer:0;
+}
 
 function practiceAgain(){
     questions=[...origQs];
@@ -1981,22 +2047,20 @@ function practiceAgain(){
 }
 
 function mistakePractice(){
-    console.log('[debug] lastAnswers:', JSON.stringify(lastAnswers), 'origQs.length:', origQs.length);
-    const wrongQs=origQs.filter((q,i)=>{
-        const ci=typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
-        const ua=lastAnswers[i];
-        console.log('[debug] i='+i+' ua='+ua+' ci='+ci+' include='+(ua!==undefined&&ua!==ci));
-        return ua!==undefined&&ua!==ci;
+    const wrongQs=origQs.filter(function(q,i){
+        var ci=_getCorrectIdx(q);
+        var ua=lastAnswers[i];
+        return ua!==undefined&&ua!==null&&ua!==ci;
     });
     if(!wrongQs.length){showToast('🎉 কোনো ভুল নেই!');return;}
     _startPractice(wrongQs);
 }
 
 function specialPractice(){
-    const filtered=origQs.filter((q,i)=>{
-        const ci=typeof q.answer==='string'?({'A':0,'B':1,'C':2,'D':3}[q.answer.toUpperCase()]||0):(q.answer||0);
-        const ua=lastAnswers[i];
-        return ua===undefined||ua!==ci;
+    const filtered=origQs.filter(function(q,i){
+        var ci=_getCorrectIdx(q);
+        var ua=lastAnswers[i];
+        return ua===undefined||ua===null||ua!==ci;
     });
     if(!filtered.length){showToast('✅ সব সঠিক ছিল!');return;}
     _startPractice(filtered);
