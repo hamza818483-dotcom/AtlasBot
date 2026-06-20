@@ -403,6 +403,50 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
                 return txt, name
     return None, ""
 
+def _fix_json_str(t: str) -> str:
+    """Fix common AI JSON issues: trailing commas, missing values, unquoted keys, truncation."""
+    t = re.sub(r',\s*([}\]])', r'\1', t)
+    t = re.sub(r':\s*,', ': "",', t)
+    t = re.sub(r':\s*}', ': ""}', t)
+    t = re.sub(r',\s*$', ']', t)
+    if t.count('[') > t.count(']'):
+        t = t.rstrip().rstrip(',') + ']'
+    if t.count('{') > t.count('}'):
+        t = t.rstrip().rstrip(',') + '}'
+        if t.count('[') > t.count(']'):
+            t = t + ']'
+    return t
+
+def _extract_mcq_objects(t: str) -> List[Dict]:
+    """Extract individual MCQ JSON objects from messy text using brace matching."""
+    mcqs = []
+    i = 0
+    while i < len(t):
+        if t[i] == '{':
+            depth = 0
+            start = i
+            for j in range(i, len(t)):
+                if t[j] == '{': depth += 1
+                elif t[j] == '}': depth -= 1
+                if depth == 0:
+                    candidate = t[start:j+1]
+                    if '"question"' in candidate and '"options"' in candidate and '"answer"' in candidate:
+                        try:
+                            obj = json.loads(candidate)
+                            mcqs.append(obj)
+                        except json.JSONDecodeError:
+                            try:
+                                mcqs.append(json.loads(_fix_json_str(candidate)))
+                            except json.JSONDecodeError:
+                                pass
+                    i = j + 1
+                    break
+            else:
+                break
+        else:
+            i += 1
+    return mcqs
+
 def parse_mcq_json(response_text: str) -> List[Dict]:
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider."""
     t = (response_text or "").strip()
@@ -413,37 +457,29 @@ def parse_mcq_json(response_text: str) -> List[Dict]:
     if t.endswith('```'):
         t = t[:-3]
     t = t.strip()
-    # Salvage: take JSON array slice if extra text around it
     if not t.startswith('['):
         s, e = t.find('['), t.rfind(']')
         if s != -1 and e != -1 and e > s:
             t = t[s:e+1]
+    mcqs = None
     try:
         mcqs = json.loads(t)
     except json.JSONDecodeError as je:
-        # Extra data after a valid JSON array (e.g. AI appended extra text/JSON)
         if "Extra data" in str(je) and je.pos > 0:
-            mcqs = json.loads(t[:je.pos])
-        else:
-            # Try fixing common AI JSON issues: trailing commas, incomplete entries
-            fixed = re.sub(r',\s*([}\]])', r'\1', t)
-            fixed = re.sub(r',\s*$', ']', fixed)
             try:
-                mcqs = json.loads(fixed)
+                mcqs = json.loads(t[:je.pos])
             except json.JSONDecodeError:
-                # Last resort: find all complete JSON objects via regex
-                obj_pattern = re.findall(r'\{[^{}]*"question"[^{}]*"options"[^{}]*"answer"[^{}]*\}', t, re.DOTALL)
-                if obj_pattern:
-                    mcqs = []
-                    for obj_str in obj_pattern:
-                        try:
-                            mcqs.append(json.loads(obj_str))
-                        except json.JSONDecodeError:
-                            continue
-                    if not mcqs:
-                        raise
-                else:
-                    raise
+                pass
+    if mcqs is None:
+        try:
+            mcqs = json.loads(_fix_json_str(t))
+        except json.JSONDecodeError:
+            pass
+    if mcqs is None:
+        mcqs = _extract_mcq_objects(t)
+    if not mcqs:
+        log_error(f"parse_mcq_json: all strategies failed, input len={len(t)}, first 300 chars: {t[:300]}")
+        return []
     valid = []
     for mcq in mcqs:
         if all(k in mcq for k in ['question', 'options', 'answer']):
