@@ -4237,6 +4237,23 @@ async def main() -> None:
         log("ℹ️ D1 not configured — running Supabase-only")
     log("🤖 Setting up Gemini...")
     setup_gemini()
+    # --- TEMP DIAGNOSTIC: check outbound reachability of candidate domains ---
+    log("🔍 Network diagnostic: testing outbound connectivity...")
+    import httpx as _diag_httpx
+    _diag_targets = [
+        ("api.telegram.org", "https://api.telegram.org"),
+        ("CF Worker (workers.dev)", f"{CF_WORKER_URL}/"),
+        ("atlasprep.pages.dev", "https://atlasprep.pages.dev"),
+    ]
+    for _name, _url in _diag_targets:
+        try:
+            async with _diag_httpx.AsyncClient(timeout=8) as _c:
+                _r = await _c.get(_url)
+                log(f"   ✅ {_name}: reachable (status {_r.status_code})")
+        except Exception as _e:
+            log(f"   ❌ {_name}: UNREACHABLE — {type(_e).__name__}: {_e}")
+    log("🔍 Network diagnostic complete.")
+    # --- END TEMP DIAGNOSTIC ---
     log("🤖 Setting up bot...")
     await setup_bot()
     await application.initialize()
