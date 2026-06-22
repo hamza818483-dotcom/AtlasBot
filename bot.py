@@ -26,7 +26,7 @@ import csv
 from typing import Optional, Dict, List, Tuple, Any
 
 key = os.getenv("GEMINI_KEY", "")
-print(f"[STARTUP] GEMINI_KEY loaded: len={len(key)}, prefix={key[:10]}, suffix={key[-4:]}")
+print(f"[STARTUP] GEMINI_KEY loaded: len={len(key)}, set={bool(key)}")
 
 # Telegram Bot
 from telegram import (
@@ -68,7 +68,7 @@ import aiohttp
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 GENAI_API_KEY = (os.getenv("GEMINI_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-print(f"[CONFIG] GEMINI_KEY: len={len(GENAI_API_KEY)}, prefix={GENAI_API_KEY[:8] if GENAI_API_KEY else 'EMPTY'}, suffix={GENAI_API_KEY[-4:] if GENAI_API_KEY else 'EMPTY'}")
+print(f"[CONFIG] GEMINI_KEY: len={len(GENAI_API_KEY)}, set={bool(GENAI_API_KEY)}")
 
 # ── v4.0: Multi-AI provider keys (all optional, comma-separated, silent skip) ──
 NVIDIA_KEYS = [k.strip() for k in os.getenv("NVIDIA_KEY", "").split(",") if k.strip()]
@@ -84,13 +84,13 @@ OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-
 NEMOTRON_MODEL = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
 GEMMA_MODEL = os.getenv("GEMMA_MODEL", "google/gemma-3-27b-it:free")
 
-SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
 SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
-HF_SPACE_URL = "https://hamzahf1-atlasbot.hf.space"
-CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
+HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://hamzahf1-atlasbot.hf.space")
+CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev")
 
 DEFAULT_TIMER = 30
 DEFAULT_FREE_LIMIT = 3

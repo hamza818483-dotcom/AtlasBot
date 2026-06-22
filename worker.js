@@ -6,6 +6,17 @@
 //   GET  /tg-file/{TOKEN}/{path} → proxy file download from Telegram
 //   *    everything else         → proxy to api.telegram.org
 
+const ALLOWED_ORIGINS = [
+  'https://hamzahf1-atlasbot.hf.space',
+  'https://atlascourses.com',
+];
+
+function getCorsOrigin(request) {
+  const origin = request.headers.get('Origin') || '';
+  if (ALLOWED_ORIGINS.includes(origin)) return origin;
+  return ALLOWED_ORIGINS[0];
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -65,7 +76,7 @@ export default {
       try {
         const resp = await fetch(tgUrl);
         const newResp = new Response(resp.body, resp);
-        newResp.headers.set('Access-Control-Allow-Origin', '*');
+        newResp.headers.set('Access-Control-Allow-Origin', getCorsOrigin(request));
         return newResp;
       } catch (e) {
         return new Response(JSON.stringify({ ok: false, error: e.message }), {
@@ -94,7 +105,7 @@ export default {
         const data = await resp.json();
         return new Response(JSON.stringify(data), {
           status: resp.status,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': getCorsOrigin(request) },
         });
       } catch (e) {
         return new Response(JSON.stringify({ ok: false, error: e.message }), {
@@ -128,7 +139,7 @@ export default {
         body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
       }));
       const newResp = new Response(resp.body, resp);
-      newResp.headers.set('Access-Control-Allow-Origin', '*');
+      newResp.headers.set('Access-Control-Allow-Origin', getCorsOrigin(request));
       newResp.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       return newResp;
     } catch (e) {

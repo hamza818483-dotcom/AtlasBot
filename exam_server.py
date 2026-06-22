@@ -49,8 +49,8 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEY", "").split(",") if k.strip()]
 OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
 
-SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 # Backup Supabase (optional mirror — silently skipped if not set)
 SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
@@ -660,7 +660,7 @@ async def api_bookmark_add(request: Request):
         ok, err = save_bookmark_to_db(user_id, cache_id, question_index, question_data, topic, page)
         print(f"[bookmark] save user={user_id} cache={cache_id[:8]} qi={question_index} ok={ok} err={err}")
         if not ok and err == "RLS_BLOCKED":
-            return {"success": False, "message": "RLS blocked — Supabase SQL Editor এ গিয়ে রান করুন: ALTER TABLE bookmarks DISABLE ROW LEVEL SECURITY;"}
+            return {"success": False, "message": "Bookmark save failed — please contact the admin."}
         return {"success": ok, "message": err if not ok else ""}
     except Exception as e:
         print(f"[bookmark] ERROR: {e}")
@@ -1189,7 +1189,7 @@ async def _render_pdf(html: str) -> bytes:
 # ============================================================
 
 def _esc(s: str) -> str:
-    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;")
 
 def _not_found_html() -> str:
     return """<!DOCTYPE html>
@@ -1479,7 +1479,7 @@ def generate_exam_html(cache_id: str, data: Dict, uid: int = 0, name: str = "", 
         "groupsUrl": "https://t.me/MediAtlas/4221",
     }
     cfg_json = json.dumps(cfg, ensure_ascii=True)
-    user_name_safe = (name or "").replace("'", "\\'").replace('"', '\\"')
+    user_name_safe = _esc((name or "")[:80])
     return _EXAM_HTML_TEMPLATE.replace("__CFG_JSON__", cfg_json).replace("__USER_NAME_SAFE__", user_name_safe)
 
 _EXAM_HTML_TEMPLATE = r'''<!DOCTYPE html>
