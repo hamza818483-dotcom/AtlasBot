@@ -61,60 +61,38 @@ from PIL import Image, ImageDraw, ImageFont
 import httpx
 import aiohttp
 
+# ── Shared utilities ──
+from shared.config import (
+    BD_TZ, BOT_TOKEN, GENAI_API_KEY, GEMINI_KEYS,
+    GROQ_KEYS, GROQ_MODEL, NVIDIA_KEYS, NVIDIA_MODEL,
+    OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
+    NEMOTRON_KEYS, NEMOTRON_MODEL, GEMMA_KEYS, GEMMA_MODEL,
+    SUPABASE_URL, SUPABASE_KEY, SUPABASE_BACKUP_URL, SUPABASE_BACKUP_KEY,
+    HF_SPACE_URL, CF_WORKER_URL, LOG_DIR,
+    DEFAULT_TIMER, DEFAULT_FREE_LIMIT, DEFAULT_DAILY_LIMIT,
+    DEFAULT_NEGATIVE_MARK, NEW_PRACTICE_COUNT, MAX_MCQ, MIN_MCQ, POLL_DELAY,
+    FREE_NEW_EXAM_LIMIT, PERMITTED_NEW_EXAM_LIMIT, PROMPT_DISPLAY_NAMES,
+)
+from shared.supabase_client import (
+    get_supabase, get_supabase_backup, mirror_insert,
+)
+from shared.ai_utils import (
+    b64_data_url as _b64_data_url,
+    parse_mcq_json, clean_option_prefix,
+)
+from shared.gemini_client import GeminiRotatingClient
+
 # ============================================================
 # SECTION 2: CONFIGURATION
+# (Most constants now imported from shared.config)
 # ============================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-GENAI_API_KEY = (os.getenv("GEMINI_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
 print(f"[CONFIG] GEMINI_KEY: len={len(GENAI_API_KEY)}, prefix={GENAI_API_KEY[:8] if GENAI_API_KEY else 'EMPTY'}, suffix={GENAI_API_KEY[-4:] if GENAI_API_KEY else 'EMPTY'}")
-
-# ── v4.0: Multi-AI provider keys (all optional, comma-separated, silent skip) ──
-NVIDIA_KEYS = [k.strip() for k in os.getenv("NVIDIA_KEY", "").split(",") if k.strip()]
-OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEY", "").split(",") if k.strip()]
-NEMOTRON_KEYS = [k.strip() for k in os.getenv("NEMOTRON_KEY", "").split(",") if k.strip()]
-GEMMA_KEYS = [k.strip() for k in os.getenv("GEMMA_KEY", "").split(",") if k.strip()]
-GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
-
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
-OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
-NEMOTRON_MODEL = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
-GEMMA_MODEL = os.getenv("GEMMA_MODEL", "google/gemma-3-27b-it:free")
-
-SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
-SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
-SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
-
-HF_SPACE_URL = "https://hamzahf1-atlasbot.hf.space"
-CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
-
-DEFAULT_TIMER = 30
-DEFAULT_FREE_LIMIT = 3
-DEFAULT_DAILY_LIMIT = 5
-DEFAULT_NEGATIVE_MARK = -0.50
-NEW_PRACTICE_COUNT = 15
-MAX_MCQ = 35
-MIN_MCQ = 10
-POLL_DELAY = 1.5
-
-FREE_NEW_EXAM_LIMIT = 2
-PERMITTED_NEW_EXAM_LIMIT = 20
 
 BOT_USERNAME = ""  # filled at startup for deep links
 
 BUSY_MSG = "🤖 এটলাস বট এই মুহূর্তে ব্যস্ত আছে!\nকিছুক্ষণ অপেক্ষা করে আবার চেষ্টা করুন। 🙏\n\nবারবার সমস্যা হলে Owner কে জানান।\n🔗 Owner: @rafi_somc"
-
-try:
-    BD_TZ = timezone(timedelta(hours=6))
-except:
-    BD_TZ = datetime.now().astimezone().tzinfo
-
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
 
 PROCESSING_MSG = """
 🔄 {first_name}, আপনার MCQ তৈরি করা হচ্ছে...
@@ -131,43 +109,8 @@ PREMIUM_MSG = """
 
 # ============================================================
 # SECTION 3: SUPABASE CLIENT SETUP (+ v4.0 backup mirror)
+# (Now imported from shared.supabase_client)
 # ============================================================
-supabase: Client = None
-supabase_backup: Client = None
-
-def get_supabase() -> Client:
-    global supabase
-    if supabase is None:
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            log("✅ Supabase client initialized")
-        except Exception as e:
-            log_error(f"Supabase init failed: {e}")
-            raise
-    return supabase
-
-def get_supabase_backup() -> Optional[Client]:
-    """v4.0: optional secondary Supabase mirror. Silent if not configured."""
-    global supabase_backup
-    if not SUPABASE_BACKUP_URL or not SUPABASE_BACKUP_KEY:
-        return None
-    if supabase_backup is None:
-        try:
-            supabase_backup = create_client(SUPABASE_BACKUP_URL, SUPABASE_BACKUP_KEY)
-            log("✅ Supabase BACKUP client initialized")
-        except Exception as e:
-            log_error(f"Supabase backup init failed: {e}")
-            return None
-    return supabase_backup
-
-def mirror_insert(table: str, row: Dict) -> None:
-    """v4.0: fire-and-forget mirror to backup DB. Never raises, never blocks logic."""
-    try:
-        bk = get_supabase_backup()
-        if bk:
-            bk.table(table).insert(row).execute()
-    except Exception:
-        pass
 
 def init_database():
     try:
@@ -179,27 +122,17 @@ def init_database():
 # ============================================================
 # SECTION 4: GEMINI SETUP (Multi-key rotation; AIza & AQ. both work —
 # they are plain API-key strings, SDK handles both formats identically)
+# (Now uses shared.gemini_client.GeminiRotatingClient)
 # ============================================================
-GEMINI_KEYS = [k.strip() for k in GENAI_API_KEY.split(",") if k.strip()]
-_current_key_idx = 0
-_bot_genai_client = None
+_bot_gemini = GeminiRotatingClient(label="Bot")
 
 def setup_gemini():
-    global _bot_genai_client
-    if GEMINI_KEYS:
-        _bot_genai_client = genai.Client(api_key=GEMINI_KEYS[0])
-        log(f"✅ Gemini configured ({len(GEMINI_KEYS)} keys loaded)")
-    else:
-        log("⚠️ No GEMINI keys!", "WARNING")
+    _bot_gemini.setup()
 
 def rotate_gemini_key():
-    global _bot_genai_client, _current_key_idx
-    if len(GEMINI_KEYS) <= 1:
-        return False
-    _current_key_idx = (_current_key_idx + 1) % len(GEMINI_KEYS)
-    _bot_genai_client = genai.Client(api_key=GEMINI_KEYS[_current_key_idx])
-    log(f"🔄 Rotated to key #{_current_key_idx+1}/{len(GEMINI_KEYS)}")
-    return True
+    return _bot_gemini.rotate()
+
+
 
 # ============================================================
 # SECTION 4B: v4.0 MULTI-AI FALLBACK ENGINE
@@ -217,21 +150,20 @@ STRICT_SOURCE_RULES = """
 5. Output: ONLY valid JSON, no extra text."""
 
 async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
-    global _bot_genai_client
     if not GEMINI_KEYS:
         return None
-    if _bot_genai_client is None:
+    if _bot_gemini.client is None:
         setup_gemini()
     tries = max(1, len(GEMINI_KEYS))
     for attempt in range(tries):
-        klabel = f"gemini#{_current_key_idx+1}"
+        klabel = f"gemini#{_bot_gemini.current_key_index+1}"
         for retry in range(2):
             try:
                 contents = [prompt_text]
                 if image_bytes:
                     contents.append(Image.open(BytesIO(image_bytes)))
                 loop = asyncio.get_event_loop()
-                resp = await loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
+                resp = await loop.run_in_executor(None, lambda: _bot_gemini.client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=contents,
                     config=types.GenerateContentConfig(
@@ -260,13 +192,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
         rotate_gemini_key()
     return None
 
-def _b64_data_url(image_bytes: bytes) -> str:
-    mime = "image/jpeg"
-    if image_bytes[:8].startswith(b"\x89PNG"):
-        mime = "image/png"
-    elif image_bytes[:4] == b"RIFF":
-        mime = "image/webp"
-    return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+# _b64_data_url is now imported from shared.ai_utils
 
 # ============================================================
 # v4.0: PROVIDER/KEY USAGE TRACKING (for /keys command, owner-only)
@@ -403,103 +329,8 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
                 return txt, name
     return None, ""
 
-def _fix_json_str(t: str) -> str:
-    """Fix common AI JSON issues: trailing commas, missing values, unquoted keys, truncation."""
-    t = re.sub(r',\s*([}\]])', r'\1', t)
-    t = re.sub(r':\s*,', ': "",', t)
-    t = re.sub(r':\s*}', ': ""}', t)
-    t = re.sub(r',\s*$', ']', t)
-    if t.count('[') > t.count(']'):
-        t = t.rstrip().rstrip(',') + ']'
-    if t.count('{') > t.count('}'):
-        t = t.rstrip().rstrip(',') + '}'
-        if t.count('[') > t.count(']'):
-            t = t + ']'
-    return t
-
-def _extract_mcq_objects(t: str) -> List[Dict]:
-    """Extract individual MCQ JSON objects from messy text using brace matching."""
-    mcqs = []
-    i = 0
-    while i < len(t):
-        if t[i] == '{':
-            depth = 0
-            start = i
-            for j in range(i, len(t)):
-                if t[j] == '{': depth += 1
-                elif t[j] == '}': depth -= 1
-                if depth == 0:
-                    candidate = t[start:j+1]
-                    if '"question"' in candidate and '"options"' in candidate and '"answer"' in candidate:
-                        try:
-                            obj = json.loads(candidate)
-                            mcqs.append(obj)
-                        except json.JSONDecodeError:
-                            try:
-                                mcqs.append(json.loads(_fix_json_str(candidate)))
-                            except json.JSONDecodeError:
-                                pass
-                    i = j + 1
-                    break
-            else:
-                break
-        else:
-            i += 1
-    return mcqs
-
-def parse_mcq_json(response_text: str) -> List[Dict]:
-    """Shared cleaner+parser+validator for MCQ JSON from any AI provider."""
-    t = (response_text or "").strip()
-    if t.startswith('```json'):
-        t = t[7:]
-    if t.startswith('```'):
-        t = t[3:]
-    if t.endswith('```'):
-        t = t[:-3]
-    t = t.strip()
-    if not t.startswith('['):
-        s, e = t.find('['), t.rfind(']')
-        if s != -1 and e != -1 and e > s:
-            t = t[s:e+1]
-    mcqs = None
-    try:
-        mcqs = json.loads(t)
-    except json.JSONDecodeError as je:
-        if "Extra data" in str(je) and je.pos > 0:
-            try:
-                mcqs = json.loads(t[:je.pos])
-            except json.JSONDecodeError:
-                pass
-    if mcqs is None:
-        try:
-            mcqs = json.loads(_fix_json_str(t))
-        except json.JSONDecodeError:
-            pass
-    if mcqs is None:
-        mcqs = _extract_mcq_objects(t)
-    if not mcqs:
-        log_error(f"parse_mcq_json: all strategies failed, input len={len(t)}, first 300 chars: {t[:300]}")
-        return []
-    valid = []
-    for mcq in mcqs:
-        if all(k in mcq for k in ['question', 'options', 'answer']):
-            if len(mcq['options']) >= 4:
-                mcq['options'] = mcq['options'][:4]
-            if isinstance(mcq['answer'], str):
-                mcq['answer'] = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(mcq['answer'].upper(), 0)
-            if 0 <= mcq['answer'] <= 3 and len(mcq['options']) == 4:
-                mcq['options'] = [clean_option_prefix(o, i) for i, o in enumerate(mcq['options'])]
-                valid.append(mcq)
-    return valid
-
-_OPT_PREFIX_RE = re.compile(r'^\s*[\(\[]?\s*([A-Da-d]|[কখগঘ])\s*[\)\.\:\]।]\s*')
-
-def clean_option_prefix(opt: str, idx: int = 0) -> str:
-    """v4.0: Quiz/Poll/Web Exam অপশনের শুরুতে A)/a)/ক) ইত্যাদি prefix remove."""
-    if not isinstance(opt, str):
-        return opt
-    cleaned = _OPT_PREFIX_RE.sub('', opt, count=1).strip()
-    return cleaned if cleaned else opt
+# _fix_json_str, _extract_mcq_objects, parse_mcq_json, clean_option_prefix
+# are now imported from shared.ai_utils
 
 # ============================================================
 # SECTION 5: PROMPTS (4 TYPES) — preserved from v3.0
