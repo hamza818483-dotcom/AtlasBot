@@ -67,6 +67,15 @@ STORAGE_MODE = os.getenv("STORAGE_MODE", "d1_primary")
 # Big tables that should be quota-managed (FIFO oldest-delete when full)
 MANAGED_TABLES = ["mcqs", "results", "bookmarks", "mistakes"]
 
+# All allowed table names — used to prevent SQL injection via table names
+_ALLOWED_TABLES = frozenset(MANAGED_TABLES)
+
+def _validate_table(table: str) -> str:
+    """Ensure table name is in the allow-list. Raises ValueError otherwise."""
+    if table not in _ALLOWED_TABLES:
+        raise ValueError(f"Invalid table name: {table!r}")
+    return table
+
 # ------------------------------------------------------------
 # D1 transport (via Cloudflare Worker)
 # ------------------------------------------------------------
@@ -93,7 +102,7 @@ async def d1_query(sql: str, params=None) -> dict:
         return {}
 
 async def d1_count(table: str) -> int:
-    res = await d1_query(f"SELECT COUNT(*) AS n FROM {table}")
+    res = await d1_query(f"SELECT COUNT(*) AS n FROM {_validate_table(table)}")
     try:
         return int(res.get("results", [{}])[0].get("n", 0))
     except Exception:
@@ -136,6 +145,7 @@ async def dual_insert(table: str, row: dict) -> bool:
     placeholders = ",".join(["?"] * len(cols))
     col_sql = ",".join(cols)
     vals = [json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for v in row.values()]
+    _validate_table(table)
     sql = f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders})"
 
     async def _write_d1():
@@ -189,6 +199,7 @@ async def enforce_quotas() -> dict:
     Call this from the daily scheduler (and optionally after big inserts)."""
     report = {}
     for table in MANAGED_TABLES:
+        _validate_table(table)
         info = {"d1": None, "supabase": None}
         # ---- D1 ----
         if d1_enabled():
