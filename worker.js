@@ -113,6 +113,14 @@ export default {
     proxyUrl.port = '';
     proxyUrl.protocol = 'https:';
 
+    // Fix: ptb 20+ uses base_url as the prefix. 
+    // If bot.py uses .base_url("https://.../"), it calls "https://.../getMe"
+    // We need to map "/" to "/bot{TOKEN}/" for Telegram
+    const token = request.headers.get('X-Bot-Token') || env.BOT_TOKEN;
+    if (token && !proxyUrl.pathname.includes('/bot')) {
+      proxyUrl.pathname = `/bot${token}${proxyUrl.pathname}`;
+    }
+
     try {
       const resp = await fetch(new Request(proxyUrl, {
         method: request.method,

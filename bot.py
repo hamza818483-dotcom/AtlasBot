@@ -720,13 +720,17 @@ def log_error(message: str) -> None:
     # v4.0: auto-forward every error to OWNER (fire-and-forget)
     try:
         if application and _bot_loop and OWNER_ID:
+            # Check if this is a connection error to avoid infinite loop or spam during downtime
+            if "ConnectError" in str(message) or "NetworkError" in str(message):
+                return
             short = str(message)[:900]
-            future = asyncio.run_coroutine_threadsafe(
-                application.bot.send_message(chat_id=OWNER_ID, text=f"🚨 ATLAS ERROR\n\n{short}"),
-                _bot_loop
-            )
-            # discard future — true fire-and-forget, no RuntimeWarning
-            future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+            # Ensure we await or handle the coroutine properly
+            async def _send():
+                try:
+                    await application.bot.send_message(chat_id=OWNER_ID, text=f"🚨 ATLAS ERROR\n\n{short}")
+                except:
+                    pass
+            asyncio.run_coroutine_threadsafe(_send(), _bot_loop)
     except Exception:
         pass
 
@@ -4173,6 +4177,7 @@ async def setup_bot() -> None:
         .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(60)
+        .pool_timeout(30)
         .build()
     )
     await register_handlers()
