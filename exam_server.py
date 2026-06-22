@@ -34,151 +34,72 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
+# ── Shared utilities ──
+from shared.config import (
+    BD_TZ, BOT_TOKEN, GENAI_API_KEY, GEMINI_KEYS,
+    GROQ_KEYS, GROQ_MODEL, OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
+    SUPABASE_URL, SUPABASE_KEY, SUPABASE_BACKUP_URL, SUPABASE_BACKUP_KEY,
+    CF_WORKER_URL, HF_SPACE_URL,
+    FREE_NEW_EXAM_LIMIT, PERMITTED_NEW_EXAM_LIMIT, NEW_PRACTICE_COUNT,
+    SEC_PER_QUESTION, NEGATIVE_MARK, PROMPT_DISPLAY_NAMES, LOG_DIR,
+)
+from shared.supabase_client import (
+    get_supabase, get_supabase_backup, mirror_insert,
+    get_user_data, check_new_exam_limit, increment_new_exam_count,
+    save_result_to_db, save_bookmark_to_db, delete_bookmark_from_db,
+)
+from shared.ai_utils import (
+    b64_data_url as _b64_data_url, strip_json_markdown, parse_mcq_json,
+)
+from shared.gemini_client import GeminiRotatingClient
+from shared.telegram_api import tg_file_bytes as _tg_file_bytes, tg_send_message as _tg_send_message
+from shared.feedback import pick_feedback as _pick_feedback
+
 # ============================================================
 # SECTION 2: CONFIGURATION
+# (Most constants now imported from shared.config above)
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-GENAI_API_KEY = os.getenv("GEMINI_KEY", "")
-CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev").rstrip("/")
-HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
 BASE_URL = os.getenv("BASE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
-
-# Fallback providers for Creative (জ্ঞানমূলক/অনুধাবনমূলক) generation when Gemini is exhausted
-GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEY", "").split(",") if k.strip()]
-OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
-
-SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
-
-# Backup Supabase (optional mirror — silently skipped if not set)
-SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
-SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
-
-SEC_PER_QUESTION = 30
-NEGATIVE_MARK = 0.50
-FREE_NEW_EXAM_LIMIT = 2
-PERMITTED_NEW_EXAM_LIMIT = 20
-NEW_PRACTICE_COUNT = 15
 CHROMIUM_PATH = os.getenv("CHROMIUM_PATH", "/usr/bin/chromium")
-
-PROMPT_DISPLAY_NAMES = {
-    "prompt_1": "🩺 Medical Standard MCQ",
-    "prompt_2": "✅ সত্য-মিথ্যার প্রশ্ন",
-    "prompt_3": "🔥 কঠিন প্রশ্ন",
-    "prompt_mixed": "🎲 Mixed",
-}
-
-try:
-    BD_TZ = timezone(timedelta(hours=6))
-except:
-    BD_TZ = datetime.now().astimezone().tzinfo
 
 # ============================================================
 # SECTION 3: SUPABASE CLIENT
+# (Now imported from shared.supabase_client)
+# Aliases kept for backward compatibility within this file.
 # ============================================================
-supabase: Client = None
-supabase_backup: Client = None
-
-def get_supabase() -> Client:
-    global supabase
-    if supabase is None:
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            print("✅ Supabase client initialized (Exam Server)")
-        except Exception as e:
-            print(f"❌ Supabase init failed: {e}")
-            raise
-    return supabase
-
-def get_supabase_backup() -> Optional[Client]:
-    global supabase_backup
-    if not SUPABASE_BACKUP_URL or not SUPABASE_BACKUP_KEY:
-        return None
-    if supabase_backup is None:
-        try:
-            supabase_backup = create_client(SUPABASE_BACKUP_URL, SUPABASE_BACKUP_KEY)
-            print("✅ Supabase BACKUP client initialized (Exam Server)")
-        except Exception as e:
-            print(f"⚠️ Supabase backup init failed: {e}")
-            return None
-    return supabase_backup
-
-def _mirror_insert(table: str, row: Dict) -> None:
-    """Best-effort mirror to backup DB. Never raises."""
-    try:
-        bk = get_supabase_backup()
-        if bk:
-            bk.table(table).insert(row).execute()
-    except Exception as e:
-        print(f"Backup mirror({table}) skipped: {e}")
+_mirror_insert = mirror_insert
 
 # ============================================================
 # SECTION 4: GEMINI SETUP
+# (Now uses shared.gemini_client.GeminiRotatingClient)
 # ============================================================
-_exam_genai_client: Optional[genai.Client] = None
-GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEY", "").split(",") if k.strip()]
-_exam_key_idx = 0
+_exam_gemini = GeminiRotatingClient(label="Exam Server")
 
 def setup_gemini():
-    global _exam_genai_client
-    if GENAI_API_KEY:
-        first_key = GENAI_API_KEY.split(",")[0].strip()
-        _exam_genai_client = genai.Client(api_key=first_key)
-        print(f"✅ Gemini API configured (Exam Server) key_len={len(first_key)}")
-    else:
-        print("⚠️ GENAI_API_KEY not set! (Exam Server)")
+    _exam_gemini.setup()
 
 def _rotate_exam_key():
-    """Switch the exam Gemini client to the next key (round-robin)."""
-    global _exam_genai_client, _exam_key_idx
-    if not GEMINI_KEYS:
-        return
-    _exam_key_idx = (_exam_key_idx + 1) % len(GEMINI_KEYS)
-    try:
-        _exam_genai_client = genai.Client(api_key=GEMINI_KEYS[_exam_key_idx])
-        print(f"🔄 Exam Gemini key rotated -> #{_exam_key_idx+1}")
-    except Exception as e:
-        print(f"rotate exam key failed: {e}")
+    _exam_gemini.rotate()
+
+
 
 def _parse_new_exam_json(response_text: str) -> List[Dict]:
-    """Clean + parse + validate MCQ JSON from Gemini for New Exam."""
-    txt = (response_text or "").strip()
-    for tag in ['```json', '```']:
-        if txt.startswith(tag):
-            txt = txt[len(tag):]
-    if txt.endswith('```'):
-        txt = txt[:-3]
-    txt = txt.strip()
-    try:
-        mcqs = json.loads(txt)
-    except Exception:
-        return []
-    valid = []
-    for mcq in mcqs if isinstance(mcqs, list) else []:
-        if all(k in mcq for k in ['question', 'options', 'answer']):
-            if len(mcq['options']) >= 4:
-                mcq['options'] = mcq['options'][:4]
-            if isinstance(mcq['answer'], str):
-                mcq['answer'] = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(mcq['answer'].upper(), 0)
-            if isinstance(mcq['answer'], int) and 0 <= mcq['answer'] <= 3:
-                valid.append(mcq)
-    return valid
+    """Clean + parse + validate MCQ JSON from Gemini for New Exam.
+    Delegates to shared parse_mcq_json (with prefix-cleaning disabled)."""
+    return parse_mcq_json(response_text, clean_prefixes=False)
 
 def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
     """Generate New Exam MCQs with all-key rotation + one retry if too few.
     Returns [] only if every key/attempt failed."""
-    global _exam_genai_client
-    if _exam_genai_client is None:
+    if _exam_gemini.client is None:
         setup_gemini()
-    if _exam_genai_client is None:
+    if _exam_gemini.client is None:
         return []
     tries = max(1, len(GEMINI_KEYS))
     best: List[Dict] = []
     for attempt in range(tries):
         try:
-            resp = _exam_genai_client.models.generate_content(
+            resp = _exam_gemini.client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[PROMPT_NEW_EXAM, img],
                 config=types.GenerateContentConfig(
@@ -193,7 +114,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
             if len(best) >= min_count:
                 return best
             # too few -> retry once on same key with stronger instruction
-            resp2 = _exam_genai_client.models.generate_content(
+            resp2 = _exam_gemini.client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[PROMPT_NEW_EXAM + "\n\n🔴 অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।", img],
                 config=types.GenerateContentConfig(
@@ -257,172 +178,13 @@ def _get_exam(cache_id: str) -> Optional[Dict]:
 
 # ============================================================
 # SECTION 6: DATABASE HELPERS
+# (Now imported from shared.supabase_client)
 # ============================================================
-
-def get_user_data(user_id: int) -> Optional[Dict]:
-    try:
-        client = get_supabase()
-        result = client.table('users').select('*').eq('user_id', user_id).execute()
-        if result.data:
-            return result.data[0]
-        return None
-    except Exception as e:
-        print(f"get_user_data error: {e}")
-        return None
-
-def check_new_exam_limit(user_id: int) -> tuple:
-    if not user_id or user_id == 0:
-        return True, 0, FREE_NEW_EXAM_LIMIT, False
-    user = get_user_data(user_id)
-    if not user:
-        return True, 0, FREE_NEW_EXAM_LIMIT, False
-    is_perm = user.get('is_permitted', False)
-    used = user.get('new_exam_count', 0) or 0
-    limit = PERMITTED_NEW_EXAM_LIMIT if is_perm else FREE_NEW_EXAM_LIMIT
-    last_reset = user.get('last_new_exam_reset', '')
-    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
-    if last_reset != today:
-        try:
-            client = get_supabase()
-            client.table('users').update({'new_exam_count': 0, 'last_new_exam_reset': today}).eq('user_id', user_id).execute()
-            used = 0
-        except:
-            pass
-    return used < limit, used, limit, is_perm
-
-def increment_new_exam_count(user_id: int) -> int:
-    if not user_id or user_id == 0:
-        return 0
-    try:
-        user = get_user_data(user_id)
-        if user:
-            new_count = (user.get('new_exam_count', 0) or 0) + 1
-            client = get_supabase()
-            client.table('users').update({
-                'new_exam_count': new_count,
-                'last_new_exam_reset': datetime.now(BD_TZ).strftime('%Y-%m-%d')
-            }).eq('user_id', user_id).execute()
-            return new_count
-        return 0
-    except Exception as e:
-        print(f"increment_new_exam_count error: {e}")
-        return 0
-
-def save_result_to_db(user_id: int, cache_id: str, user_name: str, topic: str,
-                      page: int, total: int, correct: int, wrong: int,
-                      skipped: int, time_taken: int) -> bool:
-    try:
-        neg = wrong * NEGATIVE_MARK
-        final_score = correct - neg
-        row = {
-            'user_id': user_id, 'quiz_id': cache_id,
-            'quiz_name': topic or f'Exam_{cache_id[:6]}',
-            'total': total, 'correct': correct, 'wrong': wrong,
-            'skipped': skipped, 'time_taken': time_taken,
-            'mark': final_score, 'negative_mark': neg,
-            'created_at': datetime.now(BD_TZ).isoformat()
-        }
-        client = get_supabase()
-        client.table('results').insert(row).execute()
-        _mirror_insert('results', row)
-        return True
-    except Exception as e:
-        print(f"save_result error: {e}")
-        return False
-
-def save_bookmark_to_db(user_id: int, cache_id: str, question_index: int,
-                        question_data: Dict, topic: str = '', page: int = 0) -> tuple:
-    try:
-        now = datetime.now(BD_TZ)
-        row = {
-            'user_id': user_id, 'cache_id': cache_id,
-            'question_index': question_index,
-            'question_data': json.dumps(question_data, ensure_ascii=False),
-            'topic': topic, 'page': page,
-            'created_at': int(now.timestamp())
-        }
-        client = get_supabase()
-        try:
-            client.table('bookmarks').insert(row).execute()
-        except Exception as e1:
-            if "22P02" in str(e1) or "invalid input syntax" in str(e1):
-                row['created_at'] = now.isoformat()
-                client.table('bookmarks').insert(row).execute()
-            else:
-                raise e1
-        _mirror_insert('bookmarks', row)
-        return True, ""
-    except Exception as e:
-        err = str(e)
-        print(f"save_bookmark error: {err}")
-        if "row-level security" in err.lower() or "rls" in err.lower() or "policy" in err.lower() or "42501" in err:
-            return False, "RLS_BLOCKED"
-        return False, err
-
-def delete_bookmark_from_db(user_id: int, cache_id: str, question_index: int) -> bool:
-    try:
-        client = get_supabase()
-        client.table('bookmarks').delete()\
-            .eq('user_id', user_id).eq('cache_id', cache_id)\
-            .eq('question_index', question_index).execute()
-        return True
-    except Exception as e:
-        print(f"delete_bookmark error: {e}")
-        return False
 
 # ============================================================
 # SECTION 7: TELEGRAM API HELPERS
+# (Now imported from shared.telegram_api)
 # ============================================================
-
-async def _tg_file_bytes(file_id: str) -> Optional[bytes]:
-    print(f"[tg-file] start, file_id={file_id[:20]}..., BOT_TOKEN_set={bool(BOT_TOKEN)}, CF_WORKER_URL={CF_WORKER_URL}")
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(f"{CF_WORKER_URL}/tg-file", params={"file_id": file_id}, headers={"X-Bot-Token": BOT_TOKEN})
-            print(f"[tg-file] CF Worker /tg-file status={r.status_code}, content_len={len(r.content) if r.content else 0}")
-            if r.status_code == 200 and r.content:
-                return r.content
-    except Exception as e:
-        print(f"[tg-file] CF Worker fetch EXCEPTION: {type(e).__name__}: {e}")
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            file_resp = await client.get(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-                params={"file_id": file_id}
-            )
-            print(f"[tg-file] getFile status={file_resp.status_code}")
-            file_data = file_resp.json()
-            print(f"[tg-file] getFile response ok={file_data.get('ok')}, full={file_data if not file_data.get('ok') else '(ok)'}")
-            if file_data.get('ok'):
-                file_path = file_data['result']['file_path']
-                img_resp = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
-                print(f"[tg-file] file download status={img_resp.status_code}, content_len={len(img_resp.content) if img_resp.content else 0}")
-                if img_resp.status_code == 200:
-                    return img_resp.content
-    except Exception as e:
-        print(f"[tg-file] Direct Telegram fetch EXCEPTION: {type(e).__name__}: {e}")
-    print(f"[tg-file] FAILED — returning None for file_id={file_id[:20]}...")
-    return None
-
-async def _tg_send_message(chat_id: int, text: str, reply_to: int = None,
-                           parse_mode: str = None) -> Optional[Dict]:
-    if not chat_id:
-        return None
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_to:
-        payload["reply_to_message_id"] = reply_to
-        payload["allow_sending_without_reply"] = True
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    url = f"{CF_WORKER_URL}/bot{BOT_TOKEN}/sendMessage"
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(url, json=payload)
-            if r.status_code == 200:
-                return r.json()
-    except Exception as e:
-        print(f"_tg_send_message error: {e}")
-    return None
 
 async def _send_web_challenge_comparison(receiver_id: int, sender_id: int, cache_id: str,
                                           r_correct: int, r_wrong: int, r_total: int, r_time: int):
@@ -474,31 +236,8 @@ async def _send_web_challenge_comparison(receiver_id: int, sender_id: int, cache
 
 # ============================================================
 # SECTION 8: AYATS & MOTIVATION
+# (Now imported from shared.feedback)
 # ============================================================
-_AYATS = [
-    '🌙 "فَإِنَّ مَعَ الْعُسْرِ يُسْرًا"\n"নিশ্চয়ই কষ্টের সাথেই স্বস্তি আছে।"\n[সূরা আশ-শারহ ৯৪:৫]',
-    '🌙 "لَا يُكَلِّفُ اللَّهُ نَفْسًا إِلَّا وُسْعَهَا"\n"আল্লাহ কাউকে তার সাধ্যের বাইরে বোঝা দেন না।"\n[সূরা বাকারা ২:২৮৬]',
-    '🌙 "إِنَّ اللَّهَ مَعَ الصَّابِرِينَ"\n"নিশ্চয়ই আল্লাহ ধৈর্যশীলদের সাথে আছেন।"\n[সূরা বাকারা ২:১৫৩]',
-    '🌙 "وَمَن يَتَوَكَّلْ عَلَى اللَّهِ فَهُوَ حَسْبُهُ"\n"যে আল্লাহর উপর ভরসা করে, তার জন্য তিনিই যথেষ্ট।"\n[সূরা তালাক ৬৫:৩]',
-    '🌙 "وَقُل رَّبِّ زِدْنِي عِلْمًا"\n"হে আমার রব! আমার জ্ঞান বৃদ্ধি করে দিন।"\n[সূরা ত্বহা ২০:১১৪]',
-    '🌙 "وَأَن لَّيْسَ لِلْإِنسَانِ إِلَّا مَا سَعَىٰ"\n"মানুষ তার চেষ্টার ফল ছাড়া কিছুই পায় না।"\n[সূরা নাজম ৫৩:৩৯]',
-    '🌙 "إِن يَنصُرْكُمُ اللَّهُ فَلَا غَالِبَ لَكُمْ"\n"আল্লাহ যদি সাহায্য করেন, কেউ পরাজিত করতে পারবে না।"\n[সূরা আলে ইমরান ৩:১৬০]',
-    '🌙 "لَا تَقْنَطُوا مِن رَّحْمَةِ اللَّهِ"\n"আল্লাহর রহমত থেকে নিরাশ হয়ো না।"\n[সূরা যুমার ৩৯:৫৩]',
-    '🌙 "أَلَا بِذِكْرِ اللَّهِ تَطْمَئِنُّ الْقُلُوبُ"\n"আল্লাহর স্মরণেই হৃদয় প্রশান্ত হয়।"\n[সূরা রাদ ১৩:২৮]',
-    '🌙 "إِنَّ اللَّهَ يُحِبُّ الْمُحْسِنِينَ"\n"নিশ্চয়ই আল্লাহ সৎকর্মশীলদের ভালোবাসেন।"\n[সূরা বাকারা ২:১৯৫]',
-]
-
-def _pick_feedback(correct: int, total: int) -> tuple:
-    pct = (correct / total * 100) if total else 0
-    if pct >= 80:
-        msg = random.choice(['🏆 অসাধারণ! অনেক ভালো করেছো!', '🌟 দারুণ! তুমি সত্যিই প্রস্তুত!', '💪 বাহ! চমৎকার ফলাফল!'])
-    elif pct >= 60:
-        msg = random.choice(['✅ মোটামুটি ভালো! চেষ্টা চালিয়ে যাও!', '👍 ভালো হয়েছে! আরেকটু উন্নতি করতে পারবে!'])
-    elif pct >= 40:
-        msg = random.choice(['📚 আরো পড়তে হবে! হাল ছেড়ো না!', '💭 ঠিক আছে, নিয়মিত চর্চা করো!'])
-    else:
-        msg = random.choice(['💪 পড়া হয়নি! আবার পড়ে practice করো!', '🌱 শুরুটা কঠিনই হয়! লেগে থাকো!'])
-    return msg, random.choice(_AYATS)
 
 # ============================================================
 # SECTION 9: FASTAPI APP
@@ -709,9 +448,9 @@ async def api_new_exam(request: Request):
     img_bytes = await _tg_file_bytes(file_id)
     if not img_bytes:
         return JSONResponse({"ok": False, "error": "image_fail", "message": "ছবি লোড করা যায়নি।"})
-    if _exam_genai_client is None:
+    if _exam_gemini.client is None:
         setup_gemini()
-    if _exam_genai_client is None:
+    if _exam_gemini.client is None:
         return JSONResponse({"ok": False, "error": "no_key", "message": "Gemini API key সেট নেই।"})
     try:
         img = Image.open(BytesIO(img_bytes))
@@ -963,13 +702,7 @@ async def api_bookmark_pdf(request: Request):
 # GET /api/creative-pdf/{cache_id}?ctype=knowledge|comprehension
 # Returns raw PDF, or JSON {ok:false, reason:"..."} when data insufficient
 # ============================================================
-def _b64_data_url(image_bytes: bytes) -> str:
-    mime = "image/jpeg"
-    if image_bytes[:8].startswith(b"\x89PNG"):
-        mime = "image/png"
-    elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
-        mime = "image/webp"
-    return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+# _b64_data_url is now imported from shared.ai_utils
 
 async def _call_creative_fallback(prompt: str, img_bytes: bytes) -> Optional[dict]:
     """Groq/OpenRouter fallback when Gemini is exhausted. Returns parsed JSON dict or None."""
@@ -997,12 +730,7 @@ async def _call_creative_fallback(prompt: str, img_bytes: bytes) -> Optional[dic
                     if r.status_code != 200:
                         continue
                     txt = r.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                    for tag in ('```json', '```'):
-                        if txt.startswith(tag):
-                            txt = txt[len(tag):]
-                    if txt.endswith('```'):
-                        txt = txt[:-3]
-                    return json.loads(txt.strip())
+                    return json.loads(strip_json_markdown(txt))
             except Exception as e:
                 print(f"[creative-fallback] {base_url} error: {e}")
                 continue
@@ -1012,16 +740,16 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
     """Returns {'ok':True,'items':[...]} or {'ok':False,'reason':str}.
     Tries primary (strict source-only) prompt first, then a lenient
     fallback prompt so a PDF can (almost) always be produced."""
-    if _exam_genai_client is None:
+    if _exam_gemini.client is None:
         setup_gemini()
-    if _exam_genai_client is None:
+    if _exam_gemini.client is None:
         return {"ok": False, "reason": "Gemini API key সেট নেই।"}
     prompt = PROMPT_KNOWLEDGE if ctype == "knowledge" else PROMPT_COMPREHENSION
     fallback_prompt = PROMPT_KNOWLEDGE_FALLBACK if ctype == "knowledge" else PROMPT_COMPREHENSION_FALLBACK
 
     def _call(p: str):
         img = Image.open(BytesIO(img_bytes))
-        resp = _exam_genai_client.models.generate_content(
+        resp = _exam_gemini.client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[p, img],
             config=types.GenerateContentConfig(
@@ -1031,12 +759,7 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
             )
         )
         txt = (resp.text or "").strip()
-        for tag in ['```json', '```']:
-            if txt.startswith(tag):
-                txt = txt[len(tag):]
-        if txt.endswith('```'):
-            txt = txt[:-3]
-        return json.loads(txt.strip())
+        return json.loads(strip_json_markdown(txt))
 
     last_reason = "তথ্য অপর্যাপ্ত।"
     for p in (prompt, fallback_prompt):

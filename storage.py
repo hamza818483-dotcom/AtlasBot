@@ -53,10 +53,7 @@ import json
 import httpx
 from datetime import datetime, timedelta, timezone
 
-try:
-    BD_TZ = timezone(timedelta(hours=6))
-except Exception:
-    BD_TZ = timezone(timedelta(hours=6))
+from shared.config import BD_TZ
 
 CF_D1_URL = os.getenv("CF_D1_URL", "").rstrip("/")
 CF_D1_TOKEN = os.getenv("CF_D1_TOKEN", "")
