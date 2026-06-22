@@ -4169,7 +4169,7 @@ async def setup_bot() -> None:
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .base_url(f"{CF_WORKER_URL}/bot")
-        .base_file_url(f"{CF_WORKER_URL}/file/bot")
+        .base_file_url(f"{CF_WORKER_URL}")
         .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(60)
@@ -4263,6 +4263,14 @@ if __name__ == "__main__":
         log("🛑 Bot stopped by user")
     except Exception as e:
         log_error(f"Fatal error: {e}")
-        # Don't exit — let uvicorn keep the HF Space alive so webhook still works
         import traceback
         traceback.print_exc()
+        log("⚠️ Bot crashed, starting fallback server to keep Space alive...")
+        try:
+            import uvicorn
+            from exam_server import app as fastapi_app
+            config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=7860, log_level="warning")
+            server = uvicorn.Server(config)
+            asyncio.run(server.serve())
+        except Exception as e2:
+            log_error(f"Fallback server also failed: {e2}")
