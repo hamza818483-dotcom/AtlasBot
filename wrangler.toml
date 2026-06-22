@@ -5,4 +5,4 @@ compatibility_date = "2024-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "atlasbot-db"
-database_id = "" # Set via: wrangler d1 list
+database_id = "9b866cf1-d4e8-440c-a2f8-33f2b826e383"
