@@ -96,7 +96,8 @@ async def d1_count(table: str) -> int:
     res = await d1_query(f"SELECT COUNT(*) AS n FROM {table}")
     try:
         return int(res.get("results", [{}])[0].get("n", 0))
-    except Exception:
+    except Exception as e:
+        print(f"[storage] d1_count({table}) parse failed: {e}")
         return 0
 
 # ------------------------------------------------------------
@@ -120,7 +121,8 @@ def sb_count(table: str) -> int:
             return 0
         res = c.table(table).select("*", count="exact").limit(1).execute()
         return res.count or 0
-    except Exception:
+    except Exception as e:
+        print(f"[storage] sb_count({table}) failed: {e}")
         return 0
 
 # ------------------------------------------------------------
@@ -175,8 +177,8 @@ async def dual_get_mcq(quiz_id: str):
             r = c.table("mcqs").select("*").eq("quiz_id", quiz_id).execute()
             if r.data:
                 return r.data[0]
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[storage] dual_get_mcq supabase fallback failed for {quiz_id}: {e}")
     return None
 
 # ------------------------------------------------------------

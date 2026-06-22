@@ -72,7 +72,7 @@ PROMPT_DISPLAY_NAMES = {
 
 try:
     BD_TZ = timezone(timedelta(hours=6))
-except:
+except Exception:
     BD_TZ = datetime.now().astimezone().tzinfo
 
 # ============================================================
@@ -153,7 +153,8 @@ def _parse_new_exam_json(response_text: str) -> List[Dict]:
     txt = txt.strip()
     try:
         mcqs = json.loads(txt)
-    except Exception:
+    except Exception as e:
+        print(f"[_parse_new_exam_json] JSON parse failed: {e}, input[:200]={txt[:200]}")
         return []
     valid = []
     for mcq in mcqs if isinstance(mcqs, list) else []:
@@ -286,8 +287,8 @@ def check_new_exam_limit(user_id: int) -> tuple:
             client = get_supabase()
             client.table('users').update({'new_exam_count': 0, 'last_new_exam_reset': today}).eq('user_id', user_id).execute()
             used = 0
-        except:
-            pass
+        except Exception as e:
+            print(f"[check_new_exam_limit] daily reset failed for user {user_id}: {e}")
     return used < limit, used, limit, is_perm
 
 def increment_new_exam_count(user_id: int) -> int:
@@ -439,12 +440,14 @@ async def _send_web_challenge_comparison(receiver_id: int, sender_id: int, cache
         try:
             si = client.table('users').select('first_name').eq('user_id', sender_id).limit(1).execute()
             sender_name = si.data[0]['first_name'] if si.data else f"User#{sender_id}"
-        except Exception:
+        except Exception as e:
+            print(f"[challenge] sender name lookup failed for {sender_id}: {e}")
             sender_name = f"User#{sender_id}"
         try:
             ri = client.table('users').select('first_name').eq('user_id', receiver_id).limit(1).execute()
             recv_name = ri.data[0]['first_name'] if ri.data else f"User#{receiver_id}"
-        except Exception:
+        except Exception as e:
+            print(f"[challenge] receiver name lookup failed for {receiver_id}: {e}")
             recv_name = f"User#{receiver_id}"
         s_pct = round(s_correct / s_total * 100) if s_total else 0
         r_pct = round(r_correct / r_total * 100) if r_total else 0
@@ -1176,9 +1179,9 @@ async def _render_pdf(html: str) -> bytes:
             raise
         finally:
             try: _os.unlink(html_path)
-            except: pass
+            except OSError: pass
             try: _os.unlink(pdf_path)
-            except: pass
+            except OSError: pass
     except Exception as e:
         print(f"[PDF] UNEXPECTED ERROR in _render_pdf: {type(e).__name__}: {e}")
         traceback.print_exc()

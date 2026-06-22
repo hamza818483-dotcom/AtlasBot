@@ -110,7 +110,7 @@ BUSY_MSG = "🤖 এটলাস বট এই মুহূর্তে ব্�
 
 try:
     BD_TZ = timezone(timedelta(hours=6))
-except:
+except Exception:
     BD_TZ = datetime.now().astimezone().tzinfo
 
 LOG_DIR = "logs"
@@ -166,8 +166,8 @@ def mirror_insert(table: str, row: Dict) -> None:
         bk = get_supabase_backup()
         if bk:
             bk.table(table).insert(row).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"mirror_insert({table}) failed: {e}", "WARNING")
 
 def init_database():
     try:
@@ -175,6 +175,7 @@ def init_database():
         log("✅ Supabase database ready (tables managed via Dashboard)")
     except Exception as e:
         log_error(f"Database init error: {e}")
+        raise
 
 # ============================================================
 # SECTION 4: GEMINI SETUP (Multi-key rotation; AIza & AQ. both work —
@@ -728,25 +729,25 @@ def log_error(message: str) -> None:
             async def _send():
                 try:
                     await application.bot.send_message(chat_id=OWNER_ID, text=f"🚨 ATLAS ERROR\n\n{short}")
-                except:
-                    pass
+                except Exception:
+                    pass  # last-resort send; nothing more to do
             asyncio.run_coroutine_threadsafe(_send(), _bot_loop)
     except Exception:
-        pass
+        pass  # error forwarding itself must never crash the logger
 
 async def notify_owner(text: str) -> None:
     try:
         if application and OWNER_ID:
             await application.bot.send_message(chat_id=OWNER_ID, text=text[:4000])
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"notify_owner failed: {e}", "WARNING")
 
 async def safe_user_reply(message, custom: str = None) -> None:
     """v4.0: user never sees raw errors — cool busy message only."""
     try:
         await message.reply_text(custom or BUSY_MSG)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"safe_user_reply failed: {e}", "WARNING")
 
 # ============================================================
 # SECTION 9: GLOBAL VARIABLES
@@ -1006,7 +1007,8 @@ def find_cached_mcq(source_hash: str, prompt_type: str) -> Optional[Dict]:
             mcqs = json.loads(row['mcqs']) if isinstance(row['mcqs'], str) else row['mcqs']
             return {'mcqs': mcqs, 'image_file_id': row.get('image_file_id')}
         return None
-    except Exception:
+    except Exception as e:
+        log(f"find_cached_mcq lookup failed: {e}", "WARNING")
         return None
 
 async def get_mcq(quiz_id: str) -> Optional[Dict]:
@@ -1404,12 +1406,12 @@ async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: 
         )
         try:
             await application.bot.send_message(chat_id=receiver_id, text=comp, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Challenge comparison send to receiver {receiver_id} failed: {e}", "WARNING")
         try:
             await application.bot.send_message(chat_id=sender_id, text=comp, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Challenge comparison send to sender {sender_id} failed: {e}", "WARNING")
     except Exception as e:
         log_error(f"Challenge comparison error: {e}")
 
@@ -2642,8 +2644,8 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 chat_id=user_id,
                 text=f"{fb}\n\n{get_ayat(None)}\n\n📸 এখনই একটা Image পাঠিয়ে আজকের Practice শুরু করে ফেলো! 💪"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Check-in poll feedback to {user_id} failed: {e}", "WARNING")
         return
     chat_id = _poll_chat_map.get(poll_id)
     if not chat_id:
@@ -2763,8 +2765,8 @@ async def handle_new_practice(query, user, mode: str, quiz_id: str) -> None:
         new_quiz_id = await save_mcq(user_id=user.id, mcqs=new_mcqs, source_type='image', prompt_type=prompt_type, image_file_id=image_file_id, chat_id=None, message_id=None)
         try:
             await wait_msg.delete()
-        except:
-            pass
+        except Exception:
+            pass  # message may already be deleted
         if mode == 'quiz':
             chat_id = query.message.chat_id
             quiz_state = {
@@ -2943,8 +2945,8 @@ async def handle_broadcast_confirm(query, context: ContextTypes.DEFAULT_TYPE) ->
             if (i + 1) % 10 == 0:
                 try:
                     await query.message.edit_text(f"📨 পাঠানো হচ্ছে... {success}/{len(users)}")
-                except:
-                    pass
+                except Exception:
+                    pass  # progress update is best-effort
             await asyncio.sleep(0.05)
         except Forbidden:
             failed += 1
@@ -3118,8 +3120,8 @@ async def _pomodoro_edit(chat_id: int) -> None:
     try:
         await application.bot.edit_message_text(chat_id=chat_id, message_id=sess['msg_id'], text=text,
                                                 reply_markup=_pomo_keyboard(sess['paused']), parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"Pomodoro edit failed for chat={chat_id}: {e}", "WARNING")
 
 async def _pomodoro_loop(chat_id: int) -> None:
     """v4.0 FIX: ticks every 1 second so countdown decreases smoothly (1s steps).
@@ -3780,8 +3782,8 @@ async def keepalive_task() -> None:
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 await client.get(f"{HF_SPACE_URL}/health")
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Keep-alive ping failed: {e}", "WARNING")
         await asyncio.sleep(600)
 
 def _get_active_checkin_users() -> List[int]:
@@ -4080,8 +4082,8 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
             await update.effective_message.reply_text(
                 "⏳ কিছু একটা সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন। 🙏"
             )
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"global_error_handler reply failed: {e}", "WARNING")
 
 async def register_handlers() -> None:
     application.add_error_handler(global_error_handler)
