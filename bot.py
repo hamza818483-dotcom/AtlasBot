@@ -721,10 +721,12 @@ def log_error(message: str) -> None:
     try:
         if application and _bot_loop and OWNER_ID:
             short = str(message)[:900]
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 application.bot.send_message(chat_id=OWNER_ID, text=f"🚨 ATLAS ERROR\n\n{short}"),
                 _bot_loop
             )
+            # discard future — true fire-and-forget, no RuntimeWarning
+            future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
     except Exception:
         pass
 
@@ -4243,7 +4245,7 @@ async def main() -> None:
         )
         log(f"✅ Webhook set: {webhook_url}")
     except Exception as e:
-        log_error(f"Webhook set failed: {e}")
+        log_error(f"Webhook set failed (will retry on first update): {e}")
     from exam_server import app as fastapi_app
     setup_webhook_route(fastapi_app)
     log("🌐 Starting exam+webhook server on port 7860...")
@@ -4261,3 +4263,6 @@ if __name__ == "__main__":
         log("🛑 Bot stopped by user")
     except Exception as e:
         log_error(f"Fatal error: {e}")
+        # Don't exit — let uvicorn keep the HF Space alive so webhook still works
+        import traceback
+        traceback.print_exc()
