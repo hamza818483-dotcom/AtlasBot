@@ -4172,8 +4172,8 @@ async def setup_bot() -> None:
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .base_url(f"{CF_WORKER_URL}/")
-        .base_file_url(f"{CF_WORKER_URL}/")
+        .base_url(f"{CF_WORKER_URL}/bot")
+        .base_file_url(f"{CF_WORKER_URL}/file/bot")
         .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(60)
