@@ -40,6 +40,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import TelegramError, RetryAfter, Forbidden
+from telegram.helpers import escape_markdown
 
 # Supabase
 from supabase import create_client, Client
@@ -1633,7 +1634,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     sn = si.data[0]['first_name'] if si.data else "Friend"
                 except Exception:
                     sn = "Friend"
-                challenge_line = f"\n⚔️ Challenge from: {sn}"
+                challenge_line = f"\n⚔️ Challenge from: {escape_markdown(sn, version=1)}"
             text = (f"🔥 Quiz Challenge গ্রহণ করো, {first_name}!{challenge_line}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📝 Total MCQ: {len(mcqs)}\n📋 Type: {prompt_name}\n"
@@ -1653,11 +1654,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     allowed, usage, limit, is_perm = check_access(user_id)
     status = "✅ Permitted" if is_perm else "🔒 Free"
+    safe_name = escape_markdown(first_name, version=1)
 
     if is_admin(user_id):
         welcome = f"""🔐 **ADMIN PANEL**
 ━━━━━━━━━━━━━━━━━━━━━━
-👋 Welcome, {first_name}!
+👋 Welcome, {safe_name}!
 
 👥 **ইউজার ম্যানেজমেন্ট:**
   /permit `<user_id>` — ইউজার পারমিট (100/day)
@@ -1689,7 +1691,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 ━━━━━━━━━━━━━━━━━━━━━━
 📊 **Today:** {usage}/{limit} | 👥 **Status:** {status}"""
     else:
-        welcome = f"""🌟 স্বাগতম {first_name}..!
+        welcome = f"""🌟 স্বাগতম {safe_name}..!
 
 🚀 **ATLAS MCQ BOT** এ আপনাকে স্বাগতম!
 
