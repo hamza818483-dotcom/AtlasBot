@@ -1712,8 +1712,66 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
   /bmexam — 🔖 Bookmark MCQ দিয়ে Exam
   /class — 🎓 এটলাসের ফ্রী ক্লাস
   /bm — বুকমার্ক করা MCQ এর PDF ডাউনলোড
+  /pdfc — 📸 একাধিক Image → PDF বানান
   /help — সাহায্য"""
     await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+
+# ============================================================
+# FEATURE: /pdfc — multi-image → single PDF (ported from QuizBot)
+# ============================================================
+async def cmd_pdfc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['pdfc_collecting'] = True
+    context.user_data['pdfc_imgs'] = []
+    await update.message.reply_text(
+        "📸 Image collection mode চালু!\n\n"
+        "একটার পর একটা image পাঠাও।\n"
+        "শেষ হলে /done দাও — ATLAS.pdf বানিয়ে দেব।\n\n"
+        "❌ বাতিল করতে /cancel দাও।"
+    )
+
+async def cmd_pdfc_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.user_data.get('pdfc_collecting'):
+        await update.message.reply_text("❌ আগে /pdfc দিয়ে image collection শুরু করো!")
+        return
+    imgs = context.user_data.get('pdfc_imgs', [])
+    context.user_data['pdfc_collecting'] = False
+    context.user_data.pop('pdfc_imgs', None)
+    if not imgs:
+        await update.message.reply_text("❌ কোনো image পাওয়া যায়নি!")
+        return
+
+    loading = await update.message.reply_text(f"⏳ {len(imgs)} টি image দিয়ে PDF বানানো হচ্ছে...")
+    try:
+        from PIL import Image as PILImage
+        import io as _io
+        pdf_images = []
+        for img_bytes in imgs:
+            im = PILImage.open(_io.BytesIO(img_bytes)).convert("RGB")
+            pdf_images.append(im)
+
+        buf = _io.BytesIO()
+        pdf_images[0].save(buf, format="PDF", save_all=True, append_images=pdf_images[1:])
+        pdf_bytes = buf.getvalue()
+        buf2 = BytesIO(pdf_bytes)
+        buf2.name = "ATLAS.pdf"
+
+        await update.message.reply_document(
+            document=buf2,
+            filename="ATLAS.pdf",
+            caption=f"📄 ATLAS.pdf — {len(pdf_images)} pages"
+        )
+        try:
+            await loading.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        log_error(f"pdfc PDF build error: {e}")
+        await loading.edit_text(f"❌ PDF বানাতে error: {e}")
+
+async def cmd_pdfc_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['pdfc_collecting'] = False
+    context.user_data.pop('pdfc_imgs', None)
+    await update.message.reply_text("❌ Image collection বাতিল।")
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
@@ -2154,6 +2212,28 @@ async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     user_id = user['user_id']
+
+    # v4.1: /pdfc image-collection mode check (ported from QuizBot)
+    if context.user_data.get('pdfc_collecting'):
+        try:
+            if update.message.photo:
+                photo = update.message.photo[-1]
+                file = await context.bot.get_file(photo.file_id)
+                image_bytes = bytes(await file.download_as_bytearray())
+            elif update.message.document and (update.message.document.mime_type or "").startswith("image"):
+                file = await context.bot.get_file(update.message.document.file_id)
+                image_bytes = bytes(await file.download_as_bytearray())
+            else:
+                await update.message.reply_text("❌ দয়া করে একটি Image পাঠান (PDF collection mode চালু আছে)।")
+                return
+            context.user_data.setdefault('pdfc_imgs', []).append(image_bytes)
+            count = len(context.user_data['pdfc_imgs'])
+            await update.message.reply_text(f"✅ Image {count} save হয়েছে! (আরো দাও বা /done)")
+        except Exception as e:
+            log_error(f"pdfc image save error: {e}")
+            await update.message.reply_text(f"❌ Image save error: {e}")
+        return
+
     log(f"🖼️ Image from {user_id} ({user['first_name']})")
     allowed, usage, limit, is_perm = check_access(user_id)
     if not allowed:
@@ -4145,6 +4225,9 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("report", cmd_report))
     application.add_handler(CommandHandler("random", cmd_random))
     application.add_handler(CommandHandler("class", cmd_class))
+    application.add_handler(CommandHandler("pdfc", cmd_pdfc))
+    application.add_handler(CommandHandler("done", cmd_pdfc_done))
+    application.add_handler(CommandHandler("cancel", cmd_pdfc_cancel))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
     application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_image))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pending_input), group=0)
@@ -4168,6 +4251,7 @@ async def set_bot_commands() -> None:
             BotCommand("report", "📈 বিগত দিনের Report"),
             BotCommand("class", "🎓 এটলাসের ফ্রী ক্লাস"),
             BotCommand("bm", "🔖 Bookmark PDF ডাউনলোড"),
+            BotCommand("pdfc", "📸 একাধিক Image → PDF"),
             BotCommand("help", "❓ সাহায্য"),
         ]
         await application.bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
