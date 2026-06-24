@@ -146,6 +146,35 @@ def get_supabase() -> Client:
             raise
     return supabase
 
+def _reset_supabase_client() -> None:
+    """v4.1: force-recreate the Supabase client.
+    Long-lived HTTP/2 connections can be silently closed server-side
+    (idle timeout / load balancer), which surfaces as
+    httpx.RemoteProtocolError: ConnectionTerminated on the next request.
+    Recreating the client opens a fresh connection."""
+    global supabase
+    supabase = None
+    log("🔄 Supabase client reset due to connection error")
+
+def supabase_call(fn, *, retries: int = 1):
+    """v4.1: run a Supabase operation with one automatic retry on
+    transient connection errors (ConnectionTerminated, RemoteProtocolError,
+    ConnectError). `fn` takes the client and returns the result of .execute().
+    Use for any new/critical Supabase call sites; existing call sites are
+    unaffected and keep working as before."""
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(get_supabase())
+        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+            last_exc = e
+            _reset_supabase_client()
+            if attempt < retries:
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+
 def get_supabase_backup() -> Optional[Client]:
     """v4.0: optional secondary Supabase mirror. Silent if not configured."""
     global supabase_backup
@@ -1199,8 +1228,11 @@ def update_prompt_in_db(prompt_key: str, prompt_name: str, prompt_text: str) -> 
 
 def save_active_quiz(chat_id: int, quiz_data: Dict) -> bool:
     try:
-        client = get_supabase()
-        client.table('active_quizzes').upsert({'chat_id': chat_id, 'quiz_data': json.dumps(quiz_data, ensure_ascii=False), 'created_at': datetime.now(BD_TZ).isoformat()}).execute()
+        supabase_call(lambda c: c.table('active_quizzes').upsert({
+            'chat_id': chat_id,
+            'quiz_data': json.dumps(quiz_data, ensure_ascii=False),
+            'created_at': datetime.now(BD_TZ).isoformat()
+        }).execute())
         return True
     except Exception as e:
         log_error(f"save_active_quiz error: {e}")
@@ -1208,8 +1240,7 @@ def save_active_quiz(chat_id: int, quiz_data: Dict) -> bool:
 
 def get_active_quiz(chat_id: int) -> Optional[Dict]:
     try:
-        client = get_supabase()
-        result = client.table('active_quizzes').select('*').eq('chat_id', chat_id).execute()
+        result = supabase_call(lambda c: c.table('active_quizzes').select('*').eq('chat_id', chat_id).execute())
         if result.data and len(result.data) > 0:
             quiz_data = json.loads(result.data[0]['quiz_data']) if isinstance(result.data[0]['quiz_data'], str) else result.data[0]['quiz_data']
             return quiz_data
@@ -1220,8 +1251,7 @@ def get_active_quiz(chat_id: int) -> Optional[Dict]:
 
 def remove_active_quiz(chat_id: int) -> bool:
     try:
-        client = get_supabase()
-        client.table('active_quizzes').delete().eq('chat_id', chat_id).execute()
+        supabase_call(lambda c: c.table('active_quizzes').delete().eq('chat_id', chat_id).execute())
         return True
     except Exception as e:
         log_error(f"remove_active_quiz error: {e}")
