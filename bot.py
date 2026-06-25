@@ -2613,7 +2613,11 @@ async def handle_poll_solve(query, quiz_id: str, user) -> None:
             exp_text = format_explanation(mcq)
             options = mcq['options'][:4]
             correct_id = mcq.get('answer', 0)
-            if correct_id >= len(options):
+            try:
+                correct_id = int(correct_id)
+            except (TypeError, ValueError):
+                correct_id = 0
+            if correct_id >= len(options) or correct_id < 0:
                 correct_id = 0
             await query.message.chat.send_poll(
                 question=q_text, options=options, type=Poll.QUIZ,
@@ -2700,7 +2704,11 @@ async def send_quiz_poll(chat_id: int) -> None:
     exp_text = format_explanation(mcq)
     options = mcq['options'][:4]
     correct_id = mcq.get('answer', 0)
-    if correct_id >= len(options):
+    try:
+        correct_id = int(correct_id)
+    except (TypeError, ValueError):
+        correct_id = 0
+    if correct_id >= len(options) or correct_id < 0:
         correct_id = 0
     try:
         msg = await application.bot.send_poll(
@@ -4159,7 +4167,11 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     exp_text = exp_text[:197] + "..."
                 options = mcq['options'][:4]
                 correct_id = mcq.get('answer', 0)
-                if correct_id >= len(options):
+                try:
+                    correct_id = int(correct_id)
+                except (TypeError, ValueError):
+                    correct_id = 0
+                if correct_id >= len(options) or correct_id < 0:
                     correct_id = 0
                 await application.bot.send_poll(
                     chat_id=chat_id, question=q_text, options=options,
