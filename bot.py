@@ -44,6 +44,7 @@ from telegram.helpers import escape_markdown
 
 # Supabase
 from supabase import create_client, Client
+from supabase.client import ClientOptions
 
 # ATLAS Dual Storage (D1 primary + Supabase overflow)
 from storage import (
@@ -140,11 +141,29 @@ def get_supabase() -> Client:
     global supabase
     if supabase is None:
         try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            log("✅ Supabase client initialized")
+            # HTTP/2 idle timeout এ RemoteProtocolError আসে
+            # HTTP/1.1 force করলে এই সমস্যা হয় না
+            custom_client = httpx.Client(
+                http2=False,
+                timeout=20,
+                limits=httpx.Limits(
+                    max_keepalive_connections=0,  # keepalive disable
+                    keepalive_expiry=0,
+                ),
+            )
+            supabase = create_client(
+                SUPABASE_URL, SUPABASE_KEY,
+                options=ClientOptions(httpx_client=custom_client)
+            )
+            log("✅ Supabase client initialized (HTTP/1.1, no keepalive)")
         except Exception as e:
-            log_error(f"Supabase init failed: {e}")
-            raise
+            # Fallback: default client
+            try:
+                supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+                log("✅ Supabase client initialized (default fallback)")
+            except Exception as e2:
+                log_error(f"Supabase init failed: {e2}")
+                raise
     return supabase
 
 def _reset_supabase_client() -> None:
