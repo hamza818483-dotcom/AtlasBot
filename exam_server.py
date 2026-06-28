@@ -378,29 +378,30 @@ async def _tg_file_bytes(file_id: str) -> Optional[bytes]:
     print(f"[tg-file] start, file_id={file_id[:20]}..., BOT_TOKEN_set={bool(BOT_TOKEN)}, CF_WORKER_URL={CF_WORKER_URL}")
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(f"{CF_WORKER_URL}/tg-file", params={"file_id": file_id}, headers={"X-Bot-Token": BOT_TOKEN})
-            print(f"[tg-file] CF Worker /tg-file status={r.status_code}, content_len={len(r.content) if r.content else 0}")
-            if r.status_code == 200 and r.content:
-                return r.content
-    except Exception as e:
-        print(f"[tg-file] CF Worker fetch EXCEPTION: {type(e).__name__}: {e}")
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
+            # Step 1: getFile → path
             file_resp = await client.get(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
                 params={"file_id": file_id}
             )
-            print(f"[tg-file] getFile status={file_resp.status_code}")
             file_data = file_resp.json()
-            print(f"[tg-file] getFile response ok={file_data.get('ok')}, full={file_data if not file_data.get('ok') else '(ok)'}")
             if file_data.get('ok'):
                 file_path = file_data['result']['file_path']
+                # Step 2: CF Worker /tg-file with path param
+                r = await client.get(
+                    f"{CF_WORKER_URL}/tg-file",
+                    params={"path": file_path},
+                    headers={"X-Bot-Token": BOT_TOKEN}
+                )
+                print(f"[tg-file] CF Worker /tg-file status={r.status_code}, content_len={len(r.content) if r.content else 0}")
+                if r.status_code == 200 and r.content:
+                    return r.content
+                # Step 3: Direct download fallback
                 img_resp = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
-                print(f"[tg-file] file download status={img_resp.status_code}, content_len={len(img_resp.content) if img_resp.content else 0}")
-                if img_resp.status_code == 200:
+                print(f"[tg-file] direct download status={img_resp.status_code}")
+                if img_resp.status_code == 200 and img_resp.content:
                     return img_resp.content
     except Exception as e:
-        print(f"[tg-file] Direct Telegram fetch EXCEPTION: {type(e).__name__}: {e}")
+        print(f"[tg-file] EXCEPTION: {type(e).__name__}: {e}")
     print(f"[tg-file] FAILED — returning None for file_id={file_id[:20]}...")
     return None
 
