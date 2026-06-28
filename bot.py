@@ -176,6 +176,32 @@ def supabase_call(fn, *, retries: int = 1):
     if last_exc:
         raise last_exc
 
+def _patch_supabase_execute_with_retry() -> None:
+    """v4.2: monkey-patch postgrest's execute() so EVERY existing
+    get_supabase().table(...).execute() call (36+ call sites across this
+    file) auto-retries once on transient HTTP/2 ConnectionTerminated
+    errors, without needing to touch any of those call sites individually."""
+    try:
+        from postgrest._sync.request_builder import SyncQueryRequestBuilder
+    except ImportError:
+        log_error("Could not patch postgrest execute() — retry-on-disconnect disabled")
+        return
+
+    original_execute = SyncQueryRequestBuilder.execute
+
+    def patched_execute(self):
+        try:
+            return original_execute(self)
+        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+            log_error(f"Supabase connection error ({type(e).__name__}) — recreating client and retrying once")
+            _reset_supabase_client()
+            get_supabase()
+            return original_execute(self)
+
+    SyncQueryRequestBuilder.execute = patched_execute
+
+_patch_supabase_execute_with_retry()
+
 def get_supabase_backup() -> Optional[Client]:
     """v4.0: optional secondary Supabase mirror. Silent if not configured."""
     global supabase_backup
@@ -901,8 +927,7 @@ def set_setting(key: str, value: Any) -> bool:
 
 def get_all_settings() -> Dict:
     try:
-        client = get_supabase()
-        result = client.table('settings').select('*').execute()
+        result = supabase_call(lambda c: c.table('settings').select('*').execute())
         settings = {}
         for row in (result.data or []):
             settings[row['key']] = row['value']
