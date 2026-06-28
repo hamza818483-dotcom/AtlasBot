@@ -208,11 +208,12 @@ def _patch_supabase_execute_with_retry() -> None:
                 return original_execute(self)
             except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
                 last_exc = e
-                log_error(f"Supabase connection error ({type(e).__name__}), attempt {attempt + 1}/4 — recreating client")
                 _reset_supabase_client()
                 get_supabase()
                 if attempt < 3:
-                    time.sleep(0.5 * (attempt + 1))  # 0.5s, 1s, 1.5s backoff
+                    time.sleep(0.5 * (attempt + 1))
+        # সব retry fail — তখনই log করো
+        log(f"[Supabase] All 4 attempts failed: {type(last_exc).__name__}", "WARNING")
         raise last_exc
 
     SyncQueryRequestBuilder.execute = patched_execute
@@ -793,8 +794,12 @@ def log_error(message: str) -> None:
     # v4.0: auto-forward every error to OWNER (fire-and-forget)
     try:
         if application and _bot_loop and OWNER_ID:
-            # Check if this is a connection error to avoid infinite loop or spam during downtime
-            if "ConnectError" in str(message) or "NetworkError" in str(message):
+            # Transient connection errors — retry handles them, no need to spam owner
+            if any(x in str(message) for x in [
+                "ConnectError", "NetworkError",
+                "RemoteProtocolError", "ConnectionTerminated",
+                "ReadError", "recreating client"
+            ]):
                 return
             short = str(message)[:900]
             # Ensure we await or handle the coroutine properly
