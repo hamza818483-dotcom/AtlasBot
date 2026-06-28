@@ -141,23 +141,24 @@ def get_supabase() -> Client:
     if supabase is None:
         try:
             supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            # postgrest এর internal httpx session HTTP/2 use করে
-            # এটাকে HTTP/1.1 দিয়ে replace করলে RemoteProtocolError বন্ধ হবে
+            # postgrest এর httpx session এ keepalive disable করো
+            # idle connection server side বন্ধ হলে RemoteProtocolError আসে
             try:
                 new_session = httpx.Client(
                     http2=False,
                     timeout=20,
                     limits=httpx.Limits(
                         max_keepalive_connections=0,
+                        max_connections=10,
                         keepalive_expiry=0,
                     ),
                 )
-                # postgrest client এর session replace
+                # Copy existing headers/auth to new session
+                new_session.headers.update(supabase.postgrest.session.headers)
                 supabase.postgrest.session = new_session
-                log("✅ Supabase client initialized (HTTP/1.1 patched)")
+                log("✅ Supabase client initialized (keepalive disabled)")
             except Exception as patch_err:
-                log_error(f"HTTP/1.1 patch failed (non-critical): {patch_err}")
-                log("✅ Supabase client initialized (default)")
+                log(f"⚠️ Session patch failed (non-critical): {patch_err}")
         except Exception as e:
             log_error(f"Supabase init failed: {e}")
             raise
