@@ -2750,7 +2750,8 @@ async def send_quiz_poll(chat_id: int) -> None:
     timer = quiz['timer']
     q_text = format_poll_question(mcq, idx + 1)
     exp_text = format_explanation(mcq)
-    options = mcq['options'][:4]
+    options = [o[:100] for o in mcq['options'][:4]]  # max 100 chars per option
+    q_text = q_text[:300]  # max 300 chars for question
     correct_id = mcq.get('answer', 0)
     try:
         correct_id = int(correct_id)
