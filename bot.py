@@ -44,7 +44,6 @@ from telegram.helpers import escape_markdown
 
 # Supabase
 from supabase import create_client, Client
-from supabase.client import ClientOptions
 
 # ATLAS Dual Storage (D1 primary + Supabase overflow)
 from storage import (
@@ -141,40 +140,34 @@ def get_supabase() -> Client:
     global supabase
     if supabase is None:
         try:
-            # HTTP/2 idle timeout এ RemoteProtocolError আসে
-            # HTTP/1.1 force করলে এই সমস্যা হয় না
-            custom_client = httpx.Client(
-                http2=False,
-                timeout=20,
-                limits=httpx.Limits(
-                    max_keepalive_connections=0,  # keepalive disable
-                    keepalive_expiry=0,
-                ),
-            )
-            supabase = create_client(
-                SUPABASE_URL, SUPABASE_KEY,
-                options=ClientOptions(httpx_client=custom_client)
-            )
-            log("✅ Supabase client initialized (HTTP/1.1, no keepalive)")
-        except Exception as e:
-            # Fallback: default client
+            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            # postgrest এর internal httpx session HTTP/2 use করে
+            # এটাকে HTTP/1.1 দিয়ে replace করলে RemoteProtocolError বন্ধ হবে
             try:
-                supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-                log("✅ Supabase client initialized (default fallback)")
-            except Exception as e2:
-                log_error(f"Supabase init failed: {e2}")
-                raise
+                new_session = httpx.Client(
+                    http2=False,
+                    timeout=20,
+                    limits=httpx.Limits(
+                        max_keepalive_connections=0,
+                        keepalive_expiry=0,
+                    ),
+                )
+                # postgrest client এর session replace
+                supabase.postgrest.session = new_session
+                log("✅ Supabase client initialized (HTTP/1.1 patched)")
+            except Exception as patch_err:
+                log_error(f"HTTP/1.1 patch failed (non-critical): {patch_err}")
+                log("✅ Supabase client initialized (default)")
+        except Exception as e:
+            log_error(f"Supabase init failed: {e}")
+            raise
     return supabase
 
 def _reset_supabase_client() -> None:
-    """v4.1: force-recreate the Supabase client.
-    Long-lived HTTP/2 connections can be silently closed server-side
-    (idle timeout / load balancer), which surfaces as
-    httpx.RemoteProtocolError: ConnectionTerminated on the next request.
-    Recreating the client opens a fresh connection."""
+    """force-recreate the Supabase client with HTTP/1.1 patch."""
     global supabase
     supabase = None
-    log("🔄 Supabase client reset due to connection error")
+    log("🔄 Supabase client reset — will recreate with HTTP/1.1 on next call")
 
 def supabase_call(fn, *, retries: int = 1):
     """v4.1: run a Supabase operation with one automatic retry on
