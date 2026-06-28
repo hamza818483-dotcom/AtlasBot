@@ -190,13 +190,18 @@ def _patch_supabase_execute_with_retry() -> None:
     original_execute = SyncQueryRequestBuilder.execute
 
     def patched_execute(self):
-        try:
-            return original_execute(self)
-        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
-            log_error(f"Supabase connection error ({type(e).__name__}) — recreating client and retrying once")
-            _reset_supabase_client()
-            get_supabase()
-            return original_execute(self)
+        last_exc = None
+        for attempt in range(4):  # initial try + 3 retries
+            try:
+                return original_execute(self)
+            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+                last_exc = e
+                log_error(f"Supabase connection error ({type(e).__name__}), attempt {attempt + 1}/4 — recreating client")
+                _reset_supabase_client()
+                get_supabase()
+                if attempt < 3:
+                    time.sleep(0.5 * (attempt + 1))  # 0.5s, 1s, 1.5s backoff
+        raise last_exc
 
     SyncQueryRequestBuilder.execute = patched_execute
 
