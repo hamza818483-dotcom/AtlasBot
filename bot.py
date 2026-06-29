@@ -93,6 +93,13 @@ SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
 HF_SPACE_URL = "https://hamzahf1-atlasbot.hf.space"
 CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
+# Outbound Telegram API calls (base_url/base_file_url) specifically — separate from
+# CF_WORKER_URL because *.workers.dev is blocked from inside the HF Space container.
+# atlas-bot-proxy-pages.pages.dev is a full 1:1 mirror of worker.js (D1 query, webhook,
+# file proxy, sendDocument, and the general Telegram proxy all included) — same domain
+# already configured as CF_D1_URL for storage.py's D1 queries, confirming it's reachable
+# from the HF Space. Defaults here, but overridable via env var without a code change.
+CF_TG_API_URL = os.getenv("CF_TG_API_URL", "https://atlas-bot-proxy-pages.pages.dev")
 
 DEFAULT_TIMER = 30
 DEFAULT_FREE_LIMIT = 3
@@ -4366,8 +4373,8 @@ async def setup_bot() -> None:
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .base_url(f"{CF_WORKER_URL}/bot")
-        .base_file_url(f"{CF_WORKER_URL}/file/bot")
+        .base_url(f"{CF_TG_API_URL}/bot")
+        .base_file_url(f"{CF_TG_API_URL}/file/bot")
         .request(bot_request)
         .get_updates_request(get_updates_request)
         .build()
