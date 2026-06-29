@@ -99,7 +99,7 @@ CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 # file proxy, sendDocument, and the general Telegram proxy all included) — same domain
 # already configured as CF_D1_URL for storage.py's D1 queries, confirming it's reachable
 # from the HF Space. Defaults here, but overridable via env var without a code change.
-CF_TG_API_URL = os.getenv("CF_TG_API_URL", "https://atlas-bot-proxy-pages.pages.dev")
+CF_TG_API_URL = os.getenv("CF_TG_API_URL", "https://atlas-bot-proxy.hamza818483.workers.dev")
 
 DEFAULT_TIMER = 30
 DEFAULT_FREE_LIMIT = 3
