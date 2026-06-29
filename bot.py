@@ -38,6 +38,7 @@ from telegram.ext import (
     CommandHandler, MessageHandler, CallbackQueryHandler,
     PollAnswerHandler, filters, ContextTypes, ApplicationHandlerStop
 )
+from telegram.request import HTTPXRequest
 from telegram.constants import ParseMode
 from telegram.error import TelegramError, RetryAfter, Forbidden
 from telegram.helpers import escape_markdown
@@ -4346,15 +4347,29 @@ async def set_bot_commands() -> None:
 async def setup_bot() -> None:
     global application, BOT_USERNAME
     log("🚀 Setting up bot application...")
+    # ConnectError/TLS handshake failures (httpx start_tls) were happening when
+    # the bot tried to reach the Cloudflare Worker proxy from inside the HF
+    # Space container — the same failure pattern already fixed for the
+    # Supabase client by disabling HTTP/2 and keepalive. Applying the same
+    # fix here via a custom HTTPXRequest, since ApplicationBuilder's default
+    # transport doesn't otherwise let us configure http2/keepalive.
+    request_kwargs = dict(
+        connection_pool_size=8,
+        connect_timeout=30,
+        read_timeout=60,
+        write_timeout=60,
+        pool_timeout=30,
+        http_version="1.1",
+    )
+    bot_request = HTTPXRequest(**request_kwargs)
+    get_updates_request = HTTPXRequest(**request_kwargs)
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .base_url(f"{CF_WORKER_URL}/bot")
         .base_file_url(f"{CF_WORKER_URL}/file/bot")
-        .connect_timeout(30)
-        .read_timeout(60)
-        .write_timeout(60)
-        .pool_timeout(30)
+        .request(bot_request)
+        .get_updates_request(get_updates_request)
         .build()
     )
     await register_handlers()
