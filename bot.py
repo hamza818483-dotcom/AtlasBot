@@ -91,7 +91,7 @@ SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
 SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
 HF_SPACE_URL = "https://hamzahf1-atlasbot.hf.space"
-CF_WORKER_URL = "https://atlas-bot-proxy-pages.pages.dev"
+CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 
 DEFAULT_TIMER = 30
 DEFAULT_FREE_LIMIT = 3
