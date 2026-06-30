@@ -1,0 +1,80 @@
+name: Watchdog - CF Proxy / Render Failover
+
+# HF Space-er nijer chesta (cf_proxy_health_check_scheduler in bot.py)
+# CF proxy diyei Telegram-ke call kore, tai CF proxy nijei pura down
+# thakle HF-er kase kono upay thake na. Ei workflow GitHub-er nijer
+# network theke chole - workers.dev/HF-er moto kono restriction nei,
+# tai direct api.telegram.org-e pouchate pare, ebong CF proxy-o check
+# korte pare. Eta ekta independent, external safety-net.
+#
+# Logic:
+#   1) CF proxy-r getMe call kore health check.
+#   2) Fail hole -> webhook Render-e switch kore (sorasori
+#      api.telegram.org-e setWebhook diye, ja GitHub theke kaj kore).
+#   3) CF proxy abar thik thakle -> webhook abar CF proxy-te ferot.
+#
+# Required repo secrets:
+#   BOT_TOKEN    - Telegram bot token
+#   RENDER_URL   - e.g. https://atlasbot-pvp7.onrender.com
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CF proxy and switch webhook if needed
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          CF_TG_API_URL: https://atlas-bot-proxy-pages.pages.dev
+          CF_WORKER_URL: https://atlas-bot-proxy.hamza818483.workers.dev
+        run: |
+          set -e
+          if [ -z "$BOT_TOKEN" ] || [ -z "$RENDER_URL" ]; then
+            echo "::warning::BOT_TOKEN or RENDER_URL secret not set — skipping watchdog"
+            exit 0
+          fi
+
+          echo "Checking CF proxy health..."
+          CF_STATUS=$(curl -s -o /tmp/cf_resp.json -w "%{http_code}" --max-time 15 \
+            "${CF_TG_API_URL}/bot${BOT_TOKEN}/getMe" || echo "000")
+          CF_OK="false"
+          if [ "$CF_STATUS" = "200" ] && grep -q '"ok":true' /tmp/cf_resp.json 2>/dev/null; then
+            CF_OK="true"
+          fi
+          echo "CF proxy status: $CF_STATUS (ok=$CF_OK)"
+
+          # Bartoman webhook URL dekhe nei, double-switch ebong unnecessary
+          # API call avoid korar jonno.
+          CURRENT_WH=$(curl -s --max-time 15 \
+            "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
+            | grep -o '"url":"[^"]*"' | sed 's/"url":"//;s/"//' || echo "")
+          echo "Current webhook: $CURRENT_WH"
+
+          if [ "$CF_OK" = "false" ]; then
+            TARGET_URL="${RENDER_URL%/}/webhook/${BOT_TOKEN}"
+            if [ "$CURRENT_WH" = "$TARGET_URL" ]; then
+              echo "Webhook already on Render — nothing to do."
+            else
+              echo "::warning::CF proxy unreachable — switching webhook to Render fallback"
+              curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+                -H "Content-Type: application/json" \
+                -d "{\"url\":\"${TARGET_URL}\",\"drop_pending_updates\":false,\"max_connections\":40}"
+            fi
+          else
+            TARGET_URL="${CF_WORKER_URL}/webhook/${BOT_TOKEN}"
+            if [ "$CURRENT_WH" = "$TARGET_URL" ] || [[ "$CURRENT_WH" == *"onrender.com"* ]]; then
+              if [[ "$CURRENT_WH" == *"onrender.com"* ]]; then
+                echo "CF proxy recovered — switching webhook back from Render"
+                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"url\":\"${TARGET_URL}\",\"drop_pending_updates\":false,\"max_connections\":40}"
+              else
+                echo "Webhook already on CF proxy — nothing to do."
+              fi
+            fi
+          fi

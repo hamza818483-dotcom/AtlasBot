@@ -50,5 +50,17 @@ A `.github/workflows/keep-render-awake.yml` workflow pings Render's
 If the CF proxy stops responding while running on HF Space, the bot
 automatically switches its webhook to the Render fallback URL (and
 switches back once the CF proxy recovers) — see
-`cf_proxy_health_check_scheduler()` in `bot.py`.
+`cf_proxy_health_check_scheduler()` in `bot.py`. Note: this internal
+attempt itself goes through the CF proxy (since HF Space cannot reach
+api.telegram.org directly), so it only helps when a specific API route
+is broken, not when the proxy domain itself is fully unreachable.
+
+`.github/workflows/watchdog-failover.yml` is an **independent, external**
+safety net for that gap — it runs from GitHub's own network (no
+workers.dev/Telegram restrictions) every 5 minutes, checks the CF
+proxy's health directly, and switches the webhook to/from Render via
+`api.telegram.org` itself. This works even if the CF proxy is
+completely down. Requires these repo secrets:
+- `BOT_TOKEN` — the Telegram bot token
+- `RENDER_URL` — e.g. `https://atlasbot-pvp7.onrender.com`
 # Thu Jun 11 14:42:27 +06 2026
