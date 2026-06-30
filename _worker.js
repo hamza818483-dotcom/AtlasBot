@@ -13,7 +13,7 @@ export default {
       if (!token) return new Response('Unauthorized', { status: 401 });
       const body = await request.text();
       try {
-        await fetch('https://hamzaHF1-atlasbot.hf.space/webhook', {
+        await fetch('https://hamzahf2-atlasbot.hf.space/webhook', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Bot-Token': token },
           body,

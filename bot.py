@@ -99,7 +99,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
 SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
-HF_SPACE_URL = "https://hamzahf1-atlasbot.hf.space"
+HF_SPACE_URL = "https://hamzahf2-atlasbot.hf.space"
 CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 # Outbound Telegram API calls (base_url/base_file_url) specifically — separate from
 # CF_WORKER_URL because *.workers.dev is blocked from inside the HF Space container.

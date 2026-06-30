@@ -40,8 +40,8 @@ from PIL import Image
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GENAI_API_KEY = os.getenv("GEMINI_KEY", "")
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev").rstrip("/")
-HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
-BASE_URL = os.getenv("BASE_URL", "https://hamzahf1-atlasbot.hf.space").rstrip("/")
+HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://hamzahf2-atlasbot.hf.space").rstrip("/")
+BASE_URL = os.getenv("BASE_URL", "https://hamzahf2-atlasbot.hf.space").rstrip("/")
 
 # Fallback providers for Creative (জ্ঞানমূলক/অনুধাবনমূলক) generation when Gemini is exhausted
 GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
