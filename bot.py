@@ -1195,10 +1195,19 @@ def get_user_results(user_id: int, limit: int = 10) -> List[Dict]:
     try:
         client = get_supabase()
         result = client.table('results').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(limit).execute()
-        return result.data if result.data else []
+        if result.data:
+            return result.data
     except Exception as e:
         log_error(f"get_user_results error: {e}")
-        return []
+    # backup mirror থেকে restore
+    try:
+        bk = get_supabase_backup()
+        if bk:
+            result = bk.table('results').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(limit).execute()
+            return result.data if result.data else []
+    except Exception as e:
+        log_error(f"get_user_results backup restore error: {e}")
+    return []
 
 def add_bookmark(user_id: int, cache_id: str, question_index: int, question_data: Dict, topic: str = '', page: int = 0) -> bool:
     try:
@@ -1227,8 +1236,14 @@ def get_bookmarks(user_id: int, cache_id: str) -> List[Dict]:
     try:
         client = get_supabase()
         result = client.table('bookmarks').select('*').eq('user_id', user_id).eq('cache_id', cache_id).order('question_index', desc=False).execute()
+        rows = result.data
+        if not rows:
+            bk = get_supabase_backup()
+            if bk:
+                result = bk.table('bookmarks').select('*').eq('user_id', user_id).eq('cache_id', cache_id).order('question_index', desc=False).execute()
+                rows = result.data
         bookmarks = []
-        for row in (result.data or []):
+        for row in (rows or []):
             q_data = json.loads(row['question_data']) if isinstance(row['question_data'], str) else row['question_data']
             bookmarks.append({'id': row['id'], 'question_index': row['question_index'], 'question_data': q_data, 'topic': row.get('topic', ''), 'page': row.get('page', 0)})
         return bookmarks
@@ -1241,8 +1256,14 @@ def get_all_bookmarks(user_id: int) -> List[Dict]:
     try:
         client = get_supabase()
         result = client.table('bookmarks').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(500).execute()
+        rows = result.data
+        if not rows:
+            bk = get_supabase_backup()
+            if bk:
+                result = bk.table('bookmarks').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(500).execute()
+                rows = result.data
         out, seen = [], set()
-        for row in (result.data or []):
+        for row in (rows or []):
             q = json.loads(row['question_data']) if isinstance(row['question_data'], str) else row['question_data']
             key = (q.get('question', '') or '')[:120]
             if key and key not in seen:
@@ -3422,8 +3443,14 @@ def get_mistake_mcqs(user_id: int, statuses: List[str]) -> List[Dict]:
     try:
         client = get_supabase()
         result = client.table('mistakes').select('question_data,status').eq('user_id', user_id).in_('status', statuses).order('created_at', desc=True).limit(500).execute()
+        rows = result.data
+        if not rows:
+            bk = get_supabase_backup()
+            if bk:
+                result = bk.table('mistakes').select('question_data,status').eq('user_id', user_id).in_('status', statuses).order('created_at', desc=True).limit(500).execute()
+                rows = result.data
         mcqs, seen = [], set()
-        for row in (result.data or []):
+        for row in (rows or []):
             q = json.loads(row['question_data']) if isinstance(row['question_data'], str) else row['question_data']
             key = q.get('question', '')[:120]
             if key and key not in seen:
