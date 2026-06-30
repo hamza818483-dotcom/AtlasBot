@@ -354,15 +354,20 @@ function pickOpt(qi, oi) {
     userAnswers[qi] = oi;
     lockQuestion(qi, oi);
     updateHdrProg();
-    const nextIdx = findNextUnanswered(qi);
-    if (nextIdx !== -1) {
-        const nextCard = document.getElementById('qCard' + nextIdx);
-        if (nextCard) {
-            document.querySelectorAll('.mcq-card.current').forEach(c => c.classList.remove('current'));
-            nextCard.classList.add('current');
-            nextCard.scrollIntoView({behavior:'auto', block:'center'});
+    // Let the lock state (🔒 icon, dim, border color) paint first,
+    // then move to next card — short enough to feel instant,
+    // long enough that the lock is visible.
+    setTimeout(() => {
+        const nextIdx = findNextUnanswered(qi);
+        if (nextIdx !== -1) {
+            const nextCard = document.getElementById('qCard' + nextIdx);
+            if (nextCard) {
+                document.querySelectorAll('.mcq-card.current').forEach(c => c.classList.remove('current'));
+                nextCard.classList.add('current');
+                nextCard.scrollIntoView({behavior:'smooth', block:'center'});
+            }
         }
-    }
+    }, 280);
 }
 
 function findNextUnanswered(fromIdx) {
@@ -776,3 +781,4 @@ init();
 </script>
 </body>
 </html>
+
