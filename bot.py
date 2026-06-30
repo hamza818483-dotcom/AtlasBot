@@ -100,6 +100,16 @@ CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 # already configured as CF_D1_URL for storage.py's D1 queries, confirming it's reachable
 # from the HF Space. Defaults here, but overridable via env var without a code change.
 CF_TG_API_URL = os.getenv("CF_TG_API_URL", "https://atlas-bot-proxy-pages.pages.dev")
+# Dual-platform fallback (mirrors QuizBot's pattern): if RUNNING_ON=Render or
+# RENDER_URL is set, the bot is running on Render, which CAN reach
+# api.telegram.org directly (no workers.dev block there, unlike HF Space) —
+# so webhook/API calls go straight to Telegram instead of through the CF
+# proxy. This gives a backup deployment target if HF Space or the CF proxy
+# ever goes down. Defaults are empty/unset, so existing HF-only deployments
+# are completely unaffected unless these env vars are explicitly configured.
+RUNNING_ON = os.getenv("RUNNING_ON", "")
+RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
+IS_RENDER = (RUNNING_ON == "Render") or bool(RENDER_URL and "onrender.com" in RENDER_URL)
 
 DEFAULT_TIMER = 30
 DEFAULT_FREE_LIMIT = 3
@@ -4370,11 +4380,16 @@ async def setup_bot() -> None:
     )
     bot_request = HTTPXRequest(**request_kwargs)
     get_updates_request = HTTPXRequest(**request_kwargs)
+    builder = ApplicationBuilder().token(BOT_TOKEN)
+    if IS_RENDER:
+        # Render এ আছি — Telegram API সরাসরি reach করা যায়, proxy লাগে না।
+        # base_url() না দিলে python-telegram-bot নিজে থেকেই
+        # https://api.telegram.org ব্যবহার করে (লাইব্রেরির ডিফল্ট)।
+        log(f"🟡 Running on Render — using direct Telegram API (no proxy)")
+    else:
+        builder = builder.base_url(f"{CF_TG_API_URL}/bot").base_file_url(f"{CF_TG_API_URL}/file/bot")
     application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .base_url(f"{CF_TG_API_URL}/bot")
-        .base_file_url(f"{CF_TG_API_URL}/file/bot")
+        builder
         .request(bot_request)
         .get_updates_request(get_updates_request)
         .build()
@@ -4414,6 +4429,19 @@ def setup_webhook_route(fastapi_app):
             asyncio.run_coroutine_threadsafe(application.process_update(update), _bot_loop)
         return PlainTextResponse('OK')
 
+    @fastapi_app.post('/webhook/{token}')
+    async def webhook_direct(token: str, request: Request):
+        # Render fallback mode-এর জন্য — Telegram সরাসরি এই URL কল করে
+        # (token path-এ থাকে, কোনো custom header না), তাই request body
+        # পাওয়ার সাথে সাথেই token path-parameter দিয়ে যাচাই হয়।
+        if token != BOT_TOKEN:
+            return PlainTextResponse('Unauthorized', status_code=401)
+        data = await request.json()
+        if data and application and _bot_loop:
+            update = Update.de_json(data, application.bot)
+            asyncio.run_coroutine_threadsafe(application.process_update(update), _bot_loop)
+        return PlainTextResponse('OK')
+
 # ============================================================
 # SECTION 24: MAIN ENTRY POINT
 # ============================================================
@@ -4440,7 +4468,14 @@ async def main() -> None:
     await setup_bot()
     await application.initialize()
     await application.start()
-    webhook_url = f"{CF_WORKER_URL}/webhook/{BOT_TOKEN}"
+    if IS_RENDER and RENDER_URL:
+        # Render-এ webhook সরাসরি এই অ্যাপের নিজস্ব URL-এ সেট হয় (proxy লাগে
+        # না) — ফলব্যাক রুট setup_webhook_route()-এ /webhook/{token} হিসেবে
+        # যোগ করা আছে, ঠিক CF Worker যেভাবে কল করত একই path pattern মেনে,
+        # যাতে আলাদা কোনো নতুন handler না লাগে।
+        webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    else:
+        webhook_url = f"{CF_WORKER_URL}/webhook/{BOT_TOKEN}"
     try:
         await application.bot.set_webhook(
             max_connections=40, url=webhook_url,
