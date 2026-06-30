@@ -213,11 +213,11 @@ function notFoundHtml() {
 <body><div class="box"><h2>❌ Exam পাওয়া যায়নি</h2><p>লিংকটি ভুল অথবা মেয়াদোত্তীর্ণ।</p></div></body></html>`;
 }
 
-// ── Fetch quiz data: D1 cache first (fast, free), then Supabase ──
+// ── Fetch quiz data: D1 exam_cache -> D1 mcqs (bot dual_insert target) -> Supabase mcqs ──
 async function fetchExamData(cacheId, env) {
   if (!cacheId) return null;
 
-  // Layer 1: D1 cache (if previously cached here)
+  // Layer 1: D1 exam_cache (fast path, if previously cached by this worker)
   try {
     if (env.DB) {
       const row = await env.DB.prepare(
@@ -238,10 +238,48 @@ async function fetchExamData(cacheId, env) {
       }
     }
   } catch (e) {
-    console.warn("[exam] D1 lookup failed:", e.message);
+    console.warn("[exam] D1 exam_cache lookup failed:", e.message);
   }
 
-  // Layer 2: Supabase (source of truth)
+  // Layer 2: D1 mcqs (bot.py writes here via dual_insert — PRIMARY data source)
+  try {
+    if (env.DB) {
+      const row = await env.DB.prepare(
+        "SELECT * FROM mcqs WHERE quiz_id=?1"
+      ).bind(cacheId).first();
+      if (row) {
+        const mcqs = typeof row.mcqs === "string" ? JSON.parse(row.mcqs) : row.mcqs;
+        const promptType = row.prompt_type || "prompt_1";
+        const result = {
+          mcqs,
+          topic: PROMPT_DISPLAY_NAMES[promptType] || "ATLAS Special MCQ",
+          page: 1,
+          tag: "",
+          image_file_id: row.image_file_id || "",
+          is_new_gen: false,
+          chat_id: row.chat_id || null,
+          message_id: row.message_id || null,
+          prompt_type: promptType,
+        };
+        // Mirror into exam_cache for next-time fast lookup
+        try {
+          await env.DB.prepare(
+            `INSERT OR REPLACE INTO exam_cache
+             (quiz_id, mcqs, topic, page, tag, image_file_id, chat_id, message_id, prompt_type)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`
+          ).bind(
+            cacheId, JSON.stringify(mcqs), result.topic, result.page, result.tag,
+            result.image_file_id, result.chat_id, result.message_id, result.prompt_type
+          ).run();
+        } catch (_) {}
+        return result;
+      }
+    }
+  } catch (e) {
+    console.warn("[exam] D1 mcqs lookup failed:", e.message);
+  }
+
+  // Layer 3: Supabase mcqs
   try {
     const r = await fetch(
       `${SB_URL}/rest/v1/mcqs?quiz_id=eq.${encodeURIComponent(cacheId)}&select=*`,
@@ -263,7 +301,6 @@ async function fetchExamData(cacheId, env) {
         message_id: row.message_id || null,
         prompt_type: promptType,
       };
-      // Best-effort cache into D1 for next time
       try {
         if (env.DB) {
           await env.DB.prepare(
@@ -279,7 +316,43 @@ async function fetchExamData(cacheId, env) {
       return result;
     }
   } catch (e) {
-    console.error("[exam] Supabase lookup failed:", e.message);
+    console.warn("[exam] Supabase lookup failed:", e.message);
+  }
+
+  // Layer 4: Render live bot (in-memory exam_store fallback — last resort)
+  try {
+    const RENDER_URLS = [
+      "https://atlasbot-3tgq.onrender.com",
+    ];
+    for (const base of RENDER_URLS) {
+      try {
+        const r = await fetch(`${base}/api/exam/${encodeURIComponent(cacheId)}`, {
+          signal: AbortSignal.timeout(8000)
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (d && d.mcqs && d.mcqs.length > 0) {
+            // Mirror into D1 exam_cache for future fast lookups
+            try {
+              if (env.DB) {
+                await env.DB.prepare(
+                  `INSERT OR REPLACE INTO exam_cache
+                   (quiz_id, mcqs, topic, page, tag, image_file_id, chat_id, message_id, prompt_type)
+                   VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`
+                ).bind(
+                  cacheId, JSON.stringify(d.mcqs), d.topic || "ATLAS Exam", d.page || 1,
+                  d.tag || "", d.image_file_id || "", d.chat_id || null,
+                  d.message_id || null, d.prompt_type || "prompt_1"
+                ).run();
+              }
+            } catch (_) {}
+            return d;
+          }
+        }
+      } catch (_) { /* try next render url */ }
+    }
+  } catch (e) {
+    console.error("[exam] Render fallback failed:", e.message);
   }
 
   return null;
@@ -408,3 +481,4 @@ async function handleTgImageProxy(fileId, env) {
     return new Response("image unavailable", { status: 404 });
   }
 }
+
