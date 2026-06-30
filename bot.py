@@ -4151,10 +4151,33 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pomo_count = len(_pomodoro_sessions)
         active_quizzes = len(_timer_tasks)
 
+        # v4.1: কোন platform-এ চলছে আর webhook এখন আসলে কোন route-এ আছে তা
+        # Telegram থেকে সরাসরি জিজ্ঞেস করে দেখানো হয় (local _failover_active
+        # ফ্ল্যাগের উপর নির্ভর না করে — কারণ GitHub Actions watchdog যদি
+        # switch করে, HF process নিজে সেটা জানে না)।
+        host_label = "🟦 Render" if IS_RENDER else "🟨 HuggingFace Space"
+        route_label = "❓ Unknown"
+        try:
+            wh_info = await application.bot.get_webhook_info()
+            wh_url = wh_info.url or ""
+            if "onrender.com" in wh_url:
+                if IS_RENDER:
+                    route_label = "🟢 Direct (Render → Telegram সরাসরি, proxy লাগে না)"
+                else:
+                    route_label = "🟡 Render Fallback (CF proxy down, webhook Render-এ switched)"
+            elif wh_url:
+                route_label = "🟢 Cloudflare Proxy (স্বাভাবিক)"
+            else:
+                route_label = "⚠️ Webhook সেট নেই"
+        except Exception:
+            pass
+
         text = (
             f"📌 <b>ATLAS BOT — STATUS</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🟢 <b>Bot Status:</b> Active\n"
+            f"🖥️ <b>Host:</b> {host_label}\n"
+            f"🔌 <b>Webhook Route:</b> {route_label}\n"
             f"🕐 <b>চালু হয়েছে:</b> {start_str} (BD)\n"
             f"⏱️ <b>Uptime:</b> {uptime_str}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
