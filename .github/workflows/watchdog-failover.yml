@@ -57,6 +57,17 @@ jobs:
 
           if [ "$CF_OK" = "false" ]; then
             TARGET_URL="${RENDER_URL%/}/webhook/${BOT_TOKEN}"
+
+            echo "Waking Render (in case it's asleep on free tier)..."
+            for i in 1 2 3; do
+              WAKE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${RENDER_URL%/}/health" || echo "000")
+              echo "  attempt $i: /health -> $WAKE_STATUS"
+              if [ "$WAKE_STATUS" = "200" ]; then
+                break
+              fi
+              sleep 15
+            done
+
             if [ "$CURRENT_WH" = "$TARGET_URL" ]; then
               echo "Webhook already on Render — nothing to do."
             else
