@@ -79,6 +79,14 @@ NEMOTRON_KEYS = [k.strip() for k in os.getenv("NEMOTRON_KEY", "").split(",") if 
 GEMMA_KEYS = [k.strip() for k in os.getenv("GEMMA_KEY", "").split(",") if k.strip()]
 GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
 
+# v4.1: Cloudflare Workers AI — final free fallback for image→MCQ generation.
+# Uses the existing CF account (no separate paid key needed beyond a scoped
+# CF API token with "Workers AI: Edit" permission). Free daily neuron quota.
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
+CF_AI_TOKEN = os.getenv("CF_AI_TOKEN", "").strip()
+CF_WORKERS_AI_MODEL = os.getenv("CF_WORKERS_AI_MODEL", "@cf/meta/llama-3.2-11b-vision-instruct")
+CF_WORKERS_AI_BASE = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1" if CF_ACCOUNT_ID else ""
+
 GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
@@ -377,6 +385,7 @@ PROVIDER_QUOTA_HINTS = {
     "openrouter-qwen":{"rpd": 50,   "reset": "ভোর ৬টা (BD)", "label": "OpenRouter Qwen2.5-VL-72B"},
     "nemotron":       {"rpd": 50,   "reset": "ভোর ৬টা (BD)", "label": "OpenRouter Nemotron-VL"},
     "gemma":          {"rpd": 50,   "reset": "ভোর ৬টা (BD)", "label": "OpenRouter Gemma-3-27B"},
+    "cf-workers-ai":  {"rpd": 10000, "reset": "প্রতিদিন (free neurons)", "label": "Cloudflare Workers AI (Llama 3.2 Vision)"},
 }
 
 def _reset_provider_stats_if_new_day():
@@ -460,8 +469,8 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     return None, False
 
 async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> Tuple[Optional[str], str]:
-    """v4.0: Full fallback chain. Returns (text, provider_name) or (None, '').
-    Order: Gemini (all keys) → Groq 90B Vision → NVIDIA → OpenRouter Qwen VL → Nemotron → Gemma.
+    """v4.1: Full fallback chain. Returns (text, provider_name) or (None, '').
+    Order: Gemini (all keys) → Groq 90B Vision → NVIDIA → OpenRouter Qwen VL → Nemotron → Gemma → Cloudflare Workers AI.
     Every provider/key with all-key rotation; missing keys silently skipped."""
     full_prompt = prompt_text + STRICT_SOURCE_RULES
     # 1) Gemini (primary, all keys with rotation) — tracked inside _call_gemini
@@ -494,6 +503,14 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
                                                provider=name, key_label=f"{name}#{i+1}")
             if txt:
                 return txt, name
+    # 7) Cloudflare Workers AI (final free fallback) — uses CF account directly,
+    # no per-request key rotation since it's one shared account token.
+    if CF_ACCOUNT_ID and CF_AI_TOKEN:
+        txt, _ = await _call_openai_compat(CF_WORKERS_AI_BASE, CF_AI_TOKEN, CF_WORKERS_AI_MODEL,
+                                           full_prompt, image_bytes, provider="cf-workers-ai",
+                                           key_label="cf#1")
+        if txt:
+            return txt, "cf-workers-ai"
     return None, ""
 
 def _fix_json_str(t: str) -> str:
@@ -4137,6 +4154,7 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ("openrouter-qwen", OPENROUTER_KEYS),
             ("nemotron", NEMOTRON_KEYS or OPENROUTER_KEYS),
             ("gemma", GEMMA_KEYS or OPENROUTER_KEYS),
+            ("cf-workers-ai", [CF_AI_TOKEN] if (CF_ACCOUNT_ID and CF_AI_TOKEN) else []),
         ]
         total_keys = 0
         key_lines = []
