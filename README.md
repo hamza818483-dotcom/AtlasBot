@@ -42,4 +42,13 @@ When these are set, the bot connects to `api.telegram.org` directly (no
 proxy — Render can reach it without restriction) and registers its webhook
 at `{RENDER_URL}/webhook/{BOT_TOKEN}`. Without these env vars, the bot
 behaves exactly as before (HF + CF proxy mode).
+
+A `.github/workflows/keep-render-awake.yml` workflow pings Render's
+`/health` endpoint every 10 minutes (plus immediately after every push to
+`main`) to keep the free-tier instance from sleeping due to inactivity.
+
+If the CF proxy stops responding while running on HF Space, the bot
+automatically switches its webhook to the Render fallback URL (and
+switches back once the CF proxy recovers) — see
+`cf_proxy_health_check_scheduler()` in `bot.py`.
 # Thu Jun 11 14:42:27 +06 2026
