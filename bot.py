@@ -4466,19 +4466,26 @@ async def cf_proxy_health_check_scheduler() -> None:
                     log_error("[Failover] Could not switch webhook to Render either — both paths unreachable")
 
 async def _switch_webhook(new_url: str) -> bool:
-    """setWebhook চেষ্টা করে প্রথমে সরাসরি api.telegram.org-এ, fail হলে
-    CF proxy দিয়ে (proxy /webhook সেট করার জন্য তখনো কাজ করতে পারে এমনকি
-    bot API call করার জন্য intermittent fail হলেও)। সফল হলে True।"""
+    """setWebhook শুধু CF proxy দিয়েই চেষ্টা করা হয় — HF Space থেকে
+    api.telegram.org-এ সরাসরি call নিশ্চিতভাবে blocked, তাই direct
+    চেষ্টা করার কোনো মানে নেই (সবসময়ই fail করবে)।
+
+    ⚠️ সীমাবদ্ধতা: CF proxy যদি পুরোপুরি unreachable হয় (পুরো
+    pages.dev domain down/DNS fail, শুধু /bot{token} রুটে নির্দিষ্ট
+    সমস্যা না), তাহলে HF Space থেকে Telegram-কে webhook switch করতে
+    বলার কোনো উপায়ই নেই — কারণ proxy-ই একমাত্র outbound path। এই
+    ক্ষেত্রে failover সফল হবে না, এবং bot ম্যানুয়ালি ঠিক করা পর্যন্ত
+    অফলাইন থাকবে। এই ফাংশন শুধু সেই ক্ষেত্রে কাজ করবে যেখানে proxy
+    domain reachable কিন্তু নির্দিষ্ট bot-API রুটে সমস্যা হচ্ছে।"""
     import httpx as _hx
     payload = {"url": new_url, "drop_pending_updates": False, "max_connections": 40}
-    for base in (f"https://api.telegram.org/bot{BOT_TOKEN}", f"{CF_TG_API_URL}/bot{BOT_TOKEN}"):
-        try:
-            async with _hx.AsyncClient(timeout=15) as _c:
-                r = await _c.post(f"{base}/setWebhook", json=payload)
-            if r.status_code == 200 and r.json().get("ok"):
-                return True
-        except Exception as e:
-            log_error(f"[Failover] setWebhook via {base} failed: {e}")
+    try:
+        async with _hx.AsyncClient(timeout=15) as _c:
+            r = await _c.post(f"{CF_TG_API_URL}/bot{BOT_TOKEN}/setWebhook", json=payload)
+        if r.status_code == 200 and r.json().get("ok"):
+            return True
+    except Exception as e:
+        log_error(f"[Failover] setWebhook via CF proxy failed: {e}")
     return False
 
 # ============================================================
