@@ -4406,7 +4406,80 @@ async def setup_bot() -> None:
     asyncio.create_task(daily_reset_scheduler())
     asyncio.create_task(keepalive_task())
     asyncio.create_task(checkin_scheduler())
+    asyncio.create_task(cf_proxy_health_check_scheduler())
     log("✅ Bot setup complete!")
+
+# ============================================================
+# SECTION 22B: CF PROXY HEALTH-CHECK / AUTO-FAILOVER TO RENDER
+# ============================================================
+
+_failover_active = False  # true হলে মানে webhook ইতিমধ্যে Render-এ switch হয়ে আছে
+
+async def cf_proxy_health_check_scheduler() -> None:
+    """
+    HF Space-এ চলাকালীন CF proxy (atlas-bot-proxy-pages.pages.dev) প্রতি
+    ২ মিনিটে health-check (getMe) করে। পরপর কয়েকবার fail হলে webhook
+    automatically Render URL-এ switch করে দেওয়া হয়, যাতে CF proxy down
+    থাকলেও bot চলতে থাকে। CF proxy আবার সুস্থ হলে webhook আবার CF
+    proxy-তে ফিরিয়ে আনা হয়।
+
+    এটা শুধু HF mode-এ চলে (Render-এ নিজেকে fail-over করার দরকার নেই),
+    এবং RENDER_URL configured না থাকলে কিছুই করে না।
+    """
+    global _failover_active
+    if IS_RENDER or not RENDER_URL:
+        return
+    log("🩺 CF proxy health-check scheduler started")
+    consecutive_failures = 0
+    FAILURE_THRESHOLD = 3
+    CHECK_INTERVAL = 120  # সেকেন্ড
+
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL)
+        try:
+            import httpx as _hx
+            async with _hx.AsyncClient(timeout=15) as _c:
+                r = await _c.get(f"{CF_TG_API_URL}/bot{BOT_TOKEN}/getMe")
+            ok = r.status_code == 200 and r.json().get("ok")
+        except Exception as e:
+            ok = False
+            log_error(f"[Failover] CF proxy health-check error: {e}")
+
+        if ok:
+            if consecutive_failures > 0:
+                log("✅ CF proxy recovered")
+            consecutive_failures = 0
+            if _failover_active:
+                # CF proxy আবার সুস্থ — webhook ফিরিয়ে আনা হচ্ছে
+                if await _switch_webhook(f"{CF_WORKER_URL}/webhook/{BOT_TOKEN}"):
+                    _failover_active = False
+                    log("🟢 Webhook switched back to CF proxy")
+        else:
+            consecutive_failures += 1
+            log_error(f"[Failover] CF proxy health-check failed ({consecutive_failures}/{FAILURE_THRESHOLD})")
+            if consecutive_failures >= FAILURE_THRESHOLD and not _failover_active:
+                render_webhook = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+                if await _switch_webhook(render_webhook):
+                    _failover_active = True
+                    log(f"🟡 CF proxy down — webhook switched to Render fallback: {render_webhook}")
+                else:
+                    log_error("[Failover] Could not switch webhook to Render either — both paths unreachable")
+
+async def _switch_webhook(new_url: str) -> bool:
+    """setWebhook চেষ্টা করে প্রথমে সরাসরি api.telegram.org-এ, fail হলে
+    CF proxy দিয়ে (proxy /webhook সেট করার জন্য তখনো কাজ করতে পারে এমনকি
+    bot API call করার জন্য intermittent fail হলেও)। সফল হলে True।"""
+    import httpx as _hx
+    payload = {"url": new_url, "drop_pending_updates": False, "max_connections": 40}
+    for base in (f"https://api.telegram.org/bot{BOT_TOKEN}", f"{CF_TG_API_URL}/bot{BOT_TOKEN}"):
+        try:
+            async with _hx.AsyncClient(timeout=15) as _c:
+                r = await _c.post(f"{base}/setWebhook", json=payload)
+            if r.status_code == 200 and r.json().get("ok"):
+                return True
+        except Exception as e:
+            log_error(f"[Failover] setWebhook via {base} failed: {e}")
+    return False
 
 # ============================================================
 # SECTION 23: WEBHOOK SETUP
