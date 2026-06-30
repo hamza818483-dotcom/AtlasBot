@@ -1,0 +1,25 @@
+name: Keep Render Awake (Backup)
+
+# Primary workflow (keep-render-awake.yml) er offset e (*/7 minute) chole.
+# Eta double-protection: GitHub-er kono ekta scheduled run miss/delay
+# hole, ei workflow ta gap cover kore — duita aladar cron offset thakay
+# kokhono ekshathe miss howar shombhabona kom.
+
+on:
+  schedule:
+    - cron: '*/7 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render health endpoint (backup)
+        run: |
+          URL="https://atlasbot-pvp7.onrender.com/health"
+          echo "Pinging $URL (backup) ..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$URL" || echo "000")
+          echo "Response status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Render health check (backup) returned $STATUS (instance may be sleeping/starting or down)"
+          fi

@@ -1,10 +1,12 @@
 name: Watchdog - Render / HF Space Failover
 
-# Render-i primary bot host. Ei workflow GitHub-er nijer network theke
-# Render-er /health endpoint check kore — kono CF proxy noy, GitHub
-# theke direct check, tai eta independent external safety-net.
+# ⚠️ TEMPORARILY DISABLED (schedule off): HF Space account banned hoye
+# gechhe (2026-06), tai HF fallback target ekhon kaj korbe na. Notun
+# HF Space ready hole ABAR 'schedule' uncomment kore active kora jabe.
+# ততক্ষণ Render-i shudhu primary, double keep-alive ping (5min + 7min)
+# diye sleep prevent kora hocche.
 #
-# Logic:
+# Logic (jokhon abar active kora hobe):
 #   1) Render-er /health endpoint hit kore.
 #   2) Fail hole (down/sleep-theke-jage-na) -> webhook HF Space-e
 #      switch kore (sorasori api.telegram.org-e setWebhook diye,
@@ -14,11 +16,11 @@ name: Watchdog - Render / HF Space Failover
 # Required repo secrets:
 #   BOT_TOKEN     - Telegram bot token
 #   RENDER_URL    - e.g. https://atlasbot-pvp7.onrender.com
-#   HF_SPACE_URL  - e.g. https://hamzahf2-atlasbot.hf.space
+#   HF_SPACE_URL  - e.g. https://hamzahf2-atlasbot.hf.space (notun space banale update koro)
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  # schedule:
+  #   - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:

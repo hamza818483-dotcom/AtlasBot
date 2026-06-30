@@ -1,13 +1,17 @@
-name: Keep Render Awake
+name: Keep Render Awake (Primary)
 
 # Render-er free tier 15 minute nishkriyota-r por sleep hoye jay.
-# Ei workflow proti 10 minute e Render-er /health endpoint ping kore,
+# Ei workflow proti 5 minute e Render-er /health endpoint ping kore,
 # jate bot kokhono sleep na hoy. workflow_dispatch diye chaile manually
 # o run kora jay (jemon push-er por ekbar wake/restart confirm korte).
+#
+# Note: Ekta dwitiyo, independent workflow (keep-render-awake-2.yml)
+# alada offset cron e (*/7) chole — jate GitHub-er kono ekta scheduled
+# run miss/delay hole, onnota gap cover kore (double protection).
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   push:
     branches: [main]
   workflow_dispatch:
