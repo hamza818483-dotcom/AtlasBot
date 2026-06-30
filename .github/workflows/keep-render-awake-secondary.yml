@@ -1,0 +1,33 @@
+name: Keep Render Awake (Secondary)
+
+# Fallback Render account (atlasbot-3tgq) ke o ghum theke bachiye rakhe,
+# jate Render-only API routes (new-exam, solve-pdf, back-to-source,
+# bookmark, leaderboard) er failover always-ready thake.
+
+on:
+  schedule:
+    - cron: '*/6 * * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Secondary Render health endpoint
+        run: |
+          URL="https://atlasbot-3tgq.onrender.com/health"
+          STATUS="000"
+          for i in 1 2; do
+            echo "Pinging $URL (attempt $i) ..."
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$URL" || echo "000")
+            echo "  -> $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              break
+            fi
+            sleep 10
+          done
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Secondary Render health check returned $STATUS after retries"
+          fi
