@@ -8,6 +8,15 @@ name: Keep Render Awake (Primary)
 # Note: Ekta dwitiyo, independent workflow (keep-render-awake-2.yml)
 # alada offset cron e (*/7) chole — jate GitHub-er kono ekta scheduled
 # run miss/delay hole, onnota gap cover kore (double protection).
+#
+# Alert: HF Space banned thaka obosthay auto-failover nei, tai Render
+# 2-bar retry-r porew fail korle owner-ke direct Telegram message
+# pathano hoy (BOT_TOKEN diye, no extra bot lagbe na) — jate manually
+# druto handle kora jay.
+#
+# Required repo secrets (alert-er jonno, na thakle alert skip hobe):
+#   BOT_TOKEN  - Telegram bot token
+#   OWNER_ID   - tomar Telegram numeric user id
 
 on:
   schedule:
@@ -21,11 +30,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render health endpoint
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
         run: |
           URL="https://atlasbot-pvp7.onrender.com/health"
-          echo "Pinging $URL ..."
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$URL" || echo "000")
-          echo "Response status: $STATUS"
+          STATUS="000"
+          for i in 1 2; do
+            echo "Pinging $URL (attempt $i) ..."
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$URL" || echo "000")
+            echo "  -> $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              break
+            fi
+            sleep 10
+          done
+
           if [ "$STATUS" != "200" ]; then
-            echo "::warning::Render health check returned $STATUS (instance may be sleeping/starting or down)"
+            echo "::warning::Render health check returned $STATUS after retries (instance may be sleeping/starting or down)"
+            if [ -n "$BOT_TOKEN" ] && [ -n "$OWNER_ID" ]; then
+              MSG="⚠️ Render bot DOWN ধরা পড়েছে!%0A%0AStatus code: ${STATUS}%0AURL: ${URL}%0A%0AHF Space ban থাকায় auto-failover নেই — manually চেক করুন Render Dashboard এ।"
+              curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${OWNER_ID}" \
+                -d "text=${MSG}" \
+                -d "parse_mode=" || true
+            else
+              echo "::warning::BOT_TOKEN/OWNER_ID secret missing — skipping Telegram alert"
+            fi
           fi
