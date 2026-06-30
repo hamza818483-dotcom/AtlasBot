@@ -1,3 +1,4 @@
+node_modules/
 _worker.js
 bot.py
 exam_server.py
@@ -9,6 +10,8 @@ README.md
 .gitignore
 wrangler.toml
 worker.js
+package.json
+package-lock.json
 *.log
 logs/
 .github/
