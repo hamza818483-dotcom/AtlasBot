@@ -399,16 +399,39 @@ function toggleBm(qi) {
     const btnR = document.getElementById('bmBtnR'+qi);
     if (btnR) btnR.className = 'bm-btn'+(bookmarks[qi]?' active':'');
     showToast(bookmarks[qi]?'🔖 বুকমার্ক করা হয়েছে':'🔖 বুকমার্ক রিমুভ');
+    const payload = {user_id:USER_ID,cache_id:CFG.cacheId,question_index:qi,question_data:questions[qi],topic:CFG.topic||'',page:CFG.page||0};
     fetch('/api/bookmark',{
         method: bookmarks[qi]?'POST':'DELETE',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({user_id:USER_ID,cache_id:CFG.cacheId,question_index:qi,question_data:questions[qi],topic:CFG.topic||'',page:CFG.page||0})
+        body: JSON.stringify(payload)
     }).then(function(r){return r.json();}).then(function(d){
         if(!d.success){showToast('⚠️ '+(d.message||'বুকমার্ক সেভ ব্যর্থ'));bookmarks[qi]=!bookmarks[qi];
             if(btn)btn.className='bm-btn'+(bookmarks[qi]?' active':'');
             if(btnR)btnR.className='bm-btn'+(bookmarks[qi]?' active':'');
         }
-    }).catch(function(){showToast('⚠️ নেটওয়ার্ক ত্রুটি — আবার চেষ্টা করুন');});
+    }).catch(function(){
+        // v4.3: Render unreachable হলে সরাসরি Supabase-এ fallback save
+        saveBookmarkDirectSupabase(qi, payload);
+    });
+}
+
+function saveBookmarkDirectSupabase(qi, payload) {
+    var SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+    var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+    if (bookmarks[qi]) {
+        fetch(SB_URL+'/rest/v1/bookmarks', {
+            method:'POST',
+            headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates'},
+            body: JSON.stringify({user_id:payload.user_id,cache_id:payload.cache_id,question_index:payload.question_index,
+                question_data:JSON.stringify(payload.question_data),topic:payload.topic,page:payload.page,
+                created_at: Math.floor(Date.now()/1000)})
+        }).catch(function(){showToast('⚠️ নেটওয়ার্ক ত্রুটি — আবার চেষ্টা করুন');});
+    } else {
+        fetch(SB_URL+'/rest/v1/bookmarks?user_id=eq.'+payload.user_id+'&cache_id=eq.'+payload.cache_id+'&question_index=eq.'+qi, {
+            method:'DELETE',
+            headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+        }).catch(function(){showToast('⚠️ নেটওয়ার্ক ত্রুটি — আবার চেষ্টা করুন');});
+    }
 }
 
 function openNav() {

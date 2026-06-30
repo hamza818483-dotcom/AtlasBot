@@ -1,26 +1,24 @@
-name: Keep Render Awake (Primary)
+name: Keep Render Awake (Primary) — Layer 1 (:00 offset)
 
 # Render-er free tier 15 minute nishkriyota-r por sleep hoye jay.
-# Ei workflow proti 5 minute e Render-er /health endpoint ping kore,
-# jate bot kokhono sleep na hoy. workflow_dispatch diye chaile manually
-# o run kora jay (jemon push-er por ekbar wake/restart confirm korte).
+# Ei workflow proti 5 minute e (:00, :05, :10...) Render Primary-er
+# /health endpoint ping kore.
 #
-# Note: Ekta dwitiyo, independent workflow (keep-render-awake-2.yml)
-# alada offset cron e (*/7) chole — jate GitHub-er kono ekta scheduled
-# run miss/delay hole, onnota gap cover kore (double protection).
+# v4.3: 3 staggered keep-alive layers (:00 ei file, :02 -2.yml,
+# :04 -secondary.yml) — proti 2 minute-e ekta ping jay, tai 15-min
+# sleep window kokhonoi miss hobe na ekta-o layer delay/queue hole o.
 #
-# Alert: HF Space banned thaka obosthay auto-failover nei, tai Render
-# 2-bar retry-r porew fail korle owner-ke direct Telegram message
-# pathano hoy (BOT_TOKEN diye, no extra bot lagbe na) — jate manually
-# druto handle kora jay.
+# Render Primary genuinely down thakle watchdog-render-failover.yml
+# (proti 5 min) automatically webhook Backup Render-e switch kore dey —
+# eta alada, oi system-er complement, replacement na.
 #
-# Required repo secrets (alert-er jonno, na thakle alert skip hobe):
+# Required repo secrets (owner-alert-er jonno, na thakle alert skip hobe):
 #   BOT_TOKEN  - Telegram bot token
 #   OWNER_ID   - tomar Telegram numeric user id
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/5 * * * *'   # :00, :05, :10...
   push:
     branches: [main]
   workflow_dispatch:

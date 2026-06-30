@@ -6,7 +6,7 @@ name: Keep Render Awake (Secondary)
 
 on:
   schedule:
-    - cron: '*/6 * * * *'
+    - cron: '4-59/5 * * * *'   # :04, :09, :14... (Layer 3 of 3, staggered)
   push:
     branches: [main]
   workflow_dispatch:
