@@ -6,6 +6,8 @@ on:
     paths:
       - 'worker.js'
       - 'wrangler.toml'
+      - 'index.html'
+      - '.assetsignore'
       - '.github/workflows/sync-to-cf.yml'
   workflow_dispatch:
 
