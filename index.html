@@ -354,17 +354,15 @@ function pickOpt(qi, oi) {
     userAnswers[qi] = oi;
     lockQuestion(qi, oi);
     updateHdrProg();
-    setTimeout(() => {
-        const nextIdx = findNextUnanswered(qi);
-        if (nextIdx !== -1) {
-            const nextCard = document.getElementById('qCard' + nextIdx);
-            if (nextCard) {
-                document.querySelectorAll('.mcq-card.current').forEach(c => c.classList.remove('current'));
-                nextCard.classList.add('current');
-                nextCard.scrollIntoView({behavior:'smooth', block:'center'});
-            }
+    const nextIdx = findNextUnanswered(qi);
+    if (nextIdx !== -1) {
+        const nextCard = document.getElementById('qCard' + nextIdx);
+        if (nextCard) {
+            document.querySelectorAll('.mcq-card.current').forEach(c => c.classList.remove('current'));
+            nextCard.classList.add('current');
+            nextCard.scrollIntoView({behavior:'auto', block:'center'});
         }
-    }, 100);
+    }
 }
 
 function findNextUnanswered(fromIdx) {
