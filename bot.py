@@ -4016,7 +4016,9 @@ def _get_active_checkin_users() -> List[int]:
         return []
 
 async def checkin_scheduler() -> None:
-    """Every 6h send a check-in poll to active users. OFF 12am-7am BD."""
+    """Every 6h send a check-in poll to active users. OFF 12am-7am BD.
+    v4.1: last-sent time persisted in `settings` so a process restart
+    (e.g. Render free-tier sleep/wake) doesn't immediately re-fire it."""
     await asyncio.sleep(120)
     log("🔔 Check-in scheduler started")
     while True:
@@ -4027,6 +4029,20 @@ async def checkin_scheduler() -> None:
                 nxt = now.replace(hour=7, minute=0, second=0, microsecond=0)
                 await asyncio.sleep(max(60, (nxt - now).total_seconds()))
                 continue
+
+            last_str = get_setting('checkin_last_sent_at', '')
+            if last_str:
+                try:
+                    last_dt = datetime.fromisoformat(last_str)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=BD_TZ)
+                    elapsed = (now - last_dt).total_seconds()
+                    if elapsed < 6 * 3600:
+                        await asyncio.sleep(max(60, 6 * 3600 - elapsed))
+                        continue
+                except Exception:
+                    pass
+
             users = _get_active_checkin_users()
             log(f"🔔 Check-in: {len(users)} active users")
             for uid in users:
@@ -4043,6 +4059,7 @@ async def checkin_scheduler() -> None:
                     continue
                 except Exception:
                     continue
+            set_setting('checkin_last_sent_at', now.isoformat())
         except Exception as e:
             log_error(f"checkin_scheduler error: {e}")
         await asyncio.sleep(6 * 3600)  # every 6 hours
