@@ -37,6 +37,29 @@ export default {
     }
 
     // ============================================
+    // -0.7. RENDER-ONLY ROUTES — forward to live Render bot.
+    // These need the running Python process (in-memory exam_store,
+    // Gemini regeneration, Playwright PDF render) — CF can't do them.
+    // /api/new-exam        -> regenerate fresh MCQs from source image
+    // /api/solve-pdf*      -> render solved-PDF via Playwright
+    // /api/back-to-source  -> jump back to original Telegram message
+    // /api/bookmark        -> save/remove bookmark
+    // /api/leaderboard/*   -> leaderboard data
+    // /api/save-answers    -> save partial answers
+    // /api/premium-pdf*    -> premium PDF generation
+    // /api/bookmark-pdf    -> bookmarked questions PDF
+    // /api/creative-pdf/*  -> creative PDF generation
+    // ============================================
+    const RENDER_ONLY_PREFIXES = [
+      '/api/new-exam', '/api/solve-pdf', '/api/back-to-source',
+      '/api/bookmark', '/api/leaderboard', '/api/save-answers',
+      '/api/premium-pdf', '/api/creative-pdf',
+    ];
+    if (RENDER_ONLY_PREFIXES.some(p => url.pathname.startsWith(p))) {
+      return await forwardToRender(request, url, env);
+    }
+
+    // ============================================
     // -0.5. INIT DB — creates exam_cache table (run once after deploy)
     // GET /init-db
     // ============================================
@@ -205,6 +228,37 @@ function jsonResp(obj, status = 200) {
   });
 }
 
+// ── Forward Render-only API calls to the live bot, with primary->backup failover ──
+async function forwardToRender(request, url, env) {
+  const RENDER_PRIMARY = "https://atlasbot-pvp7.onrender.com";
+  const RENDER_BACKUP  = "https://atlasbot-3tgq.onrender.com";
+  const targets = [RENDER_PRIMARY, RENDER_BACKUP];
+
+  const bodyBuf = (request.method !== 'GET' && request.method !== 'HEAD')
+    ? await request.arrayBuffer() : undefined;
+
+  for (const base of targets) {
+    try {
+      const targetUrl = base + url.pathname + url.search;
+      const resp = await fetch(targetUrl, {
+        method: request.method,
+        headers: request.headers,
+        body: bodyBuf,
+        signal: AbortSignal.timeout(20000),
+      });
+      if (resp.ok || resp.status < 500) {
+        const newResp = new Response(resp.body, resp);
+        newResp.headers.set('Access-Control-Allow-Origin', '*');
+        return newResp;
+      }
+    } catch (e) {
+      console.warn(`[render-proxy] ${base} failed:`, e.message);
+    }
+  }
+
+  return jsonResp({ ok: false, error: "উভয় Render সার্ভার unreachable — কিছুক্ষণ পর আবার চেষ্টা করুন।" }, 502);
+}
+
 function notFoundHtml() {
   return `<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">
 <title>Exam পাওয়া যায়নি</title>
@@ -322,6 +376,7 @@ async function fetchExamData(cacheId, env) {
   // Layer 4: Render live bot (in-memory exam_store fallback — last resort)
   try {
     const RENDER_URLS = [
+      "https://atlasbot-pvp7.onrender.com",
       "https://atlasbot-3tgq.onrender.com",
     ];
     for (const base of RENDER_URLS) {
@@ -481,4 +536,5 @@ async function handleTgImageProxy(fileId, env) {
     return new Response("image unavailable", { status: 404 });
   }
 }
+
 
