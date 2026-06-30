@@ -4502,12 +4502,31 @@ async def cf_proxy_health_check_scheduler() -> None:
             consecutive_failures += 1
             log_error(f"[Failover] CF proxy health-check failed ({consecutive_failures}/{FAILURE_THRESHOLD})")
             if consecutive_failures >= FAILURE_THRESHOLD and not _failover_active:
-                render_webhook = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-                if await _switch_webhook(render_webhook):
+                if await _trigger_render_self_failover():
                     _failover_active = True
-                    log(f"🟡 CF proxy down — webhook switched to Render fallback: {render_webhook}")
+                    log(f"🟡 CF proxy down — Render switched its own webhook to itself")
                 else:
-                    log_error("[Failover] Could not switch webhook to Render either — both paths unreachable")
+                    log_error("[Failover] Could not reach Render to self-switch webhook — both paths unreachable")
+
+async def _trigger_render_self_failover() -> bool:
+    """v4.1: CF proxy পুরোপুরি down থাকলে HF নিজে Telegram-কে setWebhook
+    বলতে পারে না (proxy-ই একমাত্র outbound path), তাই Render-কে সরাসরি
+    (onrender.com domain, CF-independent) request পাঠিয়ে বলা হয় নিজের
+    webhook নিজে set করে নিতে — Render api.telegram.org সরাসরি reach
+    করতে পারে।"""
+    if not RENDER_URL:
+        return False
+    import httpx as _hx
+    try:
+        async with _hx.AsyncClient(timeout=20) as _c:
+            r = await _c.post(
+                f"{RENDER_URL}/internal/failover-setwebhook",
+                headers={"X-Bot-Token": BOT_TOKEN}
+            )
+        return r.status_code == 200
+    except Exception as e:
+        log_error(f"[Failover] _trigger_render_self_failover failed: {e}")
+        return False
 
 async def _switch_webhook(new_url: str) -> bool:
     """setWebhook শুধু CF proxy দিয়েই চেষ্টা করা হয় — HF Space থেকে
@@ -4565,6 +4584,32 @@ def setup_webhook_route(fastapi_app):
             update = Update.de_json(data, application.bot)
             asyncio.run_coroutine_threadsafe(application.process_update(update), _bot_loop)
         return PlainTextResponse('OK')
+
+    @fastapi_app.post('/internal/failover-setwebhook')
+    async def internal_failover_setwebhook(request: Request):
+        """v4.1: HF Space CF proxy পুরো unreachable হলে (DNS/domain down),
+        HF নিজে Telegram-কে setWebhook বলতে পারে না (CF-ই একমাত্র outbound
+        path)। তাই HF এই endpoint দিয়ে Render instance-কে অনুরোধ করে —
+        Render সরাসরি api.telegram.org reach করতে পারে (HF Space-এর মতো
+        block করা না), তাই সে নিজের webhook URL নিজেই Telegram-এ set করে
+        দেয়। শুধু Render mode-এ চলে, এবং token header দিয়ে protected।"""
+        token = request.headers.get('X-Bot-Token', '')
+        if token != BOT_TOKEN:
+            return PlainTextResponse('Unauthorized', status_code=401)
+        if not (IS_RENDER and RENDER_URL and application):
+            return PlainTextResponse('Not in Render mode', status_code=400)
+        try:
+            render_webhook = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+            await application.bot.set_webhook(
+                max_connections=40, url=render_webhook,
+                allowed_updates=["message", "callback_query", "poll_answer", "poll"],
+                drop_pending_updates=False
+            )
+            log(f"🟡 [Failover] Render self set webhook (requested by HF): {render_webhook}")
+            return PlainTextResponse('OK')
+        except Exception as e:
+            log_error(f"[Failover] internal_failover_setwebhook error: {e}")
+            return PlainTextResponse(f'Failed: {e}', status_code=500)
 
 # ============================================================
 # SECTION 24: MAIN ENTRY POINT
