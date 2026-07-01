@@ -4178,11 +4178,14 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             wh_info = await application.bot.get_webhook_info()
             wh_url = wh_info.url or ""
-            if "onrender.com" in wh_url:
-                if IS_RENDER:
-                    route_label = "🟢 Direct (Render → Telegram সরাসরি, proxy লাগে না)"
-                else:
-                    route_label = "🟡 Render Fallback (CF proxy down, webhook Render-এ switched)"
+            _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+            _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+            if _render_secondary and _render_secondary in wh_url:
+                route_label = "🟠 Render SECONDARY (failover active! Primary down)"
+            elif _render_primary and _render_primary in wh_url:
+                route_label = "🟢 Render PRIMARY (normal)"
+            elif "onrender.com" in wh_url:
+                route_label = "🟡 Render (unknown account)"
             elif wh_url:
                 route_label = "🟢 Cloudflare Proxy (স্বাভাবিক)"
             else:
