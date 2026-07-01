@@ -88,6 +88,14 @@ CF_WORKERS_AI_MODEL = os.getenv("CF_WORKERS_AI_MODEL", "@cf/meta/llama-3.2-11b-v
 CF_WORKERS_AI_BASE = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1" if CF_ACCOUNT_ID else ""
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+# v4.2: Groq is now PRIMARY. Multiple vision-capable Groq models rotated
+# alongside keys — comma-separated env override supported, sane defaults otherwise.
+GROQ_MODELS = [m.strip() for m in os.getenv(
+    "GROQ_MODELS",
+    "meta-llama/llama-4-scout-17b-16e-instruct,meta-llama/llama-4-maverick-17b-128e-instruct"
+).split(",") if m.strip()]
+if GROQ_MODEL not in GROQ_MODELS:
+    GROQ_MODELS.insert(0, GROQ_MODEL)
 
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
 OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
@@ -361,6 +369,37 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
         rotate_gemini_key()
     return None
 
+_groq_key_idx = 0
+_groq_model_idx = 0
+
+async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
+    """v4.2: Groq PRIMARY provider — smooth key rotation x model rotation.
+    On rate-limit/failure, tries the next key; once all keys are exhausted for
+    the current model, rotates to the next model and retries all keys again.
+    This maximizes free-tier throughput across Groq's multiple vision models."""
+    global _groq_key_idx, _groq_model_idx
+    if not GROQ_KEYS:
+        return None
+    models = GROQ_MODELS or [GROQ_MODEL]
+    n_keys = len(GROQ_KEYS)
+    n_models = len(models)
+    for m_attempt in range(n_models):
+        model = models[(_groq_model_idx + m_attempt) % n_models]
+        for k_attempt in range(n_keys):
+            key_i = (_groq_key_idx + k_attempt) % n_keys
+            k = GROQ_KEYS[key_i]
+            klabel = f"groq#{key_i+1}:{model.split('/')[-1][:18]}"
+            txt, exhausted = await _call_openai_compat(
+                "https://api.groq.com/openai/v1", k, model,
+                prompt_text, image_bytes, provider="groq", key_label=klabel
+            )
+            if txt:
+                _groq_key_idx = key_i
+                _groq_model_idx = (_groq_model_idx + m_attempt) % n_models
+                return txt
+        # all keys tried for this model -- rotate model on next outer loop
+    return None
+
 def _b64_data_url(image_bytes: bytes) -> str:
     mime = "image/jpeg"
     if image_bytes[:8].startswith(b"\x89PNG"):
@@ -469,22 +508,21 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     return None, False
 
 async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> Tuple[Optional[str], str]:
-    """v4.1: Full fallback chain. Returns (text, provider_name) or (None, '').
-    Order: Gemini (all keys) → Groq 90B Vision → NVIDIA → OpenRouter Qwen VL → Nemotron → Gemma → Cloudflare Workers AI.
+    """v4.2: Full fallback chain. Returns (text, provider_name) or (None, '').
+    Order: Groq (PRIMARY, all keys x all models rotated) -> Gemini (all keys) ->
+    NVIDIA -> OpenRouter Qwen VL -> Nemotron -> Gemma -> Cloudflare Workers AI.
     Every provider/key with all-key rotation; missing keys silently skipped."""
     full_prompt = prompt_text + STRICT_SOURCE_RULES
-    # 1) Gemini (primary, all keys with rotation) — tracked inside _call_gemini
+    # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
+    txt = await _call_groq(full_prompt, image_bytes)
+    if txt:
+        return txt, "groq"
+    # 2) Gemini (fallback, all keys with rotation) -- tracked inside _call_gemini
     txt = await _call_gemini(full_prompt, image_bytes)
     if txt:
         return txt, "gemini"
     or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
-    # 2) Groq 90B Vision (best accuracy fallback) — all keys rotated
-    for i, k in enumerate(GROQ_KEYS):
-        txt, _ = await _call_openai_compat("https://api.groq.com/openai/v1", k, GROQ_MODEL,
-                                           full_prompt, image_bytes, provider="groq", key_label=f"groq#{i+1}")
-        if txt:
-            return txt, "groq"
-    # 3) NVIDIA Vision — all keys rotated
+    # 3) NVIDIA Vision -- all keys rotated
     for i, k in enumerate(NVIDIA_KEYS):
         txt, _ = await _call_openai_compat("https://integrate.api.nvidia.com/v1", k, NVIDIA_MODEL,
                                            full_prompt, image_bytes, provider="nvidia", key_label=f"nvidia#{i+1}")
