@@ -4900,21 +4900,25 @@ async def main() -> None:
     else:
         webhook_url = f"{CF_WORKER_URL}/webhook/{BOT_TOKEN}"
     try:
-        for attempt in range(4):
-            try:
-                await application.bot.set_webhook(
-                    max_connections=40, url=webhook_url,
-                    allowed_updates=["message", "callback_query", "poll_answer", "poll"],
-                    drop_pending_updates=True
-                )
-                log(f"✅ Webhook set: {webhook_url}")
-                break
-            except Exception as e:
-                wait_s = getattr(e, "retry_after", None) or (2 ** attempt)
-                if attempt == 3:
-                    raise
-                log_error(f"Webhook set attempt {attempt+1} failed ({e}), retrying in {wait_s}s...")
-                await asyncio.sleep(wait_s)
+        current_wh = await application.bot.get_webhook_info()
+        if current_wh.url == webhook_url:
+            log(f"✅ Webhook already correctly set: {webhook_url} (skipping set_webhook call)")
+        else:
+            for attempt in range(4):
+                try:
+                    await application.bot.set_webhook(
+                        max_connections=40, url=webhook_url,
+                        allowed_updates=["message", "callback_query", "poll_answer", "poll"],
+                        drop_pending_updates=True
+                    )
+                    log(f"✅ Webhook set: {webhook_url}")
+                    break
+                except Exception as e:
+                    wait_s = getattr(e, "retry_after", None) or (2 ** attempt)
+                    if attempt == 3:
+                        raise
+                    log_error(f"Webhook set attempt {attempt+1} failed ({e}), retrying in {wait_s}s...")
+                    await asyncio.sleep(wait_s)
     except Exception as e:
         log_error(f"Webhook set failed (will retry on first update): {e}")
     from exam_server import app as fastapi_app
