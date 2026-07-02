@@ -275,14 +275,28 @@ async function _resolveCfgFromApi() {
         } catch(e) {}
     }
     try {
-        const r = await fetch(`${SB_URL}/rest/v1/pdf_mcq_cache?cache_id=eq.${cacheId}&select=*`,
+        const r = await fetch(`${SB_URL}/rest/v1/mcqs?quiz_id=eq.${cacheId}&select=*`,
             { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
         const data = await r.json();
         if (data && data[0]) {
             const b = data[0];
-            const mcqData = typeof b.mcq_data === 'string' ? JSON.parse(b.mcq_data) : b.mcq_data;
-            return { mcqs: mcqData || [], topic: b.topic || 'Special Exam', page: b.page || 1,
+            const mcqData = typeof b.mcqs === 'string' ? JSON.parse(b.mcqs) : b.mcqs;
+            return { mcqs: mcqData || [], topic: 'Special Exam', page: 1,
                 cacheId, imageFileId: b.image_file_id || null, hfSpaceUrl: RENDER,
+                userId: USER_ID, challengerId: 0 };
+        }
+    } catch(e) {}
+    try {
+        const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+        const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+        const r2 = await fetch(`${SB2_URL}/rest/v1/mcqs?quiz_id=eq.${cacheId}&select=*`,
+            { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` } });
+        const data2 = await r2.json();
+        if (data2 && data2[0]) {
+            const b2 = data2[0];
+            const mcqData2 = typeof b2.mcqs === 'string' ? JSON.parse(b2.mcqs) : b2.mcqs;
+            return { mcqs: mcqData2 || [], topic: 'Special Exam', page: 1,
+                cacheId, imageFileId: b2.image_file_id || null, hfSpaceUrl: RENDER,
                 userId: USER_ID, challengerId: 0 };
         }
     } catch(e) {}
