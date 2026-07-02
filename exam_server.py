@@ -1128,7 +1128,14 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
 # ============================================================
 # SECTION 11.5: PDF RENDERER (Playwright / Chromium)
 # ============================================================
+_PDF_RENDER_SEMAPHORE = asyncio.Semaphore(3)  # v4.5: cap concurrent PDF renders so RAM never stacks past Render's 512MB limit
+
 async def _render_pdf(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
+    async with _PDF_RENDER_SEMAPHORE:
+        return await _render_pdf_inner(html, mcqs_ref)
+
+
+async def _render_pdf_inner(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
     print(f"[PDF] _render_pdf called, html_len={len(html)}")
     # v4.5: WeasyPrint is now the PRIMARY renderer — pure HTML/CSS->PDF, no
     # browser process, ~50-100MB RAM vs Chromium's 300-500MB+, so it can't
