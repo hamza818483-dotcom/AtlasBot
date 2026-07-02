@@ -1674,7 +1674,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         # to 2 extra completeness passes: show the AI what's already found
         # and ask it to find anything MISSED, then merge only new questions.
         if prompt_type == 'qbm_extract' and valid_mcqs:
-            for pass_num in range(2):
+            for pass_num in range(4):
                 already_qs = "\n".join(f"- {m.get('question','')[:120]}" for m in valid_mcqs)
                 completeness_prompt = prompt_text + (
                     f"\n\n🔴 COMPLETENESS CHECK (pass {pass_num+1}): এই {len(valid_mcqs)}টি MCQ ইতিমধ্যে "
@@ -1697,7 +1697,8 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
                 valid_mcqs.extend(new_found)
         if len(valid_mcqs) == 0:
             return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
-        valid_mcqs = valid_mcqs[:MAX_MCQ]
+        if prompt_type != 'qbm_extract':
+            valid_mcqs = valid_mcqs[:MAX_MCQ]
         log(f"✅ Generated {len(valid_mcqs)} MCQs from image (prompt: {prompt_type}, provider: {provider})")
         return valid_mcqs, None
 
