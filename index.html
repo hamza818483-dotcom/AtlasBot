@@ -275,6 +275,15 @@ async function _resolveCfgFromApi() {
         } catch(e) {}
     }
     try {
+        const CF_URL = 'https://atlas-bot-proxy.hamza818483.workers.dev';
+        const r = await fetch(`${CF_URL}/api/exam/${cacheId}`, { signal: AbortSignal.timeout(8000) });
+        if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) {
+            return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
+                cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
+                userId: USER_ID, challengerId: 0 };
+        }}
+    } catch(e) {}
+    try {
         const r = await fetch(`${SB_URL}/rest/v1/mcqs?quiz_id=eq.${cacheId}&select=*`,
             { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
         const data = await r.json();
