@@ -56,7 +56,7 @@ jobs:
           # API call avoid korar jonno.
           CURRENT_WH=$(curl -s --max-time 15 \
             "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
-            | grep -o '"url":"[^"]*"' | sed 's/"url":"//;s/"//' || echo "")
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
           echo "Current webhook: $CURRENT_WH"
 
           RENDER_TARGET="${RENDER_URL%/}/webhook/${BOT_TOKEN}"
