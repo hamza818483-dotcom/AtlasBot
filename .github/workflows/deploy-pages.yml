@@ -1,0 +1,41 @@
+name: Deploy Exam Page to GitHub Pages
+
+# Web quiz link-e Render+CF dutai fail korleo page load hoy (static host),
+# er bhitorer JS nijei Render->CF->Supabase try kore. Matches QuizBot pattern.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.html'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare pages dir
+        run: |
+          mkdir -p _site
+          cp index.html _site/exam.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

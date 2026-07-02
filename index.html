@@ -235,18 +235,65 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const CFG = __CFG_JSON__;
+let CFG = null;
+try { CFG = __CFG_JSON__; } catch(e) { CFG = null; }
 const LABELS = ['A','B','C','D'];
 let questions = [], origQs = [];
 let userAnswers = {}, bookmarks = {};
 let submitted = false;
 let totalSec = 30, totalLeft = 30, totalTimer = null;
 let isSecondTimer = false;
-let USER_NAME = '__USER_NAME_SAFE__';
-const USER_ID = (CFG && CFG.userId !== undefined && CFG.userId !== null) ? Number(CFG.userId) : 0;
+let USER_NAME = (function(){ try { return decodeURIComponent('__USER_NAME_SAFE__'); } catch(e){ return 'Student'; } })();
+let USER_ID = (CFG && CFG.userId !== undefined && CFG.userId !== null) ? Number(CFG.userId) : 0;
 
-function init() {
+async function _resolveCfgFromApi() {
+    // v4.3: GitHub Pages e static serve hole __CFG_JSON__ replace hoy na
+    // (server-side templating chara), tokhon URL theke id/uid/name niye
+    // Render->CF->Supabase theke data fetch kora hoy — QuizBot er docs/exam.html
+    // pattern-e, so page kaj kore CF/Render duitai fail na kora porjonto.
+    const qp = new URLSearchParams(location.search);
+    const cacheId = qp.get('id') || qp.get('cache_id') || '';
+    const uid = qp.get('uid') || '0';
+    const name = qp.get('name') || 'Student';
+    if (!cacheId) return null;
+    USER_ID = Number(uid) || 0;
+    USER_NAME = decodeURIComponent(name);
+
+    const RENDER = 'https://atlasbot-pvp7.onrender.com';
+    const RENDER2 = 'https://atlasbot-3tgq.onrender.com';
+    const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+
+    for (const base of [RENDER, RENDER2]) {
+        try {
+            const r = await fetch(`${base}/api/exam/${cacheId}`, { signal: AbortSignal.timeout(8000) });
+            if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) {
+                return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
+                    cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
+                    userId: USER_ID, challengerId: 0 };
+            }}
+        } catch(e) {}
+    }
     try {
+        const r = await fetch(`${SB_URL}/rest/v1/pdf_mcq_cache?cache_id=eq.${cacheId}&select=*`,
+            { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+        const data = await r.json();
+        if (data && data[0]) {
+            const b = data[0];
+            const mcqData = typeof b.mcq_data === 'string' ? JSON.parse(b.mcq_data) : b.mcq_data;
+            return { mcqs: mcqData || [], topic: b.topic || 'Special Exam', page: b.page || 1,
+                cacheId, imageFileId: b.image_file_id || null, hfSpaceUrl: RENDER,
+                userId: USER_ID, challengerId: 0 };
+        }
+    } catch(e) {}
+    return null;
+}
+
+async function init() {
+    try {
+        if (!CFG || !Array.isArray(CFG.mcqs) || CFG.mcqs.length === 0) {
+            CFG = await _resolveCfgFromApi();
+        }
         if (!CFG || !Array.isArray(CFG.mcqs) || CFG.mcqs.length === 0) {
             document.getElementById('modeLoading').innerHTML =
                 '<div class="loading"><div style="font-size:40px;margin-bottom:14px">⚠️</div>' +

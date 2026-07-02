@@ -109,6 +109,9 @@ SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
 HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-pvp7.onrender.com"))
 CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
+# v4.3: GitHub Pages exam link — CF/Render duitai fail korleo page static
+# host theke load hoy, bhitorer JS nijei Render->CF->Supabase try kore.
+GH_PAGES_EXAM_URL = os.environ.get("GH_PAGES_EXAM_URL", "https://hamza818483-dotcom.github.io/AtlasBot/exam.html")
 # Outbound Telegram API calls (base_url/base_file_url) specifically — separate from
 # CF_WORKER_URL because *.workers.dev is blocked from inside the HF Space container.
 # atlas-bot-proxy-pages.pages.dev is a full 1:1 mirror of worker.js (D1 query, webhook,
@@ -1514,7 +1517,7 @@ def mcq_set_keyboard(quiz_id: str, user_id: int = 0) -> List[List[InlineKeyboard
         challenger_param = f"&challenger={challenge['sender_id']}"
     return [
         [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
-        [InlineKeyboardButton("🌐 Web Exam", url=f"{CF_WORKER_URL}/exam/{quiz_id}?uid={user_id}{challenger_param}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+        [InlineKeyboardButton("🌐 Web Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}{challenger_param}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
         [InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data=f"crpdf_k_{quiz_id}"), InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data=f"crpdf_c_{quiz_id}")],
         [share_button(quiz_id, user_id)],
     ]
@@ -1997,7 +2000,7 @@ async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text = f"📦 MCQ Set #{i+1}\n📝 {count} টি প্রশ্ন\n📋 Type: {prompt_name}\n🔄 Source: {mcq_data.get('source_type','text')}\n📅 {created_str}"
             keyboard = [
                 [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
-                [InlineKeyboardButton("🌐 Web Exam", url=f"{CF_WORKER_URL}/exam/{quiz_id}?uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+                [InlineKeyboardButton("🌐 Web Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
                 [InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{quiz_id}"), share_button(quiz_id, user_id)],
             ]
             image_file_id = mcq_data.get('image_file_id')
@@ -3600,7 +3603,7 @@ async def _start_practice_set(message, user, mode: str, count_text: str, mcqs_ov
     emoji = "🚀" if mode in ('random', 'bookmark') else "⚡"
     keyboard = [
         [InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}"), InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}")],
-        [InlineKeyboardButton("🌐 Web Exam", url=f"{CF_WORKER_URL}/exam/{quiz_id}?uid={user_id}")],
+        [InlineKeyboardButton("🌐 Web Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}")],
         [share_button(quiz_id, user_id)],
     ]
     await message.reply_text(
