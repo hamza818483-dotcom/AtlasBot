@@ -898,7 +898,7 @@ async def api_premium_pdf_get(cache_id: str):
         html = generate_premium_pdf_html(mcqs, header_label)
         print(f"[premium-pdf] html built ({len(html)} chars), rendering PDF...")
         try:
-            pdf_bytes = await _render_pdf(html)
+            pdf_bytes = await _render_pdf(html, mcqs)
         except Exception as e:
             print(f"[premium-pdf] render error: {e}")
             traceback.print_exc()
@@ -925,7 +925,7 @@ async def _do_premium_pdf(cache_id: str, header_label: str = "") -> JSONResponse
         header_label = "ATLAS Practice Sheet"
     html = generate_premium_pdf_html(mcqs, header_label)
     try:
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, mcqs)
     except Exception as e:
         print(f"Premium PDF render error: {e}")
         traceback.print_exc()
@@ -1128,7 +1128,7 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
 # ============================================================
 # SECTION 11.5: PDF RENDERER (Playwright / Chromium)
 # ============================================================
-async def _render_pdf(html: str) -> bytes:
+async def _render_pdf(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
     print(f"[PDF] _render_pdf called, html_len={len(html)}, CHROMIUM_PATH={CHROMIUM_PATH}")
     try:
         from playwright.async_api import async_playwright
@@ -1186,7 +1186,85 @@ async def _render_pdf(html: str) -> bytes:
         except Exception as e2:
             print(f"[PDF] subprocess fallback ALSO FAILED: {e2}")
             traceback.print_exc()
-            raise
+            if not mcqs_ref:
+                raise
+            print("[PDF] falling back to reportlab (low-memory, no-Chromium) renderer")
+            try:
+                return _render_pdf_reportlab(mcqs_ref)
+            except Exception as e3:
+                print(f"[PDF] reportlab fallback ALSO FAILED: {e3}")
+                traceback.print_exc()
+                raise
+
+
+def _render_pdf_reportlab(mcqs: List[Dict]) -> bytes:
+    """v4.4: final fallback PDF engine — no Chromium/browser needed at all,
+    so it can never OOM the process. Used only when Playwright AND subprocess
+    Chromium both fail (e.g. Render free-tier out of memory)."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import glob as _glob
+
+    font_name = "Helvetica"
+    for fp in _glob.glob("/usr/share/fonts/**/NotoSansBengali*.ttf", recursive=True) + \
+              _glob.glob("/usr/share/fonts/**/NotoSans-Regular.ttf", recursive=True):
+        try:
+            pdfmetrics.registerFont(TTFont("ATLASFont", fp))
+            font_name = "ATLASFont"
+            break
+        except Exception:
+            continue
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+    margin = 15 * mm
+    y = height - margin
+    line_h = 6.5 * mm
+    c.setFont(font_name, 11)
+    c.drawString(margin, y, "ATLAS Practice Sheet")
+    y -= line_h * 1.5
+
+    def _wrap(text: str, max_chars: int = 85):
+        text = text or ""
+        out, cur = [], ""
+        for word in text.split(" "):
+            if len(cur) + len(word) + 1 > max_chars:
+                out.append(cur)
+                cur = word
+            else:
+                cur = (cur + " " + word).strip()
+        if cur:
+            out.append(cur)
+        return out or [""]
+
+    c.setFont(font_name, 9)
+    for i, mcq in enumerate(mcqs, 1):
+        q = mcq.get("question", "")
+        opts = mcq.get("options", [])
+        for line in _wrap(f"{i}. {q}"):
+            if y < margin + line_h:
+                c.showPage()
+                c.setFont(font_name, 9)
+                y = height - margin
+            c.drawString(margin, y, line)
+            y -= line_h
+        labels = ["A", "B", "C", "D"]
+        for j, opt in enumerate(opts[:4]):
+            for line in _wrap(f"   {labels[j]}) {opt}", 80):
+                if y < margin + line_h:
+                    c.showPage()
+                    c.setFont(font_name, 9)
+                    y = height - margin
+                c.drawString(margin, y, line)
+                y -= line_h
+        y -= line_h * 0.5
+    c.showPage()
+    c.save()
+    return buf.getvalue()
 
 
 async def _render_pdf_subprocess(html: str) -> bytes:
