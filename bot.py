@@ -2692,6 +2692,28 @@ async def handle_creative_from_pending(query, ctype_short: str, context: Context
                        image_file_id=image_file_id, chat_id=query.message.chat_id, message_id=query.message.message_id)
     await handle_creative_pdf(query, quiz_id, ctype)
 
+def _normalize_qbm_answers(mcqs: List[Dict]) -> List[Dict]:
+    """v4.3 fix: qbm_extract prompt outputs answer as a LETTER string ('A'/'B'/'C'/'D'),
+    but poll/quiz solve expects an integer option index. Without this conversion,
+    int('A') raises ValueError and silently defaults to 0 (always shows option A as
+    correct, ignoring the actual answer from the page). Converts letter -> index,
+    and safely passes through already-integer answers untouched."""
+    letter_map = {'A': 0, 'B': 1, 'C': 2, 'D': 3, 'ক': 0, 'খ': 1, 'গ': 2, 'ঘ': 3}
+    out = []
+    for m in mcqs:
+        m2 = dict(m)
+        ans = m2.get('answer', 0)
+        if isinstance(ans, str):
+            ans_clean = ans.strip().upper().rstrip('.):')
+            m2['answer'] = letter_map.get(ans_clean, 0)
+        else:
+            try:
+                m2['answer'] = int(ans)
+            except (TypeError, ValueError):
+                m2['answer'] = 0
+        out.append(m2)
+    return out
+
 async def handle_qbm_extract(query, quiz_id: str, user) -> None:
     """v4.3: 'শুধুমাত্র পেইজে থাকা MCQ' — QuizBot's /qbm logic ported: only
     extracts existing MCQs already printed on the page, never generates
@@ -2722,7 +2744,7 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
         )
         return
 
-    new_mcqs = apply_tag_exp(clean_mcq_options(mcqs))
+    new_mcqs = apply_tag_exp(clean_mcq_options(_normalize_qbm_answers(mcqs)))
     new_quiz_id = await save_mcq(
         user_id=user.id, mcqs=new_mcqs, source_type='image',
         prompt_type='qbm_extract', image_file_id=image_file_id,
