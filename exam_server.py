@@ -1445,104 +1445,77 @@ html,body{{font-family:'Noto Sans Bengali','Inter',sans-serif;color:#111;backgro
 </style></head><body>{pages_html}</body></html>'''
 
 def generate_premium_pdf_html(mcqs: List[Dict], header_label: str = "ATLAS Practice Sheet") -> str:
-    """ATLAS Practice Sheet — 2-column, full A4 page fill (auto density per page)."""
-    labels = ["a", "b", "c", "d"]
-
-    def strip_prefix(opt: str, oi: int) -> str:
-        clean = opt
-        for pfx in [f"{labels[oi].upper()}) ", f"{labels[oi].upper()})", f"({labels[oi]}) ",
-                    f"({labels[oi]})", f"{labels[oi]}) ", f"{labels[oi]})"]:
-            if clean.startswith(pfx):
-                return clean[len(pfx):].strip()
-        return clean
-
-    pages_html = ""
+    """ATLAS Premium PDF — same 2-column boxed-card style as QuizBot's /sheet command."""
+    labels = ["A", "B", "C", "D"]
     PER_PAGE = 10
     total_pages = max(1, (len(mcqs) + PER_PAGE - 1) // PER_PAGE)
+    pages_html = ""
 
     for p_i, page_idx in enumerate(range(0, len(mcqs), PER_PAGE)):
         chunk = mcqs[page_idx:page_idx + PER_PAGE]
-        n = len(chunk)
-        # Auto density: fewer questions on a page -> bigger fonts/gaps to fill A4
-        if n <= 4:
-            qfs, ofs, gap, qgap = 15.5, 14.5, "26px", "20px"
-        elif n <= 6:
-            qfs, ofs, gap, qgap = 14, 13, "20px", "16px"
-        elif n <= 8:
-            qfs, ofs, gap, qgap = 12.5, 12, "15px", "13px"
-        else:
-            qfs, ofs, gap, qgap = 11.5, 11, "11px", "11px"
-
-        half = (n + 1) // 2
-        left_col = chunk[:half]
-        right_col = chunk[half:]
-
-        def render_q(q, num):
-            q_text = _esc(q.get("question", ""))
-            opts = q.get("options", [])[:4]
-            opts_html = ""
-            for oi, opt in enumerate(opts):
-                clean = _esc(strip_prefix(opt, oi))
-                opts_html += f'<div class="opt-line">({labels[oi]}) {clean}</div>'
-            return (f'<div class="q-block" style="margin-bottom:{qgap};">'
-                    f'<div class="q-text"><span class="q-num">{num}.</span> {q_text}</div>'
-                    f'<div class="opts-grid" style="gap:4px {gap};">{opts_html}</div></div>')
-
-        left_html = "".join(render_q(q, page_idx + i + 1) for i, q in enumerate(left_col))
-        right_html = "".join(render_q(q, page_idx + half + i + 1) for i, q in enumerate(right_col))
-
-        ans_cells_q = "".join(f'<td>{page_idx + i + 1}</td>' for i in range(n))
-        ans_cells_a = ""
-        for q in chunk:
+        items = ""
+        for i, q in enumerate(chunk):
             idx = q.get("answer", 0)
             if isinstance(idx, str):
                 idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(idx.upper(), 0)
-            ans_cells_a += f'<td>{"abcd"[idx] if 0 <= idx <= 3 else "a"}</td>'
+            try:
+                ci = int(idx)
+            except (TypeError, ValueError):
+                ci = 0
+            if ci < 0 or ci > 3:
+                ci = 0
+            opts = q.get("options", [])[:4]
+            ans_label = labels[ci] if ci < len(opts) else "A"
+            exp = _esc(q.get("explanation", ""))
+
+            opts_html = ""
+            for j, opt in enumerate(opts):
+                label = labels[j] if j < 4 else str(j + 1)
+                cls = "opt correct" if j == ci else "opt"
+                mark = " ✓" if j == ci else ""
+                opts_html += f'<div class="{cls}">({label}) {_esc(opt)}{mark}</div>'
+
+            items += f'''<div class="card">
+  <div class="qno">{page_idx + i + 1:02d}.</div>
+  <div class="qtxt">{_esc(q.get('question',''))}</div>
+  <div class="opts-wrap">{opts_html}</div>
+  <div class="ans-row"><span class="ans-badge">['{ans_label}']</span></div>
+  {f'<div class="exp-box"><b>ব্যাখ্যা:</b> {exp}</div>' if exp else ''}
+</div>'''
 
         pb = 'page-break-after:always;' if (p_i + 1) < total_pages else ''
-        pages_html += f'''
-        <div class="page" style="{pb}font-size:{qfs}px;">
-            <div class="header-bar">{_esc(header_label)}</div>
-            <div class="columns">
-                <div class="col">{left_html}</div>
-                <div class="divider-v"></div>
-                <div class="col">{right_html}</div>
-            </div>
-            <div class="answer-section">
-                <div class="answer-title">সঠিক উত্তর যাচাই কর :)</div>
-                <table class="answer-table">
-                    <tr class="th-row"><th>প্রশ্ন</th>{ans_cells_q}</tr>
-                    <tr class="td-row"><th>উত্তর</th>{ans_cells_a}</tr>
-                </table>
-            </div>
-            <div class="footer">🌐 atlascourses.com · ▶ youtube.com/@atlasprep</div>
-        </div>'''
+        pages_html += f'<div class="page" style="{pb}"><div class="grid">{items}</div></div>'
 
     return f'''<!DOCTYPE html>
-<html lang="bn"><head><meta charset="UTF-8">
+<html><head><meta charset="UTF-8">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700&family=Inter:wght@400;600;700&display=swap');
-*{{margin:0;padding:0;box-sizing:border-box}}
-html,body{{font-family:'Noto Sans Bengali','Inter',sans-serif;color:#111;background:#fff;line-height:1.55;}}
-.page{{padding:10mm 9mm;min-height:297mm;display:flex;flex-direction:column;}}
-.header-bar{{background:linear-gradient(135deg,#d4f1f9,#cfe9ff);border:1.5px solid #9cc8db;border-radius:8px;text-align:center;padding:9px 0;margin-bottom:16px;font-weight:700;font-size:16px;color:#0a3d5c;font-family:'Inter','Noto Sans Bengali',sans-serif;letter-spacing:.3px;}}
-.columns{{display:flex;gap:0;flex:1;}}
-.col{{flex:1;min-width:0;padding:0 10px;}}
-.divider-v{{width:1.5px;background:linear-gradient(#bbb,#ddd,#bbb);margin:0 2px;}}
-.q-block{{page-break-inside:avoid;}}
-.q-text{{font-weight:600;line-height:1.55;margin-bottom:5px;color:#15233a;}}
-.q-num{{font-weight:800;color:#0a3d5c;}}
-.opts-grid{{display:grid;grid-template-columns:1fr 1fr;padding-left:10px;}}
-.opt-line{{font-size:0.92em;line-height:1.5;white-space:normal;color:#222;}}
-.answer-section{{margin-top:auto;padding-top:14px;page-break-inside:avoid;}}
-.answer-title{{text-align:center;font-weight:700;font-size:14px;margin-bottom:7px;color:#0a3d5c;}}
-.answer-table{{width:100%;border-collapse:collapse;border:1.5px solid #333;}}
-.answer-table th,.answer-table td{{border:1px solid #555;text-align:center;padding:6px 4px;font-size:12px;}}
-.answer-table .th-row th,.answer-table .td-row th{{background:#e8eef5;font-weight:700;}}
-.answer-table .td-row td{{font-weight:800;font-family:'Inter',sans-serif;color:#0a3d5c;}}
-.footer{{text-align:center;font-size:9.5px;color:#777;margin-top:10px;padding-top:5px;border-top:1px solid #ddd;}}
-@page{{size:A4;margin:0;}}
-</style></head><body>{pages_html}</body></html>'''
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap');
+@page{{size:A4;margin:8mm 10mm;}}
+*{{margin:0;padding:0;box-sizing:border-box;}}
+body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:11px;}}
+.hdr{{text-align:center;padding:10px 14px;background:#1a237e;color:#fff;margin-bottom:12px;border-radius:8px;}}
+.hdr h1{{font-size:16px;font-weight:800;}}
+.hdr .sub{{font-size:11px;color:#c5cae9;margin-top:3px;}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
+.card{{background:#fff;border:1.5px solid #c5cae9;border-radius:8px;padding:9px 10px;break-inside:avoid;page-break-inside:avoid;}}
+.qno{{font-size:10px;font-weight:800;color:#1a237e;margin-bottom:3px;}}
+.qtxt{{font-size:12px;font-weight:700;color:#111;margin-bottom:7px;line-height:1.6;}}
+.opts-wrap{{display:flex;flex-direction:column;gap:3px;margin-bottom:7px;}}
+.opt{{font-size:11px;color:#333;padding:2px 6px;border-radius:4px;border:1px solid #e0e0e0;line-height:1.5;}}
+.opt.correct{{background:#e8f5e9;border-color:#43a047;color:#1b5e20;font-weight:700;}}
+.ans-row{{margin-bottom:4px;}}
+.ans-badge{{font-size:10px;font-weight:800;color:#1b5e20;background:#f1f8e9;border:1px solid #81c784;border-radius:4px;padding:1px 7px;}}
+.exp-box{{font-size:10.5px;color:#1a237e;background:#e8eaf6;border-left:3px solid #3949ab;padding:5px 7px;border-radius:0 5px 5px 0;line-height:1.55;}}
+.footer{{text-align:center;font-size:9px;color:#9e9e9e;margin-top:12px;}}
+</style></head>
+<body>
+<div class="hdr">
+  <h1>📋 {_esc(header_label)}</h1>
+  <div class="sub">📝 {len(mcqs)} MCQ</div>
+</div>
+{pages_html}
+<div class="footer">🚀 ATLAS Special MCQ System — atlascourses.com</div>
+</body></html>'''
 
 
 def generate_creative_pdf_html(items: List[Dict], header_label: str, ctype: str) -> str:
