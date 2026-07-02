@@ -1668,31 +1668,41 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
-        # v4.4 FIX: qbm_extract must capture 100% of the page's existing MCQs
-        # (e.g. page has 34, must extract all 34, not stop at 22). Generic
-        # MIN_MCQ retry above doesn't catch this since 22 > MIN_MCQ. Run up
-        # to 2 extra completeness passes: show the AI what's already found
-        # and ask it to find anything MISSED, then merge only new questions.
+        # v4.6 FIX: qbm_extract must capture 100% of the page's existing MCQs
+        # (e.g. page has 34, must extract all 34, not stop at 22). Requires
+        # 2 CONSECUTIVE clean passes (no new MCQ found) before declaring done —
+        # a single early "nothing missed" pass is not trusted, since the model
+        # can falsely claim completeness on one pass. Up to 5 passes total.
         if prompt_type == 'qbm_extract' and valid_mcqs:
-            for pass_num in range(4):
+            clean_streak = 0
+            for pass_num in range(5):
+                if clean_streak >= 2:
+                    break
                 already_qs = "\n".join(f"- {m.get('question','')[:120]}" for m in valid_mcqs)
                 completeness_prompt = prompt_text + (
-                    f"\n\n🔴 COMPLETENESS CHECK (pass {pass_num+1}): এই {len(valid_mcqs)}টি MCQ ইতিমধ্যে "
-                    f"extract করা হয়েছে:\n{already_qs}\n\nএই পেইজটি আবার carefully scan করো — উপরের লিস্টে "
-                    "নেই এমন কোনো MCQ (question+options) কি বাদ পড়েছে? যদি বাদ পড়া কোনো MCQ থাকে, "
-                    "শুধুমাত্র সেই বাদ পড়া MCQ গুলো JSON array তে রিটার্ন করো (আগেরগুলো আবার দিও না)। "
-                    "যদি কিছুই বাদ না পড়ে থাকে, খালি array [] রিটার্ন করো।"
+                    f"\n\n🔴 COMPLETENESS RE-CHECK (pass {pass_num+1}, need 2 clean passes in a row to finish): "
+                    f"এই {len(valid_mcqs)}টি MCQ ইতিমধ্যে extract করা হয়েছে:\n{already_qs}\n\n"
+                    "এই পেইজটি একদম শুরু থেকে আবার, নতুনভাবে, carefully পুরোটা scan করো — "
+                    "উপরের লিস্টে নেই এমন কোনো MCQ (question+options) কি বাদ পড়েছে? পেইজের একদম "
+                    "উপর থেকে নিচ পর্যন্ত প্রতিটা প্রশ্ন আবার চেক করো, বিশেষ করে পেইজের একদম উপরে/নিচে/কোণায় "
+                    "থাকা MCQ গুলো মিস হয়ে যাওয়া সবচেয়ে বেশি হয় — সেগুলোতে বিশেষ নজর দাও। যদি বাদ পড়া কোনো "
+                    "MCQ থাকে, শুধুমাত্র সেই বাদ পড়া MCQ গুলো JSON array তে রিটার্ন করো (আগেরগুলো আবার দিও না)। "
+                    "যদি সত্যিই কিছুই বাদ না পড়ে থাকে, খালি array [] রিটার্ন করো।"
                 )
                 crt, crp = await ai_generate(completeness_prompt, image_bytes)
                 if not crt:
-                    break
+                    clean_streak += 1
+                    continue
                 missed = parse_mcq_json(crt)
                 if not missed:
-                    break
+                    clean_streak += 1
+                    continue
                 existing_norm = {re.sub(r'\s+', ' ', m.get('question', '')).strip().lower() for m in valid_mcqs}
                 new_found = [m for m in missed if re.sub(r'\s+', ' ', m.get('question', '')).strip().lower() not in existing_norm]
                 if not new_found:
-                    break
+                    clean_streak += 1
+                    continue
+                clean_streak = 0
                 log(f"📌 [QBM] Completeness pass {pass_num+1} found {len(new_found)} missed MCQs")
                 valid_mcqs.extend(new_found)
         if len(valid_mcqs) == 0:
@@ -2798,15 +2808,20 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
         "📌 **পেইজে থাকা MCQ খোঁজা হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন...",
         parse_mode=ParseMode.MARKDOWN
     )
+    async def _edit_wait(t):
+        await wait_msg.edit_text(t)
+    prog_task = asyncio.create_task(live_progress_task(_edit_wait, "Page", total_eta=12))
     try:
         file = await application.bot.get_file(image_file_id)
         image_bytes = bytes(await file.download_as_bytearray())
     except Exception as e:
+        prog_task.cancel()
         log_error(f"QBM image download failed: {e}")
         await wait_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে।")
         return
 
     mcqs, error = await generate_mcq_from_image(image_bytes, 'qbm_extract')
+    prog_task.cancel()
     if error or not mcqs:
         await wait_msg.edit_text(
             "📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি।\n\n"
