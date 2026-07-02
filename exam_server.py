@@ -1128,7 +1128,7 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
 # ============================================================
 # SECTION 11.5: PDF RENDERER (Playwright / Chromium)
 # ============================================================
-_PDF_RENDER_SEMAPHORE = asyncio.Semaphore(3)  # v4.5: cap concurrent PDF renders so RAM never stacks past Render's 512MB limit
+_PDF_RENDER_SEMAPHORE = asyncio.Semaphore(1)  # v4.5: ~200MB/PDF render + bot/DB baseline on 512MB Render — only 1 render at a time is safe; others queue and run right after
 
 async def _render_pdf(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
     async with _PDF_RENDER_SEMAPHORE:
