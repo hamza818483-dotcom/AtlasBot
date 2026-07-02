@@ -1129,6 +1129,31 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
 # SECTION 11.5: PDF RENDERER (Playwright / Chromium)
 # ============================================================
 async def _render_pdf(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
+    print(f"[PDF] _render_pdf called, html_len={len(html)}")
+    # v4.5: WeasyPrint is now the PRIMARY renderer — pure HTML/CSS->PDF, no
+    # browser process, ~50-100MB RAM vs Chromium's 300-500MB+, so it can't
+    # OOM-crash the whole Render process. Falls back to Chromium/reportlab
+    # only if WeasyPrint itself fails (e.g. unsupported CSS feature).
+    try:
+        pdf_bytes = await asyncio.wait_for(
+            asyncio.to_thread(_render_pdf_weasyprint, html), timeout=30
+        )
+        print(f"[PDF] weasyprint rendered OK, size={len(pdf_bytes)} bytes")
+        return pdf_bytes
+    except Exception as e:
+        print(f"[PDF] weasyprint FAILED ({type(e).__name__}: {e}) — falling back to Chromium")
+        traceback.print_exc()
+    return await _render_pdf_chromium(html, mcqs_ref)
+
+
+def _render_pdf_weasyprint(html: str) -> bytes:
+    from weasyprint import HTML
+    buf = BytesIO()
+    HTML(string=html).write_pdf(buf)
+    return buf.getvalue()
+
+
+async def _render_pdf_chromium(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
     print(f"[PDF] _render_pdf called, html_len={len(html)}, CHROMIUM_PATH={CHROMIUM_PATH}")
     try:
         from playwright.async_api import async_playwright
