@@ -770,7 +770,8 @@ PROMPT_MAP = {
         "YOU ARE A STRICT MCQ EXTRACTOR IN A PERMANENT SPECIAL MODE. ONLY EXTRACT MCQs THAT "
         "ALREADY EXIST ON THIS PAGE. NEVER INVENT NEW QUESTIONS.\n\n"
         "FORBIDDEN: never create a new question; never add extra MCQs beyond what exists; "
-        "never skip any existing MCQ (extract ALL, serially, in order); never guess an answer "
+        "never skip any existing MCQ (extract ALL, serially, in order) — if the page has 34 MCQs, "
+        "the output MUST contain all 34, not 22, not 30 — MISSING EVEN ONE IS A FAILURE; never guess an answer "
         "without real evidence; never modify question/option wording (only remove numbering). "
         "If zero MCQs exist on the page -> return exactly []. If N MCQs exist -> return exactly N.\n\n"
         "EXTRACTION: extract ALL MCQs already on the page -- Bangla/English/mixed, any font, "
@@ -1563,7 +1564,6 @@ def mcq_set_keyboard(quiz_id: str, user_id: int = 0) -> List[List[InlineKeyboard
     return [
         [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
         [InlineKeyboardButton("🌐 Web Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}{challenger_param}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
-        [InlineKeyboardButton("📌 শুধুমাত্র পেইজে থাকা MCQ", callback_data=f"qbm_{quiz_id}")],
         [share_button(quiz_id, user_id)],
     ]
 
@@ -1668,6 +1668,33 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
+        # v4.4 FIX: qbm_extract must capture 100% of the page's existing MCQs
+        # (e.g. page has 34, must extract all 34, not stop at 22). Generic
+        # MIN_MCQ retry above doesn't catch this since 22 > MIN_MCQ. Run up
+        # to 2 extra completeness passes: show the AI what's already found
+        # and ask it to find anything MISSED, then merge only new questions.
+        if prompt_type == 'qbm_extract' and valid_mcqs:
+            for pass_num in range(2):
+                already_qs = "\n".join(f"- {m.get('question','')[:120]}" for m in valid_mcqs)
+                completeness_prompt = prompt_text + (
+                    f"\n\n🔴 COMPLETENESS CHECK (pass {pass_num+1}): এই {len(valid_mcqs)}টি MCQ ইতিমধ্যে "
+                    f"extract করা হয়েছে:\n{already_qs}\n\nএই পেইজটি আবার carefully scan করো — উপরের লিস্টে "
+                    "নেই এমন কোনো MCQ (question+options) কি বাদ পড়েছে? যদি বাদ পড়া কোনো MCQ থাকে, "
+                    "শুধুমাত্র সেই বাদ পড়া MCQ গুলো JSON array তে রিটার্ন করো (আগেরগুলো আবার দিও না)। "
+                    "যদি কিছুই বাদ না পড়ে থাকে, খালি array [] রিটার্ন করো।"
+                )
+                crt, crp = await ai_generate(completeness_prompt, image_bytes)
+                if not crt:
+                    break
+                missed = parse_mcq_json(crt)
+                if not missed:
+                    break
+                existing_norm = {re.sub(r'\s+', ' ', m.get('question', '')).strip().lower() for m in valid_mcqs}
+                new_found = [m for m in missed if re.sub(r'\s+', ' ', m.get('question', '')).strip().lower() not in existing_norm]
+                if not new_found:
+                    break
+                log(f"📌 [QBM] Completeness pass {pass_num+1} found {len(new_found)} missed MCQs")
+                valid_mcqs.extend(new_found)
         if len(valid_mcqs) == 0:
             return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
         valid_mcqs = valid_mcqs[:MAX_MCQ]
@@ -2668,6 +2695,15 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
     try:
         mcqs, error = await generate_mcq_from_image(image_bytes, prompt_type)
         prog_task.cancel()
+        if prompt_type == 'qbm_extract' and (error or not mcqs):
+            await query.message.edit_caption(
+                caption="📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি।\n\n"
+                        "💡 এই অপশনটি শুধু পেইজে already ছাপানো MCQ খুঁজে বের করে — "
+                        "নতুন MCQ বানায় না। এই পেইজে যদি সত্যিই কোনো MCQ ছাপা না থাকে, "
+                        "তাহলে অন্য কোনো টাইপ (Medical Standard, সত্য-মিথ্যা ইত্যাদি) সিলেক্ট করে "
+                        "নতুন MCQ বানিয়ে নিতে পারেন।"
+            )
+            return
         if error:
             await query.message.edit_caption(caption=f"❌ {error}")
             return
@@ -2772,9 +2808,10 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
     mcqs, error = await generate_mcq_from_image(image_bytes, 'qbm_extract')
     if error or not mcqs:
         await wait_msg.edit_text(
-            "❌ এই পেইজে কোনো তৈরি MCQ পাওয়া যায়নি।\n\n"
-            "💡 এই বাটন শুধু পেইজে already থাকা MCQ (প্রশ্ন+অপশন) খুঁজে বের করে — "
-            "নতুন MCQ তৈরি করে না। নতুন MCQ বানাতে অন্য বাটন ব্যবহার করুন।"
+            "📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি।\n\n"
+            "💡 এই অপশনটি শুধু পেইজে already ছাপানো MCQ খুঁজে বের করে — "
+            "নতুন MCQ বানায় না। এই পেইজে যদি সত্যিই কোনো MCQ ছাপা না থাকে, "
+            "তাহলে অন্য কোনো টাইপ সিলেক্ট করে নতুন MCQ বানিয়ে নিতে পারেন।"
         )
         return
 
