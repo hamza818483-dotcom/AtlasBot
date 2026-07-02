@@ -2732,10 +2732,14 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
         await wait_msg.delete()
     except Exception:
         pass
+    kb = [
+        [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{new_quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{new_quiz_id}")],
+        [InlineKeyboardButton("🌐 Web Exam", url=f"{GH_PAGES_EXAM_URL}?id={new_quiz_id}&uid={user.id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{new_quiz_id}")],
+    ]
     await query.message.reply_text(
         f"✅ **পেইজে থাকা {len(new_mcqs)}টি MCQ পাওয়া গেছে!**",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(mcq_set_keyboard(new_quiz_id, user.id))
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def handle_creative_pdf(query, quiz_id: str, ctype: str) -> None:
