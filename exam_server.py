@@ -1133,21 +1133,39 @@ async def _render_pdf(html: str) -> bytes:
     try:
         from playwright.async_api import async_playwright
         print("[PDF] playwright import OK")
-        flags = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-                 "--single-process", "--headless=new"]
+        # v4.4: leaner memory footprint flags — Render free tier OOMs easily with
+        # heavy Chromium, which crashes the WHOLE process (not just this request),
+        # causing Render's edge to return a raw 502 HTML page for unrelated requests.
+        flags = [
+            "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+            "--single-process", "--headless=new",
+            "--disable-extensions", "--disable-background-networking",
+            "--disable-default-apps", "--disable-sync", "--disable-translate",
+            "--metrics-recording-only", "--mute-audio", "--no-first-run",
+            "--js-flags=--max-old-space-size=256",
+        ]
         async with async_playwright() as p:
             print("[PDF] launching chromium...")
-            browser = await p.chromium.launch(executable_path=CHROMIUM_PATH, args=flags)
+            browser = await asyncio.wait_for(
+                p.chromium.launch(executable_path=CHROMIUM_PATH, args=flags), timeout=30
+            )
             print("[PDF] chromium launched OK")
             try:
                 page = await browser.new_page()
                 print("[PDF] new_page OK, setting content...")
-                await page.set_content(html, wait_until="networkidle")
+                # v4.4: hard timeout on the whole render pipeline — a hung page
+                # (network wait, huge content) must never be allowed to hang the
+                # process indefinitely and take the server down with it.
+                await asyncio.wait_for(
+                    page.set_content(html, wait_until="networkidle"), timeout=25
+                )
                 print("[PDF] set_content OK")
                 await page.wait_for_timeout(600)
-                pdf = await page.pdf(
-                    format="A4", print_background=True,
-                    margin={"top": "0mm", "bottom": "0mm", "left": "0mm", "right": "0mm"}
+                pdf = await asyncio.wait_for(
+                    page.pdf(
+                        format="A4", print_background=True,
+                        margin={"top": "0mm", "bottom": "0mm", "left": "0mm", "right": "0mm"}
+                    ), timeout=30
                 )
                 print(f"[PDF] pdf rendered OK, size={len(pdf)} bytes")
                 return pdf
@@ -1156,34 +1174,46 @@ async def _render_pdf(html: str) -> bytes:
                 print("[PDF] browser closed")
     except ImportError as ie:
         print(f"[PDF] playwright ImportError: {ie} — falling back to subprocess Chromium")
-        import subprocess, tempfile, os as _os
-        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode='w', encoding='utf-8') as f:
-            f.write(html)
-            html_path = f.name
-        pdf_path = html_path.replace(".html", ".pdf")
+        return await _render_pdf_subprocess(html)
+    except Exception as e:
+        # v4.4: any playwright failure (timeout, crash, OOM signal) now also
+        # falls back to the lighter subprocess renderer instead of raising
+        # straight to a 500/crash — matches the ImportError fallback behavior.
+        print(f"[PDF] playwright render FAILED ({type(e).__name__}: {e}) — falling back to subprocess Chromium")
+        traceback.print_exc()
         try:
-            print(f"[PDF] running subprocess chromium: {CHROMIUM_PATH}")
-            subprocess.run([
-                CHROMIUM_PATH, "--headless", "--no-sandbox",
-                "--disable-gpu", "--disable-dev-shm-usage",
-                f"--print-to-pdf={pdf_path}", html_path
-            ], timeout=60, check=True)
-            print("[PDF] subprocess chromium done")
-            with open(pdf_path, 'rb') as f:
-                return f.read()
-        except Exception as se:
-            print(f"[PDF] subprocess chromium FAILED: {se}")
+            return await _render_pdf_subprocess(html)
+        except Exception as e2:
+            print(f"[PDF] subprocess fallback ALSO FAILED: {e2}")
             traceback.print_exc()
             raise
-        finally:
-            try: _os.unlink(html_path)
-            except: pass
-            try: _os.unlink(pdf_path)
-            except: pass
-    except Exception as e:
-        print(f"[PDF] UNEXPECTED ERROR in _render_pdf: {type(e).__name__}: {e}")
+
+
+async def _render_pdf_subprocess(html: str) -> bytes:
+    import subprocess, tempfile, os as _os
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode='w', encoding='utf-8') as f:
+        f.write(html)
+        html_path = f.name
+    pdf_path = html_path.replace(".html", ".pdf")
+    try:
+        print(f"[PDF] running subprocess chromium: {CHROMIUM_PATH}")
+        subprocess.run([
+            CHROMIUM_PATH, "--headless", "--no-sandbox",
+            "--disable-gpu", "--disable-dev-shm-usage",
+            f"--print-to-pdf={pdf_path}", html_path
+        ], timeout=45, check=True)
+        print("[PDF] subprocess chromium done")
+        with open(pdf_path, 'rb') as f:
+            return f.read()
+    except Exception as se:
+        print(f"[PDF] subprocess chromium FAILED: {se}")
         traceback.print_exc()
         raise
+    finally:
+        try: _os.unlink(html_path)
+        except: pass
+        try: _os.unlink(pdf_path)
+        except: pass
 
 # ============================================================
 # SECTION 12: HTML GENERATORS
