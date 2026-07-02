@@ -766,6 +766,16 @@ PROMPT_MAP = {
     'prompt_2': {'name': '✅ সত্য-মিথ্যার প্রশ্ন', 'text': PROMPT_02},
     'prompt_3': {'name': '🔥 কঠিন প্রশ্ন', 'text': PROMPT_03},
     'prompt_mixed': {'name': '🎲 Mixed (সবগুলো)', 'text': PROMPT_MIXED},
+    'qbm_extract': {'name': '📌 শুধুমাত্র পেইজে থাকা MCQ', 'text': (
+        "এই ইমেজের পেইজে যদি ইতিমধ্যে তৈরি করা MCQ (প্রশ্ন + অপশন) থেকে থাকে, শুধুমাত্র সেগুলোই "
+        "হুবহু extract করো — নতুন কোনো প্রশ্ন বানাবে না, কোনো তথ্য থেকে নিজে থেকে MCQ তৈরি করবে না। "
+        "যদি পেইজে already তৈরি MCQ (question + multiple options + সাধারণত answer/explanation) না থাকে, "
+        "শুধু plain paragraph/text থাকে, তাহলে খালি JSON array [] রিটার্ন করবে — কখনো নতুন MCQ বানিয়ে দিবে না। "
+        "প্রতিটা option অবশ্যই পেইজে যা লেখা আছে হুবহু তাই হতে হবে, কোনো section heading/page label/card নাম্বার "
+        "অপশন হিসেবে ব্যবহার করা যাবে না।\n\n"
+        "Return ONLY valid JSON array: "
+        "[{\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],\"answer\":\"B\",\"explanation\":\"...\"}]"
+    )},
 }
 
 # ============================================================
@@ -1519,6 +1529,7 @@ def mcq_set_keyboard(quiz_id: str, user_id: int = 0) -> List[List[InlineKeyboard
         [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
         [InlineKeyboardButton("🌐 Web Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}{challenger_param}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
         [InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data=f"crpdf_k_{quiz_id}"), InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data=f"crpdf_c_{quiz_id}")],
+        [InlineKeyboardButton("📌 শুধুমাত্র পেইজে থাকা MCQ", callback_data=f"qbm_{quiz_id}")],
         [share_button(quiz_id, user_id)],
     ]
 
@@ -2491,6 +2502,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await handle_mcq_generation(query, data.replace("genmcq_", ""), context)
         elif data.startswith("qaimg_"):
             await handle_creative_from_pending(query, data.replace("qaimg_", ""), context)
+        elif data.startswith("qbm_"):
+            await handle_qbm_extract(query, data.replace("qbm_", ""), user)
         elif data.startswith("crpdf_k_"):
             await handle_creative_pdf(query, data.replace("crpdf_k_", ""), "knowledge")
         elif data.startswith("crpdf_c_"):
@@ -2678,6 +2691,52 @@ async def handle_creative_from_pending(query, ctype_short: str, context: Context
     quiz_id = await save_mcq(user_id=user.id, mcqs=[], source_type=f'creative_{ctype}', prompt_type='prompt_1',
                        image_file_id=image_file_id, chat_id=query.message.chat_id, message_id=query.message.message_id)
     await handle_creative_pdf(query, quiz_id, ctype)
+
+async def handle_qbm_extract(query, quiz_id: str, user) -> None:
+    """v4.3: 'শুধুমাত্র পেইজে থাকা MCQ' — QuizBot's /qbm logic ported: only
+    extracts existing MCQs already printed on the page, never generates
+    new ones. Uses qbm_extract prompt with strict extract-only rules."""
+    mcq_data = await get_mcq(quiz_id)
+    if not mcq_data or not mcq_data.get('image_file_id'):
+        await query.message.reply_text("❌ মূল ইমেজ পাওয়া যায়নি।")
+        return
+    image_file_id = mcq_data['image_file_id']
+    wait_msg = await query.message.reply_text(
+        "📌 **পেইজে থাকা MCQ খোঁজা হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    try:
+        file = await application.bot.get_file(image_file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+    except Exception as e:
+        log_error(f"QBM image download failed: {e}")
+        await wait_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে।")
+        return
+
+    mcqs, error = await generate_mcq_from_image(image_bytes, 'qbm_extract')
+    if error or not mcqs:
+        await wait_msg.edit_text(
+            "❌ এই পেইজে কোনো তৈরি MCQ পাওয়া যায়নি।\n\n"
+            "💡 এই বাটন শুধু পেইজে already থাকা MCQ (প্রশ্ন+অপশন) খুঁজে বের করে — "
+            "নতুন MCQ তৈরি করে না। নতুন MCQ বানাতে অন্য বাটন ব্যবহার করুন।"
+        )
+        return
+
+    new_mcqs = apply_tag_exp(clean_mcq_options(mcqs))
+    new_quiz_id = await save_mcq(
+        user_id=user.id, mcqs=new_mcqs, source_type='image',
+        prompt_type='qbm_extract', image_file_id=image_file_id,
+        chat_id=None, message_id=None
+    )
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+    await query.message.reply_text(
+        f"✅ **পেইজে থাকা {len(new_mcqs)}টি MCQ পাওয়া গেছে!**",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(mcq_set_keyboard(new_quiz_id, user.id))
+    )
 
 async def handle_creative_pdf(query, quiz_id: str, ctype: str) -> None:
     """Calls exam_server /api/creative-pdf — sends premium PDF or explains why not possible."""
