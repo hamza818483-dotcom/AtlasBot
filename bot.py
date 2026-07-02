@@ -952,6 +952,7 @@ application: Optional[Application] = None
 _timer_tasks: Dict[int, asyncio.Task] = {}
 _poll_chat_map: Dict[str, int] = {}
 _image_cache: Dict[str, Dict] = {}
+_IMAGE_CACHE_MAX = 2000  # v4.5: hard cap — entry is tiny (few strings) but grows forever otherwise
 _last_quiz_answers: Dict[int, Dict] = {}
 _challenge_map: Dict[int, Dict] = {}
 _checkin_polls: Dict[str, int] = {}  # v4.0: poll_id -> user_id for 6h check-in
@@ -1187,6 +1188,8 @@ async def save_mcq(user_id: int, mcqs: List[Dict], source_type: str, prompt_type
         log_error(f"save_mcq error: {e}")
 
     if image_file_id:
+        if len(_image_cache) >= _IMAGE_CACHE_MAX:
+            _image_cache.pop(next(iter(_image_cache)), None)  # evict oldest (dict insertion order)
         _image_cache[quiz_id] = {'image_file_id': image_file_id, 'prompt_type': prompt_type, 'chat_id': chat_id, 'message_id': message_id}
     log(f"💾 MCQ saved: {quiz_id} ({len(mcqs)} questions)")
     return quiz_id
