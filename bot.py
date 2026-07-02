@@ -1528,7 +1528,6 @@ def mcq_set_keyboard(quiz_id: str, user_id: int = 0) -> List[List[InlineKeyboard
     return [
         [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
         [InlineKeyboardButton("🌐 Web Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}{challenger_param}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
-        [InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data=f"crpdf_k_{quiz_id}"), InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data=f"crpdf_c_{quiz_id}")],
         [InlineKeyboardButton("📌 শুধুমাত্র পেইজে থাকা MCQ", callback_data=f"qbm_{quiz_id}")],
         [share_button(quiz_id, user_id)],
     ]
