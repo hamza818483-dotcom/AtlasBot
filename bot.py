@@ -4227,15 +4227,22 @@ async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYP
 # ============================================================
 
 async def keepalive_task() -> None:
-    """Self-ping HF Space /health every ~10 min for 24/7 uptime."""
+    """Self-ping HF Space + own Render URL /health every ~10 min for 24/7 uptime
+    (prevents Render free-tier sleep and keeps the HF Space warm)."""
     await asyncio.sleep(60)
     log("💓 Keep-alive task started")
     while True:
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                await client.get(f"{HF_SPACE_URL}/health")
-        except Exception:
-            pass
+        async with httpx.AsyncClient(timeout=20) as client:
+            if HF_SPACE_URL:
+                try:
+                    await client.get(f"{HF_SPACE_URL}/health")
+                except Exception:
+                    pass
+            if RENDER_URL:
+                try:
+                    await client.get(f"{RENDER_URL}/health")
+                except Exception:
+                    pass
         await asyncio.sleep(600)
 
 def _get_active_checkin_users() -> List[int]:
