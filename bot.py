@@ -511,9 +511,9 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     return None, False
 
 async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> Tuple[Optional[str], str]:
-    """v4.2: Full fallback chain. Returns (text, provider_name) or (None, '').
-    Order: Groq (PRIMARY, all keys x all models rotated) -> Gemini (all keys) ->
-    NVIDIA -> OpenRouter Qwen VL -> Nemotron -> Gemma -> Cloudflare Workers AI.
+    """v4.3: Full fallback chain. Returns (text, provider_name) or (None, '').
+    Order: Groq (PRIMARY) -> Gemini -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
+    -> Cloudflare Workers AI -> NVIDIA Vision.
     Every provider/key with all-key rotation; missing keys silently skipped."""
     full_prompt = prompt_text + STRICT_SOURCE_RULES
     # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
@@ -525,13 +525,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
     if txt:
         return txt, "gemini"
     or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
-    # 3) NVIDIA Vision -- all keys rotated
-    for i, k in enumerate(NVIDIA_KEYS):
-        txt, _ = await _call_openai_compat("https://integrate.api.nvidia.com/v1", k, NVIDIA_MODEL,
-                                           full_prompt, image_bytes, provider="nvidia", key_label=f"nvidia#{i+1}")
-        if txt:
-            return txt, "nvidia"
-    # 4-6) OpenRouter family: Qwen VL 72B → Nemotron → Gemma — all keys rotated
+    # 3-5) OpenRouter family: Qwen VL 72B → Nemotron → Gemma — all keys rotated
     chains = [
         (OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL, "openrouter-qwen"),
         (NEMOTRON_KEYS or OPENROUTER_KEYS, NEMOTRON_MODEL, "nemotron"),
@@ -544,14 +538,20 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
                                                provider=name, key_label=f"{name}#{i+1}")
             if txt:
                 return txt, name
-    # 7) Cloudflare Workers AI (final free fallback) — uses CF account directly,
-    # no per-request key rotation since it's one shared account token.
+    # 6) Cloudflare Workers AI — uses CF account directly, no per-request key
+    # rotation since it's one shared account token.
     if CF_ACCOUNT_ID and CF_AI_TOKEN:
         txt, _ = await _call_openai_compat(CF_WORKERS_AI_BASE, CF_AI_TOKEN, CF_WORKERS_AI_MODEL,
                                            full_prompt, image_bytes, provider="cf-workers-ai",
                                            key_label="cf#1")
         if txt:
             return txt, "cf-workers-ai"
+    # 7) NVIDIA Vision (final fallback) -- all keys rotated
+    for i, k in enumerate(NVIDIA_KEYS):
+        txt, _ = await _call_openai_compat("https://integrate.api.nvidia.com/v1", k, NVIDIA_MODEL,
+                                           full_prompt, image_bytes, provider="nvidia", key_label=f"nvidia#{i+1}")
+        if txt:
+            return txt, "nvidia"
     return None, ""
 
 def _fix_json_str(t: str) -> str:
