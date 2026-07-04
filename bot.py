@@ -4227,23 +4227,54 @@ async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYP
 # ============================================================
 
 async def keepalive_task() -> None:
-    """Self-ping HF Space + own Render URL /health every ~10 min for 24/7 uptime
-    (prevents Render free-tier sleep and keeps the HF Space warm)."""
+    """Self-ping own Render URL /health every 5 min for 24/7 uptime
+    (prevents Render free-tier sleep). Tracks consecutive failures and
+    alerts owner if the service looks down."""
     await asyncio.sleep(60)
     log("💓 Keep-alive task started")
+    fails = 0
     while True:
-        async with httpx.AsyncClient(timeout=20) as client:
-            if HF_SPACE_URL:
-                try:
-                    await client.get(f"{HF_SPACE_URL}/health")
-                except Exception:
-                    pass
-            if RENDER_URL:
-                try:
-                    await client.get(f"{RENDER_URL}/health")
-                except Exception:
-                    pass
-        await asyncio.sleep(600)
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r = await client.get(f"{RENDER_URL}/health")
+                    fails = 0 if r.status_code == 200 else fails + 1
+            except Exception:
+                fails += 1
+            if fails == 3:
+                await notify_owner(f"🚨 AtlasBot keep-alive: {fails} consecutive /health failures — bot may be down.")
+        await asyncio.sleep(300)
+
+
+async def watchdog_task() -> None:
+    """Independent watchdog — offset-timed second ping loop that detects
+    downtime even if keepalive_task itself crashes, and attempts a self-wake."""
+    await asyncio.sleep(150)
+    log("🐕 Watchdog task started")
+    fails = 0
+    while True:
+        healthy = False
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r = await client.get(f"{RENDER_URL}/health")
+                    healthy = r.status_code == 200
+            except Exception:
+                healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            log(f"⚠️ [Watchdog] health check failed ({fails} in a row)")
+            if fails >= 2:
+                await notify_owner(f"🚨 AtlasBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
+                if RENDER_URL:
+                    try:
+                        async with httpx.AsyncClient(timeout=30) as client:
+                            await client.get(f"{RENDER_URL}/health")
+                    except Exception:
+                        pass
+        await asyncio.sleep(300)
 
 def _get_active_checkin_users() -> List[int]:
     """Active = used bot on >=2 distinct days within last 3 days (via results table)."""
@@ -4403,7 +4434,7 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Telegram থেকে সরাসরি জিজ্ঞেস করে দেখানো হয় (local _failover_active
         # ফ্ল্যাগের উপর নির্ভর না করে — কারণ GitHub Actions watchdog যদি
         # switch করে, HF process নিজে সেটা জানে না)।
-        host_label = "🟦 Render" if IS_RENDER else "🟨 HuggingFace Space"
+        host_label = "🟦 Render"
         route_label = "❓ Unknown"
         try:
             wh_info = await application.bot.get_webhook_info()
@@ -4723,6 +4754,7 @@ async def setup_bot() -> None:
         log_error(f"get_me failed: {e}")
     asyncio.create_task(daily_reset_scheduler())
     asyncio.create_task(keepalive_task())
+    asyncio.create_task(watchdog_task())
     asyncio.create_task(checkin_scheduler())
     asyncio.create_task(cf_proxy_health_check_scheduler())
     log("✅ Bot setup complete!")
