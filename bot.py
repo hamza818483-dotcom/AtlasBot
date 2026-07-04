@@ -4226,6 +4226,33 @@ async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYP
 # SECTION 21C: v4.0 BACKGROUND TASKS (check-in + keep-alive)
 # ============================================================
 
+async def _memory_cleanup_task() -> None:
+    """v-RAM-fix: periodic hard trim + gc every 30 min, so caches/leaks never
+    accumulate over days/weeks/months even if a cap is missed somewhere."""
+    import gc
+    await asyncio.sleep(300)
+    while True:
+        try:
+            try:
+                from exam_server import exam_store, _EXAM_STORE_MAX
+                if len(exam_store) > _EXAM_STORE_MAX:
+                    excess = len(exam_store) - _EXAM_STORE_MAX
+                    for _ in range(excess):
+                        exam_store.pop(next(iter(exam_store)), None)
+                exam_count = len(exam_store)
+            except Exception:
+                exam_count = -1
+            if len(_image_cache) > _IMAGE_CACHE_MAX:
+                excess = len(_image_cache) - _IMAGE_CACHE_MAX
+                for _ in range(excess):
+                    _image_cache.pop(next(iter(_image_cache)), None)
+            gc.collect()
+            log(f"🧹 Memory cleanup: exam_store={exam_count}, image_cache={len(_image_cache)}")
+        except Exception as e:
+            log_error(f"[MemCleanup] {e}")
+        await asyncio.sleep(1800)
+
+
 async def keepalive_task() -> None:
     """Self-ping own Render URL /health every 5 min for 24/7 uptime
     (prevents Render free-tier sleep). Tracks consecutive failures and
@@ -4814,6 +4841,7 @@ async def setup_bot() -> None:
         log_error(f"get_me failed: {e}")
     asyncio.create_task(daily_reset_scheduler())
     asyncio.create_task(keepalive_task())
+    asyncio.create_task(_memory_cleanup_task())
     asyncio.create_task(watchdog_task())
     asyncio.create_task(watchdog2_task())
     asyncio.create_task(cross_bot_watchdog_task())
