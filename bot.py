@@ -4276,6 +4276,66 @@ async def watchdog_task() -> None:
                         pass
         await asyncio.sleep(300)
 
+
+async def watchdog2_task() -> None:
+    """3rd independent ping layer — different offset/interval than keepalive_task
+    and watchdog_task so all three never crash/miss at the same moment."""
+    await asyncio.sleep(240)
+    log("🐕‍🦺 Watchdog-2 task started")
+    fails = 0
+    while True:
+        healthy = False
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=25) as client:
+                    r = await client.get(f"{RENDER_URL}/health")
+                    healthy = r.status_code == 200
+            except Exception:
+                healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                await notify_owner(f"🚨 AtlasBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
+                if RENDER_URL:
+                    for _ in range(2):
+                        try:
+                            async with httpx.AsyncClient(timeout=30) as client:
+                                await client.get(f"{RENDER_URL}/health")
+                            break
+                        except Exception:
+                            await asyncio.sleep(5)
+        await asyncio.sleep(420)
+
+
+async def cross_bot_watchdog_task() -> None:
+    """Mutual watchdog: also pings QuizBot's health endpoint (set via
+    QUIZBOT_URL env). If QuizBot looks down, alerts owner — and vice versa
+    QuizBot pings this bot. Two separate services checking each other means
+    a single service's total crash still gets detected/reported."""
+    quizbot_url = os.getenv("QUIZBOT_URL", "").rstrip("/")
+    if not quizbot_url:
+        return
+    await asyncio.sleep(200)
+    log("🔗 Cross-bot watchdog (-> QuizBot) started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.get(f"{quizbot_url}/health")
+                healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                await notify_owner(f"🚨 QuizBot unreachable via cross-bot check ({fails}x) — checked from AtlasBot.")
+        await asyncio.sleep(300)
+
 def _get_active_checkin_users() -> List[int]:
     """Active = used bot on >=2 distinct days within last 3 days (via results table)."""
     try:
@@ -4755,6 +4815,8 @@ async def setup_bot() -> None:
     asyncio.create_task(daily_reset_scheduler())
     asyncio.create_task(keepalive_task())
     asyncio.create_task(watchdog_task())
+    asyncio.create_task(watchdog2_task())
+    asyncio.create_task(cross_bot_watchdog_task())
     asyncio.create_task(checkin_scheduler())
     asyncio.create_task(cf_proxy_health_check_scheduler())
     log("✅ Bot setup complete!")
