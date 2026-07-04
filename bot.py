@@ -4226,6 +4226,16 @@ async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYP
 # SECTION 21C: v4.0 BACKGROUND TASKS (check-in + keep-alive)
 # ============================================================
 
+async def _scheduled_restart_task() -> None:
+    """v-RAM-fix: clean self-exit every 12h so Render restarts the process
+    fresh, fully resetting RAM regardless of any leak. Safe because Render
+    auto-restarts on process exit, and webhook mode has no in-flight state
+    to lose (unlike long-polling)."""
+    await asyncio.sleep(12 * 3600)
+    log("🔄 Scheduled restart: exiting cleanly for fresh RAM (Render will auto-restart)")
+    os._exit(0)
+
+
 async def _memory_cleanup_task() -> None:
     """v-RAM-fix: periodic hard trim + gc every 30 min, so caches/leaks never
     accumulate over days/weeks/months even if a cap is missed somewhere."""
@@ -4842,6 +4852,7 @@ async def setup_bot() -> None:
     asyncio.create_task(daily_reset_scheduler())
     asyncio.create_task(keepalive_task())
     asyncio.create_task(_memory_cleanup_task())
+    asyncio.create_task(_scheduled_restart_task())
     asyncio.create_task(watchdog_task())
     asyncio.create_task(watchdog2_task())
     asyncio.create_task(cross_bot_watchdog_task())
