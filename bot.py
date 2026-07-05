@@ -680,6 +680,7 @@ def _fix_missing_object_braces(t: str) -> str:
 
 
 
+def parse_mcq_json(response_text: str) -> List[Dict]:
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider."""
     t = (response_text or "").strip()
     if t.startswith('```json'):
