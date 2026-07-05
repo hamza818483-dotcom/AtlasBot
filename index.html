@@ -595,7 +595,7 @@ function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,moti
     html+='<div class="result-score-card">';
     html+='<div class="result-name">📝 '+CFG.topic+'</div>';
     html+='<div><span class="result-big">'+finFinal.toFixed(2)+'</span><span class="result-denom">/'+questions.length+'</span></div>';
-    html+='<div class="result-total-lbl">Final Score ('+pct+'%)</div>';
+    html+='<div class="result-total-lbl">চূড়ান্ত স্কোর ('+pct+'%)</div>';
     if (isSecondTimer) {
         html+='<div class="timer2-result">⏱️ আপনি সেকেন্ড টাইমার হওয়ায় ৩% মার্ক কেটে:<br>Final Result: '+finFinal.toFixed(2)+'/'+questions.length+'</div>';
     }
@@ -612,7 +612,7 @@ function renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,moti
     } else {
         html+='<div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-'+neg.toFixed(2)+' ('+wrong+'×'+CFG.negPerWrong+')</span></div>';
     }
-    html+='<div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">'+finFinal.toFixed(2)+'/'+questions.length+' ('+pct+'%)</span></div>';
+    html+='<div class="info-row2"><span>🏆 চূড়ান্ত স্কোর</span><span style="color:var(--accent);font-weight:700">'+finFinal.toFixed(2)+'/'+questions.length+' ('+pct+'%)</span></div>';
     html+='<div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>'+mins+'m '+secs+'s</span></div>';
     if(motivation||ayat){
         html+='<div class="mot-box" id="motBox"><div class="mot-grade">'+motivation+'</div><div class="mot-divider"></div>';
