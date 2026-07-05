@@ -657,7 +657,29 @@ def _extract_mcq_objects(t: str) -> List[Dict]:
             i += 1
     return mcqs
 
-def parse_mcq_json(response_text: str) -> List[Dict]:
+def _fix_missing_object_braces(t: str) -> str:
+    """Fix AI output like [\"question\":\"...\",\"options\":[...],\"answer\":0,\"explanation\":\"...\"]
+    where each object's opening/closing { } got dropped, leaving a flat array
+    of "key":value pairs (with nested option arrays) instead of array-of-objects."""
+    if '"question"' not in t:
+        return t
+    # Split into per-question chunks at each occurrence of "question":
+    parts = re.split(r'(?="question"\s*:)', t)
+    chunks = [p for p in parts if '"question"' in p]
+    if not chunks:
+        return t
+    fixed_objs = []
+    for c in chunks:
+        c = c.strip().strip('[').strip(']').strip(',').strip()
+        c = '{' + c
+        # trim trailing stray brackets/commas then close
+        c = c.rstrip().rstrip(',').rstrip(']').rstrip(',')
+        c = c + '}'
+        fixed_objs.append(c)
+    return '[' + ','.join(fixed_objs) + ']'
+
+
+
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider."""
     t = (response_text or "").strip()
     if t.startswith('```json'):
@@ -683,6 +705,11 @@ def parse_mcq_json(response_text: str) -> List[Dict]:
     if mcqs is None:
         try:
             mcqs = json.loads(_fix_json_str(t))
+        except json.JSONDecodeError:
+            pass
+    if mcqs is None:
+        try:
+            mcqs = json.loads(_fix_missing_object_braces(t))
         except json.JSONDecodeError:
             pass
     if mcqs is None:
