@@ -20,6 +20,7 @@ import os
 import base64
 import hashlib
 import re
+import difflib
 from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
 import csv
@@ -1638,6 +1639,367 @@ async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: 
 # SECTION 12: MCQ GENERATOR (v4.0 — Multi-AI fallback + cache)
 # ============================================================
 
+# ============================================================
+# QBM 2-CALL CONNECTED PIPELINE (ported from QuizBot's /qbm system)
+# Call 1: strict extraction (own OCR + dedup) -- Groq primary, Gemini fallback
+# Call 2: connected miss-check audit of Call 1's specific output (not a fresh
+#         re-extraction) -- catches MCQs Call 1 missed, then re-dedupes once more
+# ============================================================
+
+QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
+
+════════════════════════════════
+🔴 ABSOLUTE FORBIDDEN RULES (ZERO TOLERANCE)
+════════════════════════════════
+❌ NEVER create a new question from any text, fact, or information on the page
+❌ NEVER add even ONE extra MCQ beyond what already exists on the page/image
+❌ NEVER skip any existing MCQ — extract ALL of them, serially, in the exact order they appear
+❌ NEVER guess an answer — only detect it from actual image/page content
+❌ NEVER modify question or option text (only remove numbering prefixes)
+❌ If the page has ZERO existing MCQs → output EXACTLY [] (empty array). Do NOT invent a single MCQ.
+❌ If the page has exactly N existing MCQs → output EXACTLY those N. Never more, never fewer, never a "similar" or "extra" one.
+❌ No question count is ever given to you and none is ever needed — extract however many genuinely exist, nothing else.
+❌ This is a PERMANENT, ALWAYS-ON extraction mode — these rules apply identically to every page, every call, no matter what.
+
+════════════════════════════════
+📌 EXTRACTION RULES
+════════════════════════════════
+✅ Extract ALL MCQs that already exist on this page — Bangla, English, or mixed language
+✅ Extract from any font style — printed, handwritten, bold, italic
+✅ Extract from blurry, low quality, rotated, or scanned images
+✅ Perform MULTIPLE independent internal read-throughs of the page (at least 3) and
+   cross-check your own extraction before finalizing, so no existing MCQ is missed or misread.
+   Pay special attention to the LAST MCQ on the page/column — it is the most commonly missed one.
+   After the draft list is built, count the visible MCQs on the page and verify your list length
+   matches that count exactly before finalizing.
+✅ Remove question numbering only: (১., 1., Q1., Q.1, ক., a.) from question text
+✅ Keep original question and option wording intact (do not paraphrase or rewrite existing text)
+✅ If any obvious spelling mistake is seen, correct it — but do not alter meaning
+
+════════════════════════════════
+🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
+════════════════════════════════
+The correct answer MUST come from an actual source found in the page/image content.
+NEVER pick/guess an answer yourself — the answer must always be traceable to one of
+the source types below. Scan for ALL of these possible answer sources, in this order
+of likelihood, before concluding no answer exists:
+
+Source A — Answer marked directly on an option: circle, tick (✓), cross(✗)-elimination,
+  underline, bold, highlight, star (★), or any other visual mark on one option
+Source B — Answer given immediately with/after the MCQ itself (right after the question
+  block, before the next question starts)
+Source C — Answer table/box at the BOTTOM of the SAME page: a small table, boxed list,
+  or line like "Answer: 1-A, 2-C, 3-B..." — match question number → correct option
+Source D — Combined/consolidated answer key appearing SEVERAL PAGES LATER (not
+  necessarily the very next page — scan forward through ALL available pages, since many
+  question banks group all answers together after 2-3 pages of questions, or at the very
+  end of the document): match question number exactly → correct option
+Source E — Answer key on the page(s) immediately BEFORE or AFTER this one, in any of
+  the above formats (marked option, inline, or boxed table)
+
+Rules while scanning:
+→ Check every source type above before deciding an answer is missing — the answer for a
+  question on this page may live on a completely different page from the ones you've
+  processed so far, so scan broadly, not just this single page.
+→ Match strictly by question number (or exact question text if numbers are unclear/reused).
+→ NEVER invent, guess, or default an answer yourself under any circumstance.
+→ If — and only if — you have scanned all available pages/sources and genuinely found NO
+  answer indication anywhere for that specific question → set answer as "A" and note in
+  explanation "Answer not found in source". This is the last resort, never the first choice.
+→ Convert whatever format the source uses (number, checkmark, circled letter, bold option,
+  etc.) into the standard A/B/C/D letter for output.
+→ Re-verify each detected answer against its source at least twice before finalizing —
+  a wrong answer is worse than a missing one, so confirm carefully.
+
+════════════════════════════════
+🎯 OPTION ORDER (ABSOLUTE, ZERO-TOLERANCE — কখনো শাফল/পুনর্বিন্যাস/re-sort করবে না)
+════════════════════════════════
+- পেজে option যেই label সিস্টেমেই থাকুক (A,B,C,D / a,b,c,d / ক,খ,গ,ঘ / ১,২,৩,৪ / বুলেট/কোনো
+  label ছাড়া top-to-bottom বা left-to-right) — output-এ ঠিক সেই ভিজ্যুয়াল/সোর্স পজিশনের
+  ক্রমেই ১ম, ২য়, ৩য়, ৪র্থ option বসাবে output schema-র A,B,C,D slot-এ। Source-এর ১ম
+  option → output A slot, ২য় → B slot, ৩য় → C slot, ৪র্থ → D slot। এটা label matching নয়,
+  POSITION matching — সোর্সের label যা-ই হোক (a/ক/1/bullet), তার পজিশনই সিদ্ধান্তকারী।
+- Option-এর টেক্সট কখনো reorder/sort/rearrange করবে না (বর্ণানুক্রমিক সাজানো, মান অনুযায়ী
+  সাজানো — কোনোভাবেই না) — সোর্সে যেই sequence-এ ছিল ঠিক সেই sequence অক্ষুণ্ণ রাখবে।
+- Option সিরিয়াল ঠিকভাবে (স্ট্রিক্টলি পজিশন ম্যাচ করে) রাখা হলে answer letter ও স্বয়ংক্রিয়ভাবে
+  সঠিক সিরিয়ালেই পাওয়া যাবে — কারণ answer letter নির্ধারণ করা হয় "সঠিক উত্তরটি output-এর কোন
+  position-এ আছে" তার ভিত্তিতে, সোর্সের original label-এর ভিত্তিতে না।
+  উদাহরণ: সোর্সে option ক্রম গ,খ,ক,ঘ থাকলে এবং সঠিক উত্তর সোর্সের "ক" হলে — output-এ ক পজিশন
+  ৩ নম্বরে থাকবে (output slot C), তাই answer = "C" (পজিশন অনুযায়ী), "A" নয়।
+- প্রতিটা MCQ finalize করার আগে ৩ ধাপে verify করো (STRICT, SKIP করা যাবে না):
+  ধাপ ১: output-এর ৪টা option স্লট সোর্সের ৪টা option-এর পজিশন অনুযায়ী সঠিক কি না চেক করো।
+  ধাপ ২: সঠিক উত্তরের টেক্সট output-এর কোন slot-এ (A/B/C/D) বসেছে খুঁজে বের করো।
+  ধাপ ৩: answer letter ঠিক সেই slot-কেই নির্দেশ করছে কি না নিশ্চিত করো — অমিল থাকলে ঠিক করো।
+- সংখ্যা/সাল/তারিখ (Bengali সংখ্যা যেমন ১৯৭৬ বা English সংখ্যা যেমন 1976) অক্ষত হুবহু রাখবে —
+  Bengali সংখ্যাকে English-এ বা English সংখ্যাকে Bengali-তে কখনো convert করবে না। প্রতিটা
+  সংখ্যা সোর্সের সাথে digit-by-digit মিলিয়ে verify করবে (৯↔9, ৬↔6 গুলিয়ে ফেলা কড়াভাবে নিষিদ্ধ)।
+
+════════════════════════════════
+📖 উদ্দীপক (PASSAGE/STIMULUS) HANDLING — STRICT, ALWAYS ACTIVE
+════════════════════════════════
+- যদি কোনো প্রশ্ন বা প্রশ্নগোষ্ঠীর আগে একটা উদ্দীপক (passage/stimulus/scenario paragraph) থাকে,
+  সেই উদ্দীপকটি প্রথমে identify করবে এবং তার সাথে যুক্ত প্রতিটা MCQ-কে উদ্দীপকের সাথে reply/link
+  করেই ধরবে — অর্থাৎ output-এ প্রতিটা সংশ্লিষ্ট MCQ-র question টেক্সটের শুরুতে সেই উদ্দীপকের
+  পূর্ণ টেক্সট জুড়ে দিতে হবে, তারপর তার নিচে সেই নির্দিষ্ট MCQ-র প্রশ্ন — যাতে প্রতিটা MCQ standalone
+  ভাবে বোঝা যায় (উদ্দীপক ছাড়া প্রশ্নটা অসম্পূর্ণ থাকা উচিত নয়)।
+- একই উদ্দীপকের অধীনে একাধিক MCQ থাকলে প্রতিটাতেই সেই একই উদ্দীপক পুনরায় জুড়ে দিতে হবে (কপি
+  করে), প্রতিটা MCQ আলাদা আলাদা ভাবে সম্পূর্ণ (self-contained) থাকতে হবে।
+- উদ্দীপক শনাক্তকরণে সতর্ক থাকবে: সাধারণ প্রশ্নের সাথে উদ্দীপক-ভিত্তিক প্রশ্ন গুলিয়ে ফেলবে না —
+  passage/scenario/case-study টাইপ কনটেন্ট যা একাধিক প্রশ্নের বেস হিসেবে কাজ করছে, সেটাই উদ্দীপক।
+
+════════════════════════════════
+💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly, always, in this order)
+════════════════════════════════
+1) If the MCQ already has an explanation/answer-reasoning written directly below or attached
+   to it on the page → copy that explanation 100% VERBATIM, word-for-word, EXACTLY as written
+   in the source. Do not paraphrase, shorten, or rewrite it in any way.
+2) Else if there is no explanation directly under the MCQ, but the page contains other
+   relevant information related to this MCQ's topic (a paragraph, note, box, table, or fact
+   elsewhere on the page/related pages that relates to this question) → build the explanation
+   using that relevant information, stated as direct fact (see forbidden-phrase rule below).
+3) Else if there is no explanation anywhere and no relevant info anywhere on the page/source
+   related to this MCQ → then, and ONLY then, generate the BEST, most relevant, factually
+   accurate explanation yourself from your own real knowledge.
+- Whichever of the 3 cases applies, the explanation content must always convey: why the
+  correct option is correct, AND brief relevant info tied to why the other options are
+  wrong/related context — except in case 1, where you copy the source explanation exactly
+  as-is even if it doesn't explicitly cover the wrong options.
+- Max 165 characters, Bengali language, factually accurate.
+- This priority order (1 → 2 → 3) is permanent and always active — never skip a step or
+  reorder it, on every single MCQ, every time.
+
+════════════════════════════════
+🧮 MATH / CHEMISTRY FORMATTING (MANDATORY, ALWAYS ACTIVE — question, options, AND explanation)
+════════════════════════════════
+This rule is PERMANENTLY ON for every MCQ produced, with no exceptions, regardless of subject:
+- Always use proper Unicode subscript characters for chemical formula quantities and
+  proper Unicode superscript characters for exponents/powers/ionic charges — NEVER raw
+  underscore/caret notation, NEVER plain inline digits where a subscript/superscript belongs.
+- Chemical formulas: subscript quantity numbers correctly.
+  Correct: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆
+  Wrong: H2O, CO2, NaHCO3, H2SO4 (never output these)
+- Ionic charges/oxidation states: use superscript with correct sign.
+  Correct: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻
+- Exponents/powers/scientific notation: superscript the exponent.
+  Correct: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ
+  Wrong: x^2, 10^3, x_0 (never output caret/underscore literally)
+- Units, degree symbols, and multiplication signs must be correctly formatted: °C, °F, m/s²,
+  cm³, kg·m/s², use × not x for multiplication in scientific/math contexts.
+- Apply this identically and consistently across the question text, all four options, AND
+  the explanation — never mix correct and incorrect formatting within the same MCQ.
+- Double-check every number adjacent to a letter/formula/exponent before finalizing output:
+  if it should be a subscript or superscript, it MUST be rendered as one, always.
+
+════════════════════════════════
+🚫 FORBIDDEN SOURCE-REFERENCE PHRASES (PERMANENT, ALWAYS ACTIVE — question AND explanation)
+════════════════════════════════
+NEVER, under any circumstances, in the question text OR the explanation text, use any of
+these phrase patterns (or their Bengali equivalents, or any semantically similar phrase)
+that refer back to the source material itself instead of stating the fact directly:
+❌ "উল্লেখিত চিত্রে" / "চিত্রে দেখা যাচ্ছে" / "বক্সে" / "ছকে" / "উদ্দীপকে" / "সারণিতে" /
+   "টপিকে" / "পৃষ্ঠা নং এ" / "পৃষ্ঠায়" / "প্যাসেজে" / "অনুচ্ছেদে" / "লেখচিত্রে" / "গ্রাফে"
+❌ "দেখা যাচ্ছে" / "বলা আছে" / "উল্লেখ করা আছে" / "উল্লেখ আছে" / "লক্ষ করা যায়" /
+   "বর্ণনা আছে" / "দেখানো হয়েছে" / "দেওয়া আছে" / "প্রদত্ত" / "উপরে দেখানো"
+❌ Any English equivalents: "as shown in the figure/box/table/diagram/passage", "shown above",
+   "mentioned in the text/page", "as given", "according to the figure/table/passage above"
+❌ Any phrase — in any language, any wording — that talks ABOUT the source (image/box/table/
+   diagram/passage/page number/graph) instead of stating the fact/content directly and plainly.
+Instead: ALWAYS state the actual fact, information, or content directly and naturally, as if
+it were plain general knowledge — NEVER mention or imply that it came from "the shown
+image/box/table/passage/page". This rule applies permanently, always, to every single MCQ's
+question and explanation, with absolutely no exceptions, regardless of subject or source type.
+
+════════════════════════════════
+📤 OUTPUT FORMAT
+════════════════════════════════
+Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
+If NO MCQ exists on this page → return exactly: []
+
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
+
+
+def _has_mixed_digit_script(text: str) -> bool:
+    """একই সংখ্যা token-এ Bengali+English digit মিশে থাকলে সেটা corruption সংকেত।"""
+    if not text:
+        return False
+    bn_digits = set('০১২৩৪৫৬৭৮৯')
+    for token in re.findall(r'[০-৯0-9]+', text):
+        has_bn = any(c in bn_digits for c in token)
+        has_en = any(c.isdigit() and c not in bn_digits for c in token)
+        if has_bn and has_en:
+            return True
+    return False
+
+
+def _qbm_parse_json(text: str) -> list:
+    """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
+    if not text:
+        return []
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    valid = []
+    for mc in raw:
+        try:
+            q = mc.get("question", "")
+            opts = mc.get("options", {})
+            if not q or not opts:
+                continue
+            q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
+            q = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q)
+            q = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q)
+            opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+            expl = mc.get("explanation", "")
+            if _has_mixed_digit_script(q) or any(_has_mixed_digit_script(o) for o in opts_list) or _has_mixed_digit_script(expl):
+                log(f"[QBM digit-integrity] Mixed Bengali/English digits detected: {q[:60]}")
+            valid.append({
+                "question": q.strip(),
+                "options": opts_list,
+                "answer": mc.get("answer", "A") if mc.get("answer") in ("A", "B", "C", "D") else "A",
+                "explanation": expl
+            })
+        except Exception:
+            continue
+    return valid
+
+
+def _qbm_normalize_q(question: str) -> str:
+    """Whitespace/punctuation normalize করে দুইটা pass-এর একই MCQ-কে duplicate ধরার জন্য."""
+    q = re.sub(r'\s+', ' ', (question or '').strip().lower())
+    q = re.sub(r'[^\w\u0980-\u09FF ]+', '', q)
+    return q
+
+
+def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.85) -> bool:
+    """Exact match না থাকলেও near-identical প্রশ্ন-কে duplicate হিসেবে ধরার জন্য fuzzy match।"""
+    if not norm_q:
+        return True
+    if norm_q in existing_keys:
+        return True
+    for k in existing_keys:
+        if not k:
+            continue
+        shorter, longer = (k, norm_q) if len(k) <= len(norm_q) else (norm_q, k)
+        if shorter and shorter in longer and len(shorter) >= 0.7 * len(longer):
+            return True
+        if difflib.SequenceMatcher(None, norm_q, k).ratio() >= threshold:
+            return True
+    return False
+
+
+def _qbm_dedup_list(mcqs: list) -> list:
+    """Fuzzy-dedup a list in place order, dropping duplicate/ghost MCQs."""
+    seen_keys: list = []
+    out = []
+    for mc in mcqs:
+        key_q = _qbm_normalize_q(mc.get("question", ""))
+        if not key_q:
+            continue
+        if not _qbm_is_duplicate(key_q, seen_keys):
+            seen_keys.append(key_q)
+            out.append(mc)
+    return out
+
+
+async def _qbm_call1_extract(image_bytes: bytes) -> list:
+    """
+    CALL 1 -- OWN OCR + strict-prompt MCQ extraction + inline dedup.
+    Job: extract every existing MCQ on the page (option-serial strictly
+    preserved), while checking-as-it-goes so no duplicate/ghost MCQ enters
+    the list. Groq primary -> Gemini fallback (via _call_groq/_call_gemini,
+    same provider chain already used everywhere else in this bot).
+    """
+    try:
+        txt = await _call_groq(QBM_EXTRACT_PROMPT, image_bytes)
+        if not txt:
+            txt = await _call_gemini(QBM_EXTRACT_PROMPT, image_bytes)
+        result = _qbm_parse_json(txt) if txt else []
+        return _qbm_dedup_list(result)
+    except Exception as e:
+        log_error(f"[QBM Call1] failed: {e}")
+        return []
+
+
+async def _qbm_call2_miss_check(image_bytes: bytes, call1_mcqs: list) -> list:
+    """
+    CALL 2 -- connected audit of Call 1's specific output (not a fresh
+    re-extraction): checks if any existing MCQ was missed (especially the
+    last MCQ on the page), adds only the missed ones, then re-dedupes the
+    combined list once more.
+    """
+    if not call1_mcqs:
+        return call1_mcqs
+    try:
+        q_summary = "\n".join(
+            f"{i+1}. {(m.get('question') or '')[:100]}" for i, m in enumerate(call1_mcqs)
+        )
+        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
+{q_summary if q_summary else "(none found)"}
+
+TASK (fast audit, connected to Call 1 -- do not redo full extraction):
+1) Look at the page again and check if ANY existing MCQ was MISSED by the list above
+   (especially the LAST MCQ on the page -- most commonly missed).
+2) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
+   source position order, A/B/C/D slots by position -- never relabeled/sorted).
+3) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
+   text to its question (self-contained), same as Call 1's rule.
+4) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
+5) If nothing was missed, output exactly: []
+
+Output ONLY a JSON array of the MISSED MCQs (same schema as before):
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
+        txt = await _call_groq(prompt, image_bytes)
+        if not txt:
+            txt = await _call_gemini(prompt, image_bytes)
+        missed = _qbm_parse_json(txt) if txt else []
+
+        combined = list(call1_mcqs) + missed
+        return _qbm_dedup_list(combined)
+    except Exception as e:
+        log_error(f"[QBM Call2] failed: {e}")
+        return call1_mcqs
+
+
+async def _qbm_options_dict_to_list(mcqs: list) -> list:
+    """No-op placeholder retained for API symmetry -- _qbm_parse_json already
+    outputs options as a list, unlike QuizBot's raw dict format."""
+    return mcqs
+
+
+def _qbm_answer_letter_to_index(mcqs: list) -> list:
+    """_qbm_parse_json outputs answer as a LETTER ('A'/'B'/'C'/'D'), but this
+    bot's poll/quiz solve expects an INTEGER index. Convert here, at the
+    pipeline's exit point, so every other qbm_* helper can keep working with
+    letters (matching QuizBot's internal format) right up until output."""
+    letter_map = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
+    out = []
+    for m in mcqs:
+        m2 = dict(m)
+        m2['answer'] = letter_map.get(m2.get('answer', 'A'), 0)
+        out.append(m2)
+    return out
+
+
+async def qbm_extract_from_image(image_bytes: bytes) -> list:
+    """
+    Public entry point: Call 1 (extract) -> Call 2 (miss-check), connected
+    2-call pipeline, Groq primary throughout. Returns MCQs in this bot's
+    standard {question, options[list], answer[int], explanation} format.
+    """
+    call1 = await _qbm_call1_extract(image_bytes)
+    combined = await _qbm_call2_miss_check(image_bytes, call1)
+    return _qbm_answer_letter_to_index(combined)
+
+
 async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
     """Generate MCQs from an image — Gemini→NVIDIA→OpenRouter chain + cache."""
     try:
@@ -1647,6 +2009,16 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         if cached and cached.get('mcqs'):
             log(f"⚡ Cache hit for image (prompt: {prompt_type})")
             return clean_mcq_options(cached['mcqs']), None
+
+        # v4.7: qbm_extract now uses QuizBot's exact 2-call connected pipeline
+        # (Call 1 extract -> Call 2 miss-check), Groq primary, instead of the
+        # old single-pass + up-to-5-recheck loop. Fully replaces that path.
+        if prompt_type == 'qbm_extract':
+            valid_mcqs = await qbm_extract_from_image(image_bytes)
+            if not valid_mcqs:
+                return [], "📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি।"
+            log(f"✅ [QBM 2-call] Extracted {len(valid_mcqs)} MCQs from image")
+            return valid_mcqs, None
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
@@ -1668,47 +2040,9 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
-        # v4.6 FIX: qbm_extract must capture 100% of the page's existing MCQs
-        # (e.g. page has 34, must extract all 34, not stop at 22). Requires
-        # 2 CONSECUTIVE clean passes (no new MCQ found) before declaring done —
-        # a single early "nothing missed" pass is not trusted, since the model
-        # can falsely claim completeness on one pass. Up to 5 passes total.
-        if prompt_type == 'qbm_extract' and valid_mcqs:
-            clean_streak = 0
-            for pass_num in range(5):
-                if clean_streak >= 2:
-                    break
-                already_qs = "\n".join(f"- {m.get('question','')[:120]}" for m in valid_mcqs)
-                completeness_prompt = prompt_text + (
-                    f"\n\n🔴 COMPLETENESS RE-CHECK (pass {pass_num+1}, need 2 clean passes in a row to finish): "
-                    f"এই {len(valid_mcqs)}টি MCQ ইতিমধ্যে extract করা হয়েছে:\n{already_qs}\n\n"
-                    "এই পেইজটি একদম শুরু থেকে আবার, নতুনভাবে, carefully পুরোটা scan করো — "
-                    "উপরের লিস্টে নেই এমন কোনো MCQ (question+options) কি বাদ পড়েছে? পেইজের একদম "
-                    "উপর থেকে নিচ পর্যন্ত প্রতিটা প্রশ্ন আবার চেক করো, বিশেষ করে পেইজের একদম উপরে/নিচে/কোণায় "
-                    "থাকা MCQ গুলো মিস হয়ে যাওয়া সবচেয়ে বেশি হয় — সেগুলোতে বিশেষ নজর দাও। যদি বাদ পড়া কোনো "
-                    "MCQ থাকে, শুধুমাত্র সেই বাদ পড়া MCQ গুলো JSON array তে রিটার্ন করো (আগেরগুলো আবার দিও না)। "
-                    "যদি সত্যিই কিছুই বাদ না পড়ে থাকে, খালি array [] রিটার্ন করো।"
-                )
-                crt, crp = await ai_generate(completeness_prompt, image_bytes)
-                if not crt:
-                    clean_streak += 1
-                    continue
-                missed = parse_mcq_json(crt)
-                if not missed:
-                    clean_streak += 1
-                    continue
-                existing_norm = {re.sub(r'\s+', ' ', m.get('question', '')).strip().lower() for m in valid_mcqs}
-                new_found = [m for m in missed if re.sub(r'\s+', ' ', m.get('question', '')).strip().lower() not in existing_norm]
-                if not new_found:
-                    clean_streak += 1
-                    continue
-                clean_streak = 0
-                log(f"📌 [QBM] Completeness pass {pass_num+1} found {len(new_found)} missed MCQs")
-                valid_mcqs.extend(new_found)
         if len(valid_mcqs) == 0:
             return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
-        if prompt_type != 'qbm_extract':
-            valid_mcqs = valid_mcqs[:MAX_MCQ]
+        valid_mcqs = valid_mcqs[:MAX_MCQ]
         log(f"✅ Generated {len(valid_mcqs)} MCQs from image (prompt: {prompt_type}, provider: {provider})")
         return valid_mcqs, None
 
