@@ -389,10 +389,16 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     n_models = len(models)
     for m_attempt in range(n_models):
         model = models[(_groq_model_idx + m_attempt) % n_models]
+        model_label = model.split('/')[-1][:18]
+        all_exhausted = all(
+            _is_key_exhausted_today("groq", f"groq#{i+1}:{model_label}") for i in range(n_keys)
+        )
         for k_attempt in range(n_keys):
             key_i = (_groq_key_idx + k_attempt) % n_keys
             k = GROQ_KEYS[key_i]
-            klabel = f"groq#{key_i+1}:{model.split('/')[-1][:18]}"
+            klabel = f"groq#{key_i+1}:{model_label}"
+            if not all_exhausted and _is_key_exhausted_today("groq", klabel):
+                continue  # already known-dead for today -- skip straight to next key
             txt, exhausted = await _call_openai_compat(
                 "https://api.groq.com/openai/v1", k, model,
                 prompt_text, image_bytes, provider="groq", key_label=klabel
@@ -403,6 +409,51 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
                 return txt
         # all keys tried for this model -- rotate model on next outer loop
     return None
+
+
+_or_model_idx = 0
+_or_key_idx: Dict[str, int] = {}  # per-model key rotation index (each model may have its own key pool)
+
+
+async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes],
+                                   extra_headers: Dict) -> Tuple[Optional[str], str]:
+    """OpenRouter family (Qwen VL / Nemotron / Gemma) -- smooth model x key
+    rotation, same pattern as Groq's _call_groq: on failure, tries the next
+    key for the current model; once that model's keys are exhausted, rotates
+    to the next model and tries its keys. Remembers the last successful model
+    so a currently rate-limited model isn't retried first on every call."""
+    global _or_model_idx
+    chains = [
+        (OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL, "openrouter-qwen"),
+        (NEMOTRON_KEYS or OPENROUTER_KEYS, NEMOTRON_MODEL, "nemotron"),
+        (GEMMA_KEYS or OPENROUTER_KEYS, GEMMA_MODEL, "gemma"),
+    ]
+    n_models = len(chains)
+    for m_attempt in range(n_models):
+        m_i = (_or_model_idx + m_attempt) % n_models
+        keys, model, name = chains[m_i]
+        if not keys:
+            continue
+        n_keys = len(keys)
+        start_k = _or_key_idx.get(name, 0)
+        all_exhausted = all(_is_key_exhausted_today(name, f"{name}#{i+1}") for i in range(n_keys))
+        for k_attempt in range(n_keys):
+            key_i = (start_k + k_attempt) % n_keys
+            k = keys[key_i]
+            klabel = f"{name}#{key_i+1}"
+            if not all_exhausted and _is_key_exhausted_today(name, klabel):
+                continue  # already known-dead for today -- skip straight to next key
+            txt, _ = await _call_openai_compat(
+                "https://openrouter.ai/api/v1", k, model,
+                prompt_text, image_bytes, extra_headers,
+                provider=name, key_label=klabel
+            )
+            if txt:
+                _or_key_idx[name] = key_i
+                _or_model_idx = m_i
+                return txt, name
+        # all keys tried for this model -- rotate model on next outer loop
+    return None, ""
 
 def _b64_data_url(image_bytes: bytes) -> str:
     mime = "image/jpeg"
@@ -459,6 +510,18 @@ def _key_prefix(k: str) -> str:
     if len(k) <= 12:
         return k[:4] + "…"
     return f"{k[:6]}…{k[-4:]}"
+
+def _is_key_exhausted_today(provider: str, key_label: str) -> bool:
+    """Checks _provider_stats (resets daily at BD midnight) to see if this
+    exact provider+key was already marked quota-exhausted today, so rotators
+    can skip straight past a known-dead key instead of wasting a round-trip
+    re-confirming it's still exhausted."""
+    _reset_provider_stats_if_new_day()
+    p = _provider_stats.get(provider)
+    if not p:
+        return False
+    k = p.get(key_label)
+    return bool(k and k.get("exhausted"))
 
 async def _call_openai_compat(base_url: str, api_key: str, model: str,
                               prompt_text: str, image_bytes: Optional[bytes],
@@ -526,20 +589,15 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
     if txt:
         return txt, "gemini"
     or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
-    # 3-5) OpenRouter family: Qwen VL 72B → Nemotron → Gemma — all keys rotated
-    chains = [
-        (OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL, "openrouter-qwen"),
-        (NEMOTRON_KEYS or OPENROUTER_KEYS, NEMOTRON_MODEL, "nemotron"),
-        (GEMMA_KEYS or OPENROUTER_KEYS, GEMMA_MODEL, "gemma"),
-    ]
-    for keys, model, name in chains:
-        for i, k in enumerate(keys):
-            txt, _ = await _call_openai_compat("https://openrouter.ai/api/v1", k, model,
-                                               full_prompt, image_bytes, or_headers,
-                                               provider=name, key_label=f"{name}#{i+1}")
-            if txt:
-                return txt, name
-    # 6) Cloudflare Workers AI — uses CF account directly, no per-request key
+    # 3) OpenRouter family: Qwen VL 72B / Nemotron / Gemma -- smooth model x key
+    # rotation (same pattern as Groq): on failure, tries the next key for the
+    # current model; once that model's keys are all exhausted, rotates to the
+    # next model and tries its keys. Remembers the last successful model so a
+    # model that's currently rate-limited doesn't get retried first every time.
+    txt, provider = await _call_openrouter_family(full_prompt, image_bytes, or_headers)
+    if txt:
+        return txt, provider
+    # 4) Cloudflare Workers AI — uses CF account directly, no per-request key
     # rotation since it's one shared account token.
     if CF_ACCOUNT_ID and CF_AI_TOKEN:
         txt, _ = await _call_openai_compat(CF_WORKERS_AI_BASE, CF_AI_TOKEN, CF_WORKERS_AI_MODEL,
@@ -547,7 +605,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
                                            key_label="cf#1")
         if txt:
             return txt, "cf-workers-ai"
-    # 7) NVIDIA Vision (final fallback) -- all keys rotated
+    # 5) NVIDIA Vision (final fallback) -- all keys rotated
     for i, k in enumerate(NVIDIA_KEYS):
         txt, _ = await _call_openai_compat("https://integrate.api.nvidia.com/v1", k, NVIDIA_MODEL,
                                            full_prompt, image_bytes, provider="nvidia", key_label=f"nvidia#{i+1}")
