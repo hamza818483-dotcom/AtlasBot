@@ -4659,8 +4659,10 @@ async def _ram_guard_task() -> None:
     """Proactive RSS watchdog for 512MB Render instances: checks own process
     RSS every 60s. On free tier, hitting the OS memory limit means Render
     hard-kills the process with no cleanup/logging -- this self-restarts
-    cleanly at 85% (~435MB) BEFORE that happens, same clean-exit pattern as
-    _scheduled_restart_task (Render's start command relaunches immediately)."""
+    cleanly at 85% (~435MB) BEFORE that happens.
+    Auto-failover: right before self-restarting, if RENDER_URL_2 (secondary
+    instance) is configured, switches Telegram's webhook to it FIRST -- so
+    users get zero downtime instead of waiting for this instance to restart."""
     try:
         import psutil
     except ImportError:
@@ -4674,7 +4676,22 @@ async def _ram_guard_task() -> None:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
             if rss_mb >= threshold_mb:
-                log(f"⚠️ [RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> clean self-restart")
+                log(f"⚠️ [RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> failover + self-restart")
+                secondary = (os.environ.get("RENDER_URL_2", "") or "").strip()
+                if secondary and BOT_TOKEN:
+                    try:
+                        webhook_url = secondary.rstrip("/") + "/webhook"
+                        async with httpx.AsyncClient(timeout=8) as _c:
+                            r = await _c.post(
+                                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                                json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+                            )
+                            if r.json().get("ok"):
+                                log(f"✅ [RAMGuard] Webhook switched to SECONDARY: {webhook_url}")
+                            else:
+                                log_error(f"[RAMGuard] Failover webhook switch failed: {r.json().get('description')}")
+                    except Exception as fe:
+                        log_error(f"[RAMGuard] Failover attempt error: {fe}")
                 await asyncio.sleep(1)
                 os._exit(0)
         except Exception as e:
