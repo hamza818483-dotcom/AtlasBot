@@ -2217,7 +2217,54 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
         log_error(f"AI text generation error: {e}")
         return [], "MCQ তৈরি করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
 
-async def download_image(url: str) -> Optional[bytes]:
+async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_info(update)
+    log(f"📊 /atlas from {user['user_id']}")
+    reply = update.message.reply_to_message
+    poll = reply.poll if (reply and reply.poll) else None
+    if not poll:
+        await update.message.reply_text("❌ কোনো Poll-এ reply করে /atlas দিন!")
+        return
+
+    question = poll.question
+    options = [o.text for o in poll.options]
+    correct_idx = poll.correct_option_id
+
+    wait_msg = await update.message.reply_text("⏳ ব্যাখ্যা তৈরি করা হচ্ছে...")
+
+    opts_str = "\n".join(f"{chr(65+i)}) {o}" for i, o in enumerate(options))
+    if correct_idx is not None:
+        hint = f"\nসঠিক উত্তর: {chr(65+correct_idx)}"
+    else:
+        hint = "\nসঠিক উত্তর জানা নেই — নিজে বিশ্লেষণ করে বলো কোনটা সঠিক এবং কেন।"
+
+    prompt = (
+        "নিচের MCQ প্রশ্নের প্রতিটি অপশন নিয়ে বাংলায় স্পষ্ট ব্যাখ্যা দাও।\n"
+        "কোন অপশনটি সঠিক এবং কেন, বাকি অপশনগুলো কেন ভুল — প্রতিটির জন্য আলাদা আলাদা ব্যাখ্যা দাও।\n"
+        "সংক্ষিপ্ত কিন্তু স্পষ্ট রাখো। Format:\n"
+        "✅ সঠিক উত্তর: [option] — কারণ...\n"
+        "❌ [option A]: কেন ভুল...\n"
+        "❌ [option B]: কেন ভুল...\n"
+        "❌ [option C]: কেন ভুল...\n\n"
+        f"প্রশ্ন: {question}\n{opts_str}{hint}"
+    )
+
+    response_text, _ = await ai_generate(prompt, None)
+    if not response_text:
+        await wait_msg.edit_text("❌ AI ব্যস্ত, পরে চেষ্টা করুন।")
+        return
+
+    explanation = response_text.strip()
+    if len(explanation) > 4000:
+        explanation = explanation[:4000] + "..."
+
+    try:
+        await wait_msg.edit_text(f"📊 <b>{question}</b>\n\n{explanation}", parse_mode=ParseMode.HTML)
+    except Exception:
+        await wait_msg.edit_text(f"📊 {question}\n\n{explanation}")
+
+
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url)
@@ -5293,6 +5340,7 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("pdfc", cmd_pdfc))
     application.add_handler(CommandHandler("done", cmd_pdfc_done))
     application.add_handler(CommandHandler("cancel", cmd_pdfc_cancel))
+    application.add_handler(CommandHandler("atlas", cmd_atlas))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
     application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_image))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pending_input), group=0)
@@ -5312,6 +5360,7 @@ async def set_bot_commands() -> None:
             BotCommand("timer", "🍅 Pomodoro Study Timer"),
             BotCommand("revision", "🔁 আগের MCQ ঝালাই"),
             BotCommand("random", "🎲 Random MCQ Practice"),
+            BotCommand("atlas", "📊 Poll-এ reply করে অপশন ব্যাখ্যা"),
             BotCommand("progress", "📊 নিজের অগ্রগতি দেখুন"),
             BotCommand("report", "📈 বিগত দিনের Report"),
             BotCommand("class", "🎓 এটলাসের ফ্রী ক্লাস"),
