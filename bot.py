@@ -4655,13 +4655,29 @@ async def _memory_cleanup_task() -> None:
         await asyncio.sleep(1800)
 
 
+async def _local_health_ok() -> bool:
+    """Checks the app's OWN /health via localhost (127.0.0.1:7860) instead of
+    the public Render URL. If this succeeds, the FastAPI server itself is
+    definitely alive and the process isn't hung — any failure on the PUBLIC
+    URL in that case is a network/DNS/Render-proxy issue, not a real outage,
+    and should not spam the owner with false 'service down' alerts."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("http://127.0.0.1:7860/health")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
 async def keepalive_task() -> None:
     """Self-ping own Render URL /health every 5 min for 24/7 uptime
-    (prevents Render free-tier sleep). Tracks consecutive failures and
-    alerts owner if the service looks down."""
+    (prevents Render free-tier sleep). Alerts owner ONCE when a real outage
+    starts (confirmed via localhost cross-check, not just the public URL
+    failing) and ONCE when it recovers -- never repeats the same alert."""
     await asyncio.sleep(60)
     log("💓 Keep-alive task started")
     fails = 0
+    was_down = False
     while True:
         if RENDER_URL:
             try:
@@ -4670,17 +4686,27 @@ async def keepalive_task() -> None:
                     fails = 0 if r.status_code == 200 else fails + 1
             except Exception:
                 fails += 1
-            if fails == 3:
-                await notify_owner(f"🚨 AtlasBot keep-alive: {fails} consecutive /health failures — bot may be down.")
+            if fails >= 3:
+                if not await _local_health_ok():
+                    if not was_down:
+                        await notify_owner(f"🚨 AtlasBot keep-alive: {fails} consecutive /health failures — bot may be down.")
+                        was_down = True
+                else:
+                    fails = 0  # localhost confirms app is fine -- was a network blip, not a real outage
+            elif fails == 0 and was_down:
+                await notify_owner("✅ AtlasBot keep-alive: service reachable again.")
+                was_down = False
         await asyncio.sleep(300)
 
 
 async def watchdog_task() -> None:
     """Independent watchdog — offset-timed second ping loop that detects
-    downtime even if keepalive_task itself crashes, and attempts a self-wake."""
+    downtime even if keepalive_task itself crashes, and attempts a self-wake.
+    Alerts owner ONCE per outage (confirmed via localhost), not repeatedly."""
     await asyncio.sleep(150)
     log("🐕 Watchdog task started")
     fails = 0
+    was_down = False
     while True:
         healthy = False
         if RENDER_URL:
@@ -4692,11 +4718,21 @@ async def watchdog_task() -> None:
                 healthy = False
         if healthy:
             fails = 0
+            if was_down:
+                await notify_owner("✅ AtlasBot WATCHDOG: service reachable again.")
+                was_down = False
         else:
             fails += 1
             log(f"⚠️ [Watchdog] health check failed ({fails} in a row)")
             if fails >= 2:
-                await notify_owner(f"🚨 AtlasBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
+                if await _local_health_ok():
+                    # App itself is fine -- public URL blip, not a real outage. Don't alert.
+                    fails = 0
+                    await asyncio.sleep(300)
+                    continue
+                if not was_down:
+                    await notify_owner(f"🚨 AtlasBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
+                    was_down = True
                 if RENDER_URL:
                     try:
                         async with httpx.AsyncClient(timeout=30) as client:
@@ -4708,10 +4744,12 @@ async def watchdog_task() -> None:
 
 async def watchdog2_task() -> None:
     """3rd independent ping layer — different offset/interval than keepalive_task
-    and watchdog_task so all three never crash/miss at the same moment."""
+    and watchdog_task so all three never crash/miss at the same moment.
+    Alerts owner ONCE per outage (confirmed via localhost), not repeatedly."""
     await asyncio.sleep(240)
     log("🐕‍🦺 Watchdog-2 task started")
     fails = 0
+    was_down = False
     while True:
         healthy = False
         if RENDER_URL:
@@ -4723,10 +4761,19 @@ async def watchdog2_task() -> None:
                 healthy = False
         if healthy:
             fails = 0
+            if was_down:
+                await notify_owner("✅ AtlasBot WATCHDOG-2: service reachable again.")
+                was_down = False
         else:
             fails += 1
             if fails >= 2:
-                await notify_owner(f"🚨 AtlasBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
+                if await _local_health_ok():
+                    fails = 0
+                    await asyncio.sleep(420)
+                    continue
+                if not was_down:
+                    await notify_owner(f"🚨 AtlasBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
+                    was_down = True
                 if RENDER_URL:
                     for _ in range(2):
                         try:
@@ -4740,15 +4787,16 @@ async def watchdog2_task() -> None:
 
 async def cross_bot_watchdog_task() -> None:
     """Mutual watchdog: also pings QuizBot's health endpoint (set via
-    QUIZBOT_URL env). If QuizBot looks down, alerts owner — and vice versa
-    QuizBot pings this bot. Two separate services checking each other means
-    a single service's total crash still gets detected/reported."""
+    QUIZBOT_URL env). If QuizBot looks down, alerts owner ONCE per outage —
+    and vice versa QuizBot pings this bot. Two separate services checking
+    each other means a single service's total crash still gets detected."""
     quizbot_url = os.getenv("QUIZBOT_URL", "").rstrip("/")
     if not quizbot_url:
         return
     await asyncio.sleep(200)
     log("🔗 Cross-bot watchdog (-> QuizBot) started")
     fails = 0
+    was_down = False
     while True:
         healthy = False
         try:
@@ -4759,10 +4807,14 @@ async def cross_bot_watchdog_task() -> None:
             healthy = False
         if healthy:
             fails = 0
+            if was_down:
+                await notify_owner("✅ QuizBot reachable again (cross-bot check).")
+                was_down = False
         else:
             fails += 1
-            if fails >= 2:
+            if fails >= 2 and not was_down:
                 await notify_owner(f"🚨 QuizBot unreachable via cross-bot check ({fails}x) — checked from AtlasBot.")
+                was_down = True
         await asyncio.sleep(300)
 
 def _get_active_checkin_users() -> List[int]:
