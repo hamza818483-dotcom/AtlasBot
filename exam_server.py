@@ -215,11 +215,14 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
 # SECTION 5: IN-MEMORY EXAM STORE + REHYDRATE
 # ============================================================
 exam_store: Dict[str, Dict] = {}
+_EXAM_STORE_MAX = 300  # v-RAM-fix: each entry holds a full mcqs list (can be large) — cap hard
 
 def store_exam(quiz_id: str, mcqs: List[Dict], topic: str = "", page: int = 1,
                tag: str = "", image_file_id: str = "", is_new_gen: bool = False,
                src_cache_id: str = None, chat_id: int = None, message_id: int = None,
                prompt_type: str = "prompt_1") -> str:
+    if len(exam_store) >= _EXAM_STORE_MAX:
+        exam_store.pop(next(iter(exam_store)), None)  # evict oldest (dict insertion order)
     exam_store[quiz_id] = {
         "mcqs": mcqs, "topic": topic, "page": page, "tag": tag,
         "image_file_id": image_file_id, "is_new_gen": is_new_gen,

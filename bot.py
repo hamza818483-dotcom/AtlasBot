@@ -512,9 +512,9 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     return None, False
 
 async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> Tuple[Optional[str], str]:
-    """v4.2: Full fallback chain. Returns (text, provider_name) or (None, '').
-    Order: Groq (PRIMARY, all keys x all models rotated) -> Gemini (all keys) ->
-    NVIDIA -> OpenRouter Qwen VL -> Nemotron -> Gemma -> Cloudflare Workers AI.
+    """v4.3: Full fallback chain. Returns (text, provider_name) or (None, '').
+    Order: Groq (PRIMARY) -> Gemini -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
+    -> Cloudflare Workers AI -> NVIDIA Vision.
     Every provider/key with all-key rotation; missing keys silently skipped."""
     full_prompt = prompt_text + STRICT_SOURCE_RULES
     # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
@@ -526,13 +526,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
     if txt:
         return txt, "gemini"
     or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
-    # 3) NVIDIA Vision -- all keys rotated
-    for i, k in enumerate(NVIDIA_KEYS):
-        txt, _ = await _call_openai_compat("https://integrate.api.nvidia.com/v1", k, NVIDIA_MODEL,
-                                           full_prompt, image_bytes, provider="nvidia", key_label=f"nvidia#{i+1}")
-        if txt:
-            return txt, "nvidia"
-    # 4-6) OpenRouter family: Qwen VL 72B → Nemotron → Gemma — all keys rotated
+    # 3-5) OpenRouter family: Qwen VL 72B → Nemotron → Gemma — all keys rotated
     chains = [
         (OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL, "openrouter-qwen"),
         (NEMOTRON_KEYS or OPENROUTER_KEYS, NEMOTRON_MODEL, "nemotron"),
@@ -545,14 +539,20 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> 
                                                provider=name, key_label=f"{name}#{i+1}")
             if txt:
                 return txt, name
-    # 7) Cloudflare Workers AI (final free fallback) — uses CF account directly,
-    # no per-request key rotation since it's one shared account token.
+    # 6) Cloudflare Workers AI — uses CF account directly, no per-request key
+    # rotation since it's one shared account token.
     if CF_ACCOUNT_ID and CF_AI_TOKEN:
         txt, _ = await _call_openai_compat(CF_WORKERS_AI_BASE, CF_AI_TOKEN, CF_WORKERS_AI_MODEL,
                                            full_prompt, image_bytes, provider="cf-workers-ai",
                                            key_label="cf#1")
         if txt:
             return txt, "cf-workers-ai"
+    # 7) NVIDIA Vision (final fallback) -- all keys rotated
+    for i, k in enumerate(NVIDIA_KEYS):
+        txt, _ = await _call_openai_compat("https://integrate.api.nvidia.com/v1", k, NVIDIA_MODEL,
+                                           full_prompt, image_bytes, provider="nvidia", key_label=f"nvidia#{i+1}")
+        if txt:
+            return txt, "nvidia"
     return None, ""
 
 def _fix_json_str(t: str) -> str:
@@ -661,7 +661,11 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 
 🟥Overall Instructions:
 -Image এ আগে থেকে MCQ বানানো থাকুক বা Information থাকুক,সকল জায়গা থেকেই প্রশ্ন বানাবে
--কোনো টেক্সটের নিচে কালার মার্ক বা কোনো টেক্সট হাইলাইটেড থাকলে সেখান থেকে প্রশ্ন বানান মিস দেওয়া যাবে না(must priority)
+-যেসব লাইন থেকে MCQ বানানো MISS করা যাবে না (MUST PRIORITY):
+  • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — এগুলো সবচেয়ে কমন হাইলাইটার কালার)
+  • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
+  • কোনো লাইনের নিচে কলমের কালি দিয়ে আন্ডারলাইন (underline) করা থাকলে — লাল, কালো, নীল, সবুজ যেকোনো কালারেই হোক
+  • বইয়ের মূল লাইনের সাথে হাতে/কলমে এক্সট্রা কোনো কালার, দাগ, মার্ক, আন্ডারলাইন দেখা গেলেই সেটা 100% মিস না করে অবশ্যই MCQ বানাতে হবে
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে।
 -এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে।
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে(Use Every Information for Making MCQ)
@@ -806,6 +810,12 @@ PROMPT_MAP = {
         "never mention they came from an image/box/table/passage/page.\n\n"
         "Each option must be exactly what's written on the page -- never a section heading/page "
         "label/card number as an option.\n\n"
+        "\u0989\u09a6\u09cd\u09a6\u09c0\u09aa\u0995 (PASSAGE/STIMULUS) HANDLING -- STRICT: if a question or group of "
+        "questions is based on a preceding passage/stimulus/scenario paragraph, prepend that "
+        "passage's FULL text to the start of EVERY related MCQ's question (self-contained -- the "
+        "question must be understandable without seeing the original passage separately). If "
+        "multiple MCQs share the same passage, copy the full passage into each one's question "
+        "text. Be careful to correctly identify real passages/scenarios vs standalone questions.\n\n"
         "OUTPUT: ONLY a valid JSON array, no extra text. \"answer\" is an INTEGER index (0=A,1=B,2=C,3=D) "
         "matching the option's position AFTER shuffling -- never a letter string.\n"
         "[{\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],\"answer\":0,\"explanation\":\"...\"}]"
@@ -4550,17 +4560,152 @@ async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYP
 # SECTION 21C: v4.0 BACKGROUND TASKS (check-in + keep-alive)
 # ============================================================
 
-async def keepalive_task() -> None:
-    """Self-ping HF Space /health every ~10 min for 24/7 uptime."""
-    await asyncio.sleep(60)
-    log("💓 Keep-alive task started")
+async def _scheduled_restart_task() -> None:
+    """v-RAM-fix: clean self-exit every 12h so Render restarts the process
+    fresh, fully resetting RAM regardless of any leak. Safe because Render
+    auto-restarts on process exit, and webhook mode has no in-flight state
+    to lose (unlike long-polling)."""
+    await asyncio.sleep(12 * 3600)
+    log("🔄 Scheduled restart: exiting cleanly for fresh RAM (Render will auto-restart)")
+    os._exit(0)
+
+
+async def _memory_cleanup_task() -> None:
+    """v-RAM-fix: periodic hard trim + gc every 30 min, so caches/leaks never
+    accumulate over days/weeks/months even if a cap is missed somewhere."""
+    import gc
+    await asyncio.sleep(300)
     while True:
         try:
+            try:
+                from exam_server import exam_store, _EXAM_STORE_MAX
+                if len(exam_store) > _EXAM_STORE_MAX:
+                    excess = len(exam_store) - _EXAM_STORE_MAX
+                    for _ in range(excess):
+                        exam_store.pop(next(iter(exam_store)), None)
+                exam_count = len(exam_store)
+            except Exception:
+                exam_count = -1
+            if len(_image_cache) > _IMAGE_CACHE_MAX:
+                excess = len(_image_cache) - _IMAGE_CACHE_MAX
+                for _ in range(excess):
+                    _image_cache.pop(next(iter(_image_cache)), None)
+            gc.collect()
+            log(f"🧹 Memory cleanup: exam_store={exam_count}, image_cache={len(_image_cache)}")
+        except Exception as e:
+            log_error(f"[MemCleanup] {e}")
+        await asyncio.sleep(1800)
+
+
+async def keepalive_task() -> None:
+    """Self-ping own Render URL /health every 5 min for 24/7 uptime
+    (prevents Render free-tier sleep). Tracks consecutive failures and
+    alerts owner if the service looks down."""
+    await asyncio.sleep(60)
+    log("💓 Keep-alive task started")
+    fails = 0
+    while True:
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r = await client.get(f"{RENDER_URL}/health")
+                    fails = 0 if r.status_code == 200 else fails + 1
+            except Exception:
+                fails += 1
+            if fails == 3:
+                await notify_owner(f"🚨 AtlasBot keep-alive: {fails} consecutive /health failures — bot may be down.")
+        await asyncio.sleep(300)
+
+
+async def watchdog_task() -> None:
+    """Independent watchdog — offset-timed second ping loop that detects
+    downtime even if keepalive_task itself crashes, and attempts a self-wake."""
+    await asyncio.sleep(150)
+    log("🐕 Watchdog task started")
+    fails = 0
+    while True:
+        healthy = False
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r = await client.get(f"{RENDER_URL}/health")
+                    healthy = r.status_code == 200
+            except Exception:
+                healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            log(f"⚠️ [Watchdog] health check failed ({fails} in a row)")
+            if fails >= 2:
+                await notify_owner(f"🚨 AtlasBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
+                if RENDER_URL:
+                    try:
+                        async with httpx.AsyncClient(timeout=30) as client:
+                            await client.get(f"{RENDER_URL}/health")
+                    except Exception:
+                        pass
+        await asyncio.sleep(300)
+
+
+async def watchdog2_task() -> None:
+    """3rd independent ping layer — different offset/interval than keepalive_task
+    and watchdog_task so all three never crash/miss at the same moment."""
+    await asyncio.sleep(240)
+    log("🐕‍🦺 Watchdog-2 task started")
+    fails = 0
+    while True:
+        healthy = False
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=25) as client:
+                    r = await client.get(f"{RENDER_URL}/health")
+                    healthy = r.status_code == 200
+            except Exception:
+                healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                await notify_owner(f"🚨 AtlasBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
+                if RENDER_URL:
+                    for _ in range(2):
+                        try:
+                            async with httpx.AsyncClient(timeout=30) as client:
+                                await client.get(f"{RENDER_URL}/health")
+                            break
+                        except Exception:
+                            await asyncio.sleep(5)
+        await asyncio.sleep(420)
+
+
+async def cross_bot_watchdog_task() -> None:
+    """Mutual watchdog: also pings QuizBot's health endpoint (set via
+    QUIZBOT_URL env). If QuizBot looks down, alerts owner — and vice versa
+    QuizBot pings this bot. Two separate services checking each other means
+    a single service's total crash still gets detected/reported."""
+    quizbot_url = os.getenv("QUIZBOT_URL", "").rstrip("/")
+    if not quizbot_url:
+        return
+    await asyncio.sleep(200)
+    log("🔗 Cross-bot watchdog (-> QuizBot) started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
             async with httpx.AsyncClient(timeout=20) as client:
-                await client.get(f"{HF_SPACE_URL}/health")
+                r = await client.get(f"{quizbot_url}/health")
+                healthy = r.status_code == 200
         except Exception:
-            pass
-        await asyncio.sleep(600)
+            healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                await notify_owner(f"🚨 QuizBot unreachable via cross-bot check ({fails}x) — checked from AtlasBot.")
+        await asyncio.sleep(300)
 
 def _get_active_checkin_users() -> List[int]:
     """Active = used bot on >=2 distinct days within last 3 days (via results table)."""
@@ -4720,7 +4865,7 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Telegram থেকে সরাসরি জিজ্ঞেস করে দেখানো হয় (local _failover_active
         # ফ্ল্যাগের উপর নির্ভর না করে — কারণ GitHub Actions watchdog যদি
         # switch করে, HF process নিজে সেটা জানে না)।
-        host_label = "🟦 Render" if IS_RENDER else "🟨 HuggingFace Space"
+        host_label = "🟦 Render"
         route_label = "❓ Unknown"
         try:
             wh_info = await application.bot.get_webhook_info()
@@ -5040,6 +5185,11 @@ async def setup_bot() -> None:
         log_error(f"get_me failed: {e}")
     asyncio.create_task(daily_reset_scheduler())
     asyncio.create_task(keepalive_task())
+    asyncio.create_task(_memory_cleanup_task())
+    asyncio.create_task(_scheduled_restart_task())
+    asyncio.create_task(watchdog_task())
+    asyncio.create_task(watchdog2_task())
+    asyncio.create_task(cross_bot_watchdog_task())
     asyncio.create_task(checkin_scheduler())
     asyncio.create_task(cf_proxy_health_check_scheduler())
     log("✅ Bot setup complete!")
