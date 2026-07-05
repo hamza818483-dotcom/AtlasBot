@@ -2059,7 +2059,23 @@ def _qbm_answer_letter_to_index(mcqs: list) -> list:
 
 # v-RAM-fix: caps how many images (across ALL users) run the extraction
 # pipeline at once, protecting RAM under high concurrent load on 512MB free tier.
-_QBM_EXTRACT_SEMAPHORE = asyncio.Semaphore(3)
+_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(20)
+
+async def _qbm_ram_aware_acquire():
+    """Blocks until (a) a hard-cap slot is free AND (b) live RSS has headroom."""
+    await _QBM_EXTRACT_HARD_CAP.acquire()
+    try:
+        import psutil
+        proc = psutil.Process(os.getpid())
+        limit_mb = 512
+        safe_ceiling_mb = int(limit_mb * 0.75)
+        while True:
+            rss_mb = proc.memory_info().rss / (1024 * 1024)
+            if rss_mb < safe_ceiling_mb:
+                return
+            await asyncio.sleep(0.5)
+    except ImportError:
+        return
 
 
 async def qbm_extract_from_image(image_bytes: bytes) -> list:
@@ -2068,10 +2084,13 @@ async def qbm_extract_from_image(image_bytes: bytes) -> list:
     2-call pipeline, Groq primary throughout. Returns MCQs in this bot's
     standard {question, options[list], answer[int], explanation} format.
     """
-    async with _QBM_EXTRACT_SEMAPHORE:
+    await _qbm_ram_aware_acquire()
+    try:
         call1 = await _qbm_call1_extract(image_bytes)
         combined = await _qbm_call2_miss_check(image_bytes, call1)
         return _qbm_answer_letter_to_index(combined)
+    finally:
+        _QBM_EXTRACT_HARD_CAP.release()
 
 
 async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
