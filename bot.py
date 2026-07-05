@@ -2266,6 +2266,7 @@ async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 
+async def download_image(url: str) -> Optional[bytes]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url)
