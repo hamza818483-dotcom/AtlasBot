@@ -2253,7 +2253,15 @@ async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"প্রশ্ন: {question}\n{opts_str}{hint}"
     )
 
+    async def _edit_wait(t):
+        try:
+            await wait_msg.edit_text(t)
+        except Exception:
+            pass
+    prog_task = asyncio.create_task(live_progress_task(_edit_wait, "Poll", total_eta=8))
+
     response_text, _ = await ai_generate(prompt, None)
+    prog_task.cancel()
     if not response_text:
         await wait_msg.edit_text("❌ AI ব্যস্ত, পরে চেষ্টা করুন।")
         return
