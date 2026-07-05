@@ -2057,15 +2057,21 @@ def _qbm_answer_letter_to_index(mcqs: list) -> list:
     return out
 
 
+# v-RAM-fix: caps how many images (across ALL users) run the extraction
+# pipeline at once, protecting RAM under high concurrent load on 512MB free tier.
+_QBM_EXTRACT_SEMAPHORE = asyncio.Semaphore(3)
+
+
 async def qbm_extract_from_image(image_bytes: bytes) -> list:
     """
     Public entry point: Call 1 (extract) -> Call 2 (miss-check), connected
     2-call pipeline, Groq primary throughout. Returns MCQs in this bot's
     standard {question, options[list], answer[int], explanation} format.
     """
-    call1 = await _qbm_call1_extract(image_bytes)
-    combined = await _qbm_call2_miss_check(image_bytes, call1)
-    return _qbm_answer_letter_to_index(combined)
+    async with _QBM_EXTRACT_SEMAPHORE:
+        call1 = await _qbm_call1_extract(image_bytes)
+        combined = await _qbm_call2_miss_check(image_bytes, call1)
+        return _qbm_answer_letter_to_index(combined)
 
 
 async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
