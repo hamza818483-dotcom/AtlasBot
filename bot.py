@@ -5473,16 +5473,32 @@ async def setup_bot() -> None:
         log(f"🤖 Bot username: @{BOT_USERNAME}")
     except Exception as e:
         log_error(f"get_me failed: {e}")
-    asyncio.create_task(daily_reset_scheduler())
-    asyncio.create_task(keepalive_task())
-    asyncio.create_task(_memory_cleanup_task())
-    asyncio.create_task(_ram_guard_task())
-    asyncio.create_task(_scheduled_restart_task())
-    asyncio.create_task(watchdog_task())
-    asyncio.create_task(watchdog2_task())
-    asyncio.create_task(cross_bot_watchdog_task())
-    asyncio.create_task(checkin_scheduler())
-    asyncio.create_task(cf_proxy_health_check_scheduler())
+    async def _supervised(coro_fn, name):
+        """Core background task crash korle silently die na kore auto-restart hobe."""
+        while True:
+            try:
+                await coro_fn()
+                return  # normal completion (shouldn't happen for infinite-loop tasks)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_error(f"⚠️ [Supervisor] {name} crashed: {e} — restarting in 10s")
+                try:
+                    await notify_owner(f"⚠️ Background task '{name}' crashed, auto-restarting: {e}")
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+
+    asyncio.create_task(_supervised(daily_reset_scheduler, "daily_reset_scheduler"))
+    asyncio.create_task(_supervised(keepalive_task, "keepalive_task"))
+    asyncio.create_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
+    asyncio.create_task(_supervised(_ram_guard_task, "_ram_guard_task"))
+    asyncio.create_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
+    asyncio.create_task(_supervised(watchdog_task, "watchdog_task"))
+    asyncio.create_task(_supervised(watchdog2_task, "watchdog2_task"))
+    asyncio.create_task(_supervised(cross_bot_watchdog_task, "cross_bot_watchdog_task"))
+    asyncio.create_task(_supervised(checkin_scheduler, "checkin_scheduler"))
+    asyncio.create_task(_supervised(cf_proxy_health_check_scheduler, "cf_proxy_health_check_scheduler"))
     log("✅ Bot setup complete!")
 
 # ============================================================
