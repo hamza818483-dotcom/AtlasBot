@@ -5474,20 +5474,25 @@ async def setup_bot() -> None:
     except Exception as e:
         log_error(f"get_me failed: {e}")
     async def _supervised(coro_fn, name):
-        """Core background task crash korle silently die na kore auto-restart hobe."""
+        """Core background task crash korle silently die na kore auto-restart hobe.
+        Exponential backoff + alert-spam prevent (repeated crash e max 3 alert)."""
+        fail_count = 0
         while True:
             try:
                 await coro_fn()
-                return  # normal completion (shouldn't happen for infinite-loop tasks)
+                return
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log_error(f"⚠️ [Supervisor] {name} crashed: {e} — restarting in 10s")
-                try:
-                    await notify_owner(f"⚠️ Background task '{name}' crashed, auto-restarting: {e}")
-                except Exception:
-                    pass
-                await asyncio.sleep(10)
+                fail_count += 1
+                wait = min(10 * (2 ** min(fail_count - 1, 5)), 300)  # 10s -> 300s cap
+                log_error(f"⚠️ [Supervisor] {name} crashed ({fail_count}x): {e} — restarting in {wait}s")
+                if fail_count <= 3:
+                    try:
+                        await notify_owner(f"⚠️ Background task '{name}' crashed ({fail_count}x), auto-restarting: {e}")
+                    except Exception:
+                        pass
+                await asyncio.sleep(wait)
 
     asyncio.create_task(_supervised(daily_reset_scheduler, "daily_reset_scheduler"))
     asyncio.create_task(_supervised(keepalive_task, "keepalive_task"))
