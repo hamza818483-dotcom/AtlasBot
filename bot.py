@@ -3155,7 +3155,80 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # SECTION 16: MCQ GENERATION HANDLER + v4.0 CREATIVE PDF
 # ============================================================
 
-TEXT_MAX_MCQ_EXTRA = "\n\n🔴 MAXIMUM MODE: তোমাকে অবশ্যই INPUT TEXT এর প্রতিটি লাইন ও প্রতিটি তথ্য থেকে সর্বোচ্চ সংখ্যক MCQ বানাতে হবে। কোনো তথ্য বাদ দেওয়া যাবে না। একটি তথ্যকে ঘুরিয়ে-ফিরিয়ে একাধিক MCQ বানাও। সর্বনিম্ন ২৫ থেকে ৩৫ টি MCQ দাও।"
+TEXT_MAX_MCQ_EXTRA = """
+
+🔴 MANDATORY RULES (কোনোটাই skip করা যাবে না):
+1. INPUT TEXT-এর প্রতিটি লাইন/তথ্য থেকে MUST অন্তত একটি MCQ বানাতে হবে — কোনো লাইন বাদ দেওয়া যাবে না। যত বেশি লাইন, তত বেশি MCQ — সর্বোচ্চ সংখ্যক MCQ বানানোই লক্ষ্য (সর্বনিম্ন ২৫-৩৫টি)।
+2. Explanation-এ সঠিক answer confirm করার পাশাপাশি সেই তথ্যের ঠিক আশেপাশের (আগের/পরের লাইনের) source text থেকে অতিরিক্ত related info যোগ করতে হবে — শুধু answer repeat করা চলবে না।
+3. সঠিক answer (A/B/C/D) প্রতিটি প্রশ্নে ভিন্ন ভিন্ন option-এ থাকতে হবে — কখনোই sequential pattern বা একই option বারবার না।
+4. যত ধরনের সম্ভব MCQ variety বানাও — direct fact, definition, cause-effect, comparison, fill-in-the-blank style, "কোনটি সঠিক নয়" ধরনের প্রশ্ন — সব ধরনের প্রশ্ন mix করে বানাও, শুধু এক প্যাটার্নে আটকে থেকো না।
+5. ৪টি option, একটি সঠিক, বাকি ৩টি plausible কিন্তু ভুল distractor (random/অর্থহীন option চলবে না)।"""
+
+async def cmd_txt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/txt — text message-এ reply করে auto max-mode MCQ generate করে, কোনো button ছাড়াই।"""
+    reply = update.message.reply_to_message
+    if not reply or not reply.text:
+        await update.message.reply_text("❌ Text message-এ reply করে /txt দিন!")
+        return
+    text = reply.text
+    user = get_user_info(update)
+    user_id = user['user_id']
+    lines = [line for line in text.split('\n') if line.strip()]
+    word_count = len(text.split())
+    if len(lines) <= 3 and word_count < 30:
+        await update.message.reply_text(
+            "❌ **দু:খিত!** 😕\n\nএই Text এ Proper info নেই!\nআরো তথ্য দিন।\n\n"
+            "📝 কমপক্ষে ৪-৫ লাইন, ৩০+ শব্দ লাগবে।"
+        )
+        return
+    allowed, usage, limit, is_perm = check_access(user_id)
+    if not allowed:
+        if is_perm:
+            await update.message.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
+        else:
+            await update.message.reply_text(PREMIUM_MSG)
+        return
+
+    status = await update.message.reply_text("⏳ Text থেকে MCQ তৈরি হচ্ছে...")
+    async def _edit_txt(t):
+        try:
+            await status.edit_text(t)
+        except Exception:
+            pass
+    prog_task = asyncio.create_task(live_progress_task(_edit_txt, "Text", total_eta=8))
+    try:
+        mcqs, error = await generate_mcq_from_text(text, 'prompt_1', maximize=True)
+        prog_task.cancel()
+        if error:
+            await status.edit_text(f"❌ MCQ বানাতে সমস্যা হয়েছে: {error}\n\nআবার চেষ্টা করুন।")
+            return
+        if not mcqs:
+            await status.edit_text("❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।")
+            return
+        src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + "_prompt_1_max"
+        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
+        new_usage = increment_usage(user_id)
+        user_data = get_user(user_id)
+        practice_no = user_data.get('practice_count', 1) if user_data else 1
+        caption = generate_caption({'first_name': user.get('first_name') or 'User'}, practice_no, len(mcqs), "Maximum MCQ")
+        allowed2, usage2, limit2, is_perm2 = check_access(user_id)
+        keyboard = mcq_set_keyboard(quiz_id, user_id)
+        full_caption = f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit2}"
+        await status.edit_text(full_caption, reply_markup=InlineKeyboardMarkup(keyboard))
+        try:
+            await status.pin(disable_notification=True)
+            client = get_supabase()
+            client.table('mcqs').update({'chat_id': status.chat_id, 'message_id': status.message_id}).eq('quiz_id', quiz_id).execute()
+        except Exception as e:
+            log_error(f"Pin message failed: {e}")
+        log(f"✅ /txt MCQ generated: {quiz_id} ({len(mcqs)} questions)")
+    except Exception as e:
+        prog_task.cancel()
+        log_error(f"/txt handler error: {e}")
+        try:
+            await status.edit_text(BUSY_MSG)
+        except Exception:
+            pass
 
 async def handle_text_mcq_generation(query, mode: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = query.from_user
@@ -5388,6 +5461,7 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("done", cmd_pdfc_done))
     application.add_handler(CommandHandler("cancel", cmd_pdfc_cancel))
     application.add_handler(CommandHandler("atlas", cmd_atlas))
+    application.add_handler(CommandHandler("txt", cmd_txt))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
     application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_image))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pending_input), group=0)
