@@ -270,7 +270,8 @@ async function _resolveCfgFromApi() {
             if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) {
                 return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
                     cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
-                    userId: USER_ID, challengerId: 0 };
+                    userId: USER_ID, challengerId: 0, negPerWrong: d.negPerWrong ?? d.neg_per_wrong ?? 0.25,
+                    secPerQ: d.secPerQ ?? d.sec_per_q ?? 60, total: d.mcqs.length };
             }}
         } catch(e) {}
     }
@@ -280,7 +281,8 @@ async function _resolveCfgFromApi() {
         if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) {
             return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
                 cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
-                userId: USER_ID, challengerId: 0 };
+                userId: USER_ID, challengerId: 0, negPerWrong: d.negPerWrong ?? d.neg_per_wrong ?? 0.25,
+                secPerQ: d.secPerQ ?? d.sec_per_q ?? 60, total: d.mcqs.length };
         }}
     } catch(e) {}
     try {
@@ -292,7 +294,8 @@ async function _resolveCfgFromApi() {
             const mcqData = typeof b.mcqs === 'string' ? JSON.parse(b.mcqs) : b.mcqs;
             return { mcqs: mcqData || [], topic: 'Special Exam', page: 1,
                 cacheId, imageFileId: b.image_file_id || null, hfSpaceUrl: RENDER,
-                userId: USER_ID, challengerId: 0 };
+                userId: USER_ID, challengerId: 0, negPerWrong: b.negPerWrong ?? b.neg_per_wrong ?? 0.25,
+                secPerQ: b.secPerQ ?? b.sec_per_q ?? 60, total: mcqData.length };
         }
     } catch(e) {}
     try {
@@ -306,7 +309,8 @@ async function _resolveCfgFromApi() {
             const mcqData2 = typeof b2.mcqs === 'string' ? JSON.parse(b2.mcqs) : b2.mcqs;
             return { mcqs: mcqData2 || [], topic: 'Special Exam', page: 1,
                 cacheId, imageFileId: b2.image_file_id || null, hfSpaceUrl: RENDER,
-                userId: USER_ID, challengerId: 0 };
+                userId: USER_ID, challengerId: 0, negPerWrong: b2.negPerWrong ?? b2.neg_per_wrong ?? 0.25,
+                secPerQ: b2.secPerQ ?? b2.sec_per_q ?? 60, total: mcqData2.length };
         }
     } catch(e) {}
     return null;
