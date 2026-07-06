@@ -4947,30 +4947,52 @@ async def cross_bot_watchdog_task() -> None:
     and vice versa QuizBot pings this bot. Two separate services checking
     each other means a single service's total crash still gets detected."""
     quizbot_url = os.getenv("QUIZBOT_URL", "").rstrip("/")
-    if not quizbot_url:
+    sca_url = os.getenv("SAVECONTENTATLAS_URL", "https://savecontentatlas.onrender.com").rstrip("/")
+    if not quizbot_url and not sca_url:
         return
     await asyncio.sleep(200)
-    log("🔗 Cross-bot watchdog (-> QuizBot) started")
+    log("🔗 Cross-bot watchdog (-> QuizBot, SaveContentAtlas) started")
     fails = 0
     was_down = False
+    sca_fails = 0
+    sca_was_down = False
     while True:
-        healthy = False
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                r = await client.get(f"{quizbot_url}/health")
-                healthy = r.status_code == 200
-        except Exception:
+        if quizbot_url:
             healthy = False
-        if healthy:
-            fails = 0
-            if was_down:
-                await notify_owner("✅ QuizBot reachable again (cross-bot check).")
-                was_down = False
-        else:
-            fails += 1
-            if fails >= 2 and not was_down:
-                await notify_owner(f"🚨 QuizBot unreachable via cross-bot check ({fails}x) — checked from AtlasBot.")
-                was_down = True
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r = await client.get(f"{quizbot_url}/health")
+                    healthy = r.status_code == 200
+            except Exception:
+                healthy = False
+            if healthy:
+                fails = 0
+                if was_down:
+                    await notify_owner("✅ QuizBot reachable again (cross-bot check).")
+                    was_down = False
+            else:
+                fails += 1
+                if fails >= 2 and not was_down:
+                    await notify_owner(f"🚨 QuizBot unreachable via cross-bot check ({fails}x) — checked from AtlasBot.")
+                    was_down = True
+        if sca_url:
+            sca_healthy = False
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r2 = await client.get(sca_url)
+                    sca_healthy = r2.status_code == 200
+            except Exception:
+                sca_healthy = False
+            if sca_healthy:
+                sca_fails = 0
+                if sca_was_down:
+                    await notify_owner("✅ SaveContentAtlas reachable again (cross-bot check).")
+                    sca_was_down = False
+            else:
+                sca_fails += 1
+                if sca_fails >= 2 and not sca_was_down:
+                    await notify_owner(f"🚨 SaveContentAtlas unreachable via cross-bot check ({sca_fails}x) — checked from AtlasBot.")
+                    sca_was_down = True
         await asyncio.sleep(300)
 
 def _get_active_checkin_users() -> List[int]:
