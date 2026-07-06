@@ -1,6 +1,10 @@
 <!DOCTYPE html>
 <html lang="bn">
 <head>
+<link rel="preconnect" href="https://wbdyjpjbczfunyhhmtry.supabase.co">
+<link rel="preconnect" href="https://atlas-bot-proxy.hamza818483.workers.dev">
+<link rel="dns-prefetch" href="https://wbdyjpjbczfunyhhmtry.supabase.co">
+<link rel="dns-prefetch" href="https://atlas-bot-proxy.hamza818483.workers.dev">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ATLAS Special Exam</title>
@@ -263,57 +267,71 @@ async function _resolveCfgFromApi() {
     const RENDER2 = 'https://atlasbot-3tgq.onrender.com';
     const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+    const CF_URL = 'https://atlas-bot-proxy.hamza818483.workers.dev';
 
-    for (const base of [RENDER, RENDER2]) {
-        try {
-            const r = await fetch(`${base}/api/exam/${cacheId}`, { signal: AbortSignal.timeout(8000) });
-            if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) {
-                return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
-                    cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
-                    userId: USER_ID, challengerId: 0, negPerWrong: d.negPerWrong ?? d.neg_per_wrong ?? 0.25,
-                    secPerQ: d.secPerQ ?? d.sec_per_q ?? 60, total: d.mcqs.length };
-            }}
-        } catch(e) {}
-    }
-    try {
-        const CF_URL = 'https://atlas-bot-proxy.hamza818483.workers.dev';
+    // Sob source ekshathe race kore — jetai fastest resolve hobe oitai use hobe (Promise.any)
+    const renderFetch = (async () => {
+        const r = await fetch(`${RENDER}/api/exam/${cacheId}`, { signal: AbortSignal.timeout(8000) });
+        if (!r.ok) throw new Error('fail');
+        const d = await r.json();
+        if (!d || !d.mcqs || !d.mcqs.length) throw new Error('empty');
+        return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
+            cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
+            userId: USER_ID, challengerId: 0, negPerWrong: d.negPerWrong ?? d.neg_per_wrong ?? 0.25,
+            secPerQ: d.secPerQ ?? d.sec_per_q ?? 60, total: d.mcqs.length };
+    })();
+    const render2Fetch = (async () => {
+        const r = await fetch(`${RENDER2}/api/exam/${cacheId}`, { signal: AbortSignal.timeout(8000) });
+        if (!r.ok) throw new Error('fail');
+        const d = await r.json();
+        if (!d || !d.mcqs || !d.mcqs.length) throw new Error('empty');
+        return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
+            cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
+            userId: USER_ID, challengerId: 0, negPerWrong: d.negPerWrong ?? d.neg_per_wrong ?? 0.25,
+            secPerQ: d.secPerQ ?? d.sec_per_q ?? 60, total: d.mcqs.length };
+    })();
+    const cfFetch = (async () => {
         const r = await fetch(`${CF_URL}/api/exam/${cacheId}`, { signal: AbortSignal.timeout(8000) });
-        if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) {
-            return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
-                cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
-                userId: USER_ID, challengerId: 0, negPerWrong: d.negPerWrong ?? d.neg_per_wrong ?? 0.25,
-                secPerQ: d.secPerQ ?? d.sec_per_q ?? 60, total: d.mcqs.length };
-        }}
-    } catch(e) {}
-    try {
+        if (!r.ok) throw new Error('fail');
+        const d = await r.json();
+        if (!d || !d.mcqs || !d.mcqs.length) throw new Error('empty');
+        return { mcqs: d.mcqs, topic: d.topic || 'Special Exam', page: d.page || 1,
+            cacheId, imageFileId: d.image_file_id || null, hfSpaceUrl: RENDER,
+            userId: USER_ID, challengerId: 0, negPerWrong: d.negPerWrong ?? d.neg_per_wrong ?? 0.25,
+            secPerQ: d.secPerQ ?? d.sec_per_q ?? 60, total: d.mcqs.length };
+    })();
+    const sbFetch = (async () => {
         const r = await fetch(`${SB_URL}/rest/v1/mcqs?quiz_id=eq.${cacheId}&select=*`,
-            { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+            { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(8000) });
         const data = await r.json();
-        if (data && data[0]) {
-            const b = data[0];
-            const mcqData = typeof b.mcqs === 'string' ? JSON.parse(b.mcqs) : b.mcqs;
-            return { mcqs: mcqData || [], topic: 'Special Exam', page: 1,
-                cacheId, imageFileId: b.image_file_id || null, hfSpaceUrl: RENDER,
-                userId: USER_ID, challengerId: 0, negPerWrong: b.negPerWrong ?? b.neg_per_wrong ?? 0.25,
-                secPerQ: b.secPerQ ?? b.sec_per_q ?? 60, total: mcqData.length };
-        }
-    } catch(e) {}
-    try {
+        if (!data || !data[0]) throw new Error('empty');
+        const b = data[0];
+        const mcqData = typeof b.mcqs === 'string' ? JSON.parse(b.mcqs) : b.mcqs;
+        if (!mcqData || !mcqData.length) throw new Error('empty');
+        return { mcqs: mcqData, topic: 'Special Exam', page: 1,
+            cacheId, imageFileId: b.image_file_id || null, hfSpaceUrl: RENDER,
+            userId: USER_ID, challengerId: 0, negPerWrong: b.negPerWrong ?? b.neg_per_wrong ?? 0.25,
+            secPerQ: b.secPerQ ?? b.sec_per_q ?? 60, total: mcqData.length };
+    })();
+    const sb2Fetch = (async () => {
         const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
         const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
-        const r2 = await fetch(`${SB2_URL}/rest/v1/mcqs?quiz_id=eq.${cacheId}&select=*`,
-            { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` } });
-        const data2 = await r2.json();
-        if (data2 && data2[0]) {
-            const b2 = data2[0];
-            const mcqData2 = typeof b2.mcqs === 'string' ? JSON.parse(b2.mcqs) : b2.mcqs;
-            return { mcqs: mcqData2 || [], topic: 'Special Exam', page: 1,
-                cacheId, imageFileId: b2.image_file_id || null, hfSpaceUrl: RENDER,
-                userId: USER_ID, challengerId: 0, negPerWrong: b2.negPerWrong ?? b2.neg_per_wrong ?? 0.25,
-                secPerQ: b2.secPerQ ?? b2.sec_per_q ?? 60, total: mcqData2.length };
-        }
-    } catch(e) {}
-    return null;
+        const r = await fetch(`${SB2_URL}/rest/v1/mcqs?quiz_id=eq.${cacheId}&select=*`,
+            { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` }, signal: AbortSignal.timeout(8000) });
+        const data = await r.json();
+        if (!data || !data[0]) throw new Error('empty');
+        const b2 = data[0];
+        const mcqData2 = typeof b2.mcqs === 'string' ? JSON.parse(b2.mcqs) : b2.mcqs;
+        if (!mcqData2 || !mcqData2.length) throw new Error('empty');
+        return { mcqs: mcqData2, topic: 'Special Exam', page: 1,
+            cacheId, imageFileId: b2.image_file_id || null, hfSpaceUrl: RENDER,
+            userId: USER_ID, challengerId: 0, negPerWrong: b2.negPerWrong ?? b2.neg_per_wrong ?? 0.25,
+            secPerQ: b2.secPerQ ?? b2.sec_per_q ?? 60, total: mcqData2.length };
+    })();
+
+    try {
+        return await Promise.any([renderFetch, render2Fetch, cfFetch, sbFetch, sb2Fetch]);
+    } catch (e) { return null; }
 }
 
 async function init() {
