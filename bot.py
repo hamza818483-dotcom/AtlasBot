@@ -4975,6 +4975,12 @@ async def cross_bot_watchdog_task() -> None:
                 if fails >= 2 and not was_down:
                     await notify_owner(f"🚨 QuizBot unreachable via cross-bot check ({fails}x) — checked from AtlasBot.")
                     was_down = True
+                if fails >= 2:
+                    try:
+                        async with httpx.AsyncClient(timeout=30) as client:
+                            await client.get(quizbot_url)
+                    except Exception:
+                        pass
         if sca_url:
             sca_healthy = False
             try:
@@ -4993,6 +4999,12 @@ async def cross_bot_watchdog_task() -> None:
                 if sca_fails >= 2 and not sca_was_down:
                     await notify_owner(f"🚨 SaveContentAtlas unreachable via cross-bot check ({sca_fails}x) — checked from AtlasBot.")
                     sca_was_down = True
+                if sca_fails >= 2:
+                    try:
+                        async with httpx.AsyncClient(timeout=30) as client:
+                            await client.get(sca_url)
+                    except Exception:
+                        pass
         await asyncio.sleep(300)
 
 def _get_active_checkin_users() -> List[int]:
