@@ -5587,7 +5587,7 @@ async def setup_bot() -> None:
     asyncio.create_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
     asyncio.create_task(_supervised(watchdog_task, "watchdog_task"))
     asyncio.create_task(_supervised(watchdog2_task, "watchdog2_task"))
-    # asyncio.create_task(_supervised(cross_bot_watchdog_task, "cross_bot_watchdog_task"))  # DISABLED per request
+    asyncio.create_task(_supervised(cross_bot_watchdog_task, "cross_bot_watchdog_task"))
     asyncio.create_task(_supervised(checkin_scheduler, "checkin_scheduler"))
     asyncio.create_task(_supervised(cf_proxy_health_check_scheduler, "cf_proxy_health_check_scheduler"))
     log("✅ Bot setup complete!")
