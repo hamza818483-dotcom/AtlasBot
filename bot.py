@@ -4943,7 +4943,7 @@ async def _ram_guard_task() -> None:
                 secondary = (os.environ.get("RENDER_URL_2", "") or "").strip()
                 if secondary and BOT_TOKEN:
                     try:
-                        webhook_url = secondary.rstrip("/") + "/webhook"
+                        webhook_url = secondary.rstrip("/") + "/webhook/" + BOT_TOKEN
                         async with httpx.AsyncClient(timeout=8) as _c:
                             r = await _c.post(
                                 f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
