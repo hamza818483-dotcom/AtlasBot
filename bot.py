@@ -3844,17 +3844,25 @@ async def handle_new_practice(query, user, mode: str, quiz_id: str) -> None:
             await query.message.reply_text("❌ মূল ইমেজ পাওয়া যায়নি। নতুন ইমেজ পাঠান।")
             return
         wait_msg = await query.message.reply_text(
-            f"🔄 **নতুন MCQ তৈরি হচ্ছে...**\n\nএকই ইমেজ থেকে নতুন ১৫টি প্রশ্ন বানানো হচ্ছে।\n⏱️ অনুগ্রহ করে অপেক্ষা করুন... (2-5 sec)\n\n📋 Same Prompt Type: {prompt_name}",
+            f"🔄 **নতুন MCQ তৈরি হচ্ছে...**\n\nএকই ইমেজ থেকে নতুন ১৫টি প্রশ্ন বানানো হচ্ছে।\n📋 Same Prompt Type: {prompt_name}",
             parse_mode=ParseMode.MARKDOWN
         )
+        async def _edit_np(t):
+            try:
+                await wait_msg.edit_text(t)
+            except Exception:
+                pass
+        prog_task = asyncio.create_task(live_progress_task(_edit_np, "Image", total_eta=8))
         try:
             file = await application.bot.get_file(image_file_id)
             image_bytes = bytes(await file.download_as_bytearray())
         except Exception as e:
             log_error(f"Failed to download image for new practice: {e}")
+            prog_task.cancel()
             await wait_msg.edit_text("❌ ইমেজ ডাউনলোড করতে সমস্যা হয়েছে।")
             return
         mcqs, error = await generate_mcq_from_image(image_bytes, prompt_type)
+        prog_task.cancel()
         if error or not mcqs:
             err_msg = error or "MCQ তৈরি করতে সমস্যা হয়েছে।"
             await wait_msg.edit_text(f"❌ {err_msg}")
