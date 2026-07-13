@@ -2613,14 +2613,27 @@ async def cmd_pdfc_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("❌ কোনো image পাওয়া যায়নি!")
         return
 
-    loading = await update.message.reply_text(f"⏳ {len(imgs)} টি image দিয়ে PDF বানানো হচ্ছে...")
+    loading = await update.message.reply_text(f"⏳ {len(imgs)} টি image দিয়ে PDF বানানো হচ্ছে...\n📊 Progress: {_progress_bar(0)} 0%")
     try:
         from PIL import Image as PILImage
         import io as _io
         pdf_images = []
-        for img_bytes in imgs:
+        total_imgs = len(imgs)
+        last_pct = -1
+        for idx, img_bytes in enumerate(imgs):
             im = PILImage.open(_io.BytesIO(img_bytes)).convert("RGB")
             pdf_images.append(im)
+            pct = int((idx + 1) / total_imgs * 100)
+            if pct != last_pct and (pct % 10 == 0 or idx == total_imgs - 1):
+                last_pct = pct
+                try:
+                    await loading.edit_text(
+                        f"⏳ {total_imgs} টি image দিয়ে PDF বানানো হচ্ছে...\n"
+                        f"📊 Progress: {_progress_bar(pct)} {pct}%\n"
+                        f"✅ প্রসেস হয়েছে: {idx+1}/{total_imgs}"
+                    )
+                except Exception:
+                    pass
 
         buf = _io.BytesIO()
         pdf_images[0].save(buf, format="PDF", save_all=True, append_images=pdf_images[1:])
