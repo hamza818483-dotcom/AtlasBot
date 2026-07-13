@@ -1848,6 +1848,25 @@ This rule has the HIGHEST priority in this entire prompt and overrides any langu
 example, or instruction stated anywhere else — if anything above conflicts, this rule wins."""
 
 
+SELF_VERIFY_THOUGHT_LOCK = """
+
+================================
+🧠 INTERNAL MULTI-STEP VERIFICATION — DO THIS SILENTLY BEFORE WRITING FINAL JSON
+================================
+এই পুরো verification একটাই call/response এর ভিতরে, নিজের ভাবনায় (internal reasoning), আউটপুটে না
+দেখিয়ে করবে। শুধু চূড়ান্ত JSON output দিবে — verification steps output এ লিখবে না।
+
+THOUGHT 1 — RULE RECAP: উপরের prompt এর প্রতিটি নিয়ম (MCQ type, count, language, source-only
+rule, spelling rule) নিজের মনে একবার পুনরাবৃত্তি করো।
+THOUGHT 2 — DRAFT: সোর্স থেকে MCQ গুলোর একটি draft বানাও।
+THOUGHT 3 — SELF-CHECK: প্রতিটি draft MCQ কে THOUGHT 1 এর নিয়মের বিপরীতে যাচাই করো — ভুল বানান,
+ভুল তথ্য, ভাষা মিসম্যাচ, prompt type না মানা, বা source এর বাইরের তথ্য আছে কিনা চেক করো।
+THOUGHT 4 — FIX: THOUGHT 3 তে যা ভুল পেয়েছো তা ঠিক করো, প্রয়োজনে অগ্রহণযোগ্য MCQ বাদ দাও।
+THOUGHT 5 — FINAL: শুধুমাত্র THOUGHT 4 এর পর যে MCQ গুলো সব নিয়ম ১০০% মেনেছে সেগুলোই চূড়ান্ত JSON
+আকারে আউটপুট দাও।
+এই ৫টি thought একই call এ, অতিরিক্ত API call ছাড়াই সম্পন্ন করবে।
+"""
+
 QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
 
 ════════════════════════════════
@@ -2279,7 +2298,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK
+        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + SELF_VERIFY_THOUGHT_LOCK
 
         response_text, provider = await ai_generate(prompt_text, image_bytes)
         if not response_text:
