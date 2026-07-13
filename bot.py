@@ -3258,15 +3258,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             quiz_id = data.replace("del_", "")
             kb = [[InlineKeyboardButton("✅ হ্যাঁ, Delete", callback_data=f"delc_{quiz_id}"),
                    InlineKeyboardButton("↩️ না", callback_data="delno")]]
-            await query.message.reply_text("🗑️ এই MCQ সেটটি Delete করবেন? এটি আর ফেরত আসবে না।", reply_markup=InlineKeyboardMarkup(kb))
+            await query.message.reply_text("🗑️ এই MCQ সেটটি Delete করবেন? এটি আর ফেরত আসবে না।", reply_markup=InlineKeyboardMarkup(kb), reply_to_message_id=query.message.message_id)
         elif data.startswith("delc_"):
             quiz_id = data.replace("delc_", "")
-            if delete_mcq(quiz_id, user.id):
-                await query.message.edit_text("✅ MCQ সেট Delete করা হয়েছে।")
+            ok = delete_mcq(quiz_id, user.id)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            if ok:
+                orig = query.message.reply_to_message
+                if orig:
+                    try:
+                        await orig.delete()
+                    except Exception:
+                        pass
+                else:
+                    await context.bot.send_message(chat_id=chat_id, text="✅ MCQ সেট Delete করা হয়েছে।")
             else:
-                await query.message.edit_text("❌ Delete করা যায়নি। আবার চেষ্টা করুন।")
+                await context.bot.send_message(chat_id=chat_id, text="❌ Delete করা যায়নি। আবার চেষ্টা করুন।")
         elif data == "delno":
-            await query.message.edit_text("↩️ Delete বাতিল করা হয়েছে।")
+            try:
+                await query.message.delete()
+            except Exception:
+                await query.message.edit_text("↩️ Delete বাতিল করা হয়েছে।")
         elif data.startswith("editprompt_"):
             await handle_prompt_edit_start(query, data.replace("editprompt_", ""))
         elif data.startswith("viewprompt_"):
