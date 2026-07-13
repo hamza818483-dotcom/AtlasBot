@@ -1847,6 +1847,10 @@ ACCURACY_AND_COUNT_LOCK = """
 
 MCQ সংখ্যা: গড়ে ১০ থেকে ২০টি MCQ বানাবে। তথ্য কম থাকলে ১০-১২টি, তথ্য বেশি থাকলে ১৫-২০টি।
 Quality সবসময় Quantity এর আগে।
+
+🔴 অপশন সংখ্যা (ABSOLUTE, প্রতিটি MCQ-তে): প্রতিটি MCQ-তে ঠিক ৪টি (৪টিই, কম না বেশি না) অপশন
+থাকতেই হবে — A, B, C, D। কখনো ২টি বা ৩টি অপশন দিয়ে থামবে না (যেমন শুধু হ্যাঁ/না জোড়া)। ৪টি
+সম্পূর্ণ, তথ্যপূর্ণ, ভিন্ন অপশন ছাড়া MCQ output-এ দেওয়া নিষেধ।
 """
 
 STRICT_LANGUAGE_LOCK = """
@@ -2372,7 +2376,7 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + STRICT_LANGUAGE_LOCK
+        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK
         if maximize:
             prompt_text += TEXT_MAX_MCQ_EXTRA
         full_prompt = f"{prompt_text}\n\n📄 INPUT TEXT:\n{text}"
