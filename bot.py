@@ -711,6 +711,20 @@ def _mcq_violates_language_lock(mcq: Dict, source_script: str) -> bool:
         return False
     return mcq_script != source_script
 
+def _dedupe_mcqs(mcqs: List[Dict]) -> List[Dict]:
+    """Remove duplicate MCQs (same question text) so retry-merges don't inflate count with repeats."""
+    seen = set()
+    out = []
+    for m in mcqs:
+        q = (m.get('question') or m.get('q') or '').strip().lower()
+        key = ''.join(q.split())
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append(m)
+    return out
+
 def parse_mcq_json(response_text: str, source_text: str = "") -> List[Dict]:
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider.
     If source_text is provided, also enforces STRICT_LANGUAGE_LOCK by
@@ -2305,14 +2319,17 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
         valid_mcqs = parse_mcq_json(response_text)
-        # v4.0 FIX: if AI returned too few (e.g. True/False or Mixed giving 1),
-        # retry once with an explicit "more questions" instruction.
-        if 0 < len(valid_mcqs) < MIN_MCQ:
-            log(f"⚠️ Only {len(valid_mcqs)} MCQs — retrying for more (prompt: {prompt_type})")
-            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১০টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে ১০+ object থাকতেই হবে।"
+        valid_mcqs = _dedupe_mcqs(valid_mcqs)
+        # v5.0: code-level count enforcement — loop retrying (not just once) until
+        # MIN_MCQ reached or max attempts used, always dedupe, always hard-clamp MAX_MCQ.
+        attempts = 0
+        while len(valid_mcqs) < MIN_MCQ and attempts < 2:
+            attempts += 1
+            log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
+            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
             rt, rp = await ai_generate(retry_prompt, image_bytes)
             if rt:
-                retry_mcqs = parse_mcq_json(rt)
+                retry_mcqs = _dedupe_mcqs(parse_mcq_json(rt))
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
