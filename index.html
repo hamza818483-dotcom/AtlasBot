@@ -876,7 +876,11 @@ function solvePDF(){
     var btn=document.querySelector('.result-btn.success');
     if(btn){btn.disabled=true;btn.textContent='⏳ PDF তৈরি হচ্ছে...';}
     fetch('/api/solve-pdf-html/'+CFG.cacheId).then(function(r){
-        if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));});
+        if(!r.ok) return r.text().then(function(t){
+            var msg='PDF তৈরি ব্যর্থ হয়েছে।';
+            try{var j=JSON.parse(t);if(j&&j.message)msg=j.message;}catch(e){}
+            throw new Error(msg);
+        });
         return r.text();
     }).then(function(html){
         _loadHtml2Pdf(function(){

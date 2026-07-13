@@ -818,12 +818,17 @@ async def _precache_solve_pdf(cache_id: str):
 async def api_solve_pdf_html(cache_id: str):
     """Browser-side Solve PDF: returns raw HTML instantly, no chromium/weasyprint needed.
     Client renders this via html2pdf.js in-browser."""
-    data = _get_exam(cache_id)
-    if not data:
-        return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
-    answers = data.get("last_answers", {}) or {}
-    html = generate_solve_pdf_html(data, answers)
-    return HTMLResponse(html)
+    try:
+        data = _get_exam(cache_id)
+        if not data:
+            return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
+        answers = data.get("last_answers", {}) or {}
+        html = generate_solve_pdf_html(data, answers)
+        return HTMLResponse(html)
+    except Exception as e:
+        print(f"solve-pdf-html error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে। আবার চেষ্টা করুন।"}, status_code=500)
 
 @app.get("/api/solve-pdf-direct/{cache_id}")
 
