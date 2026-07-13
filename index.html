@@ -867,14 +867,14 @@ function solvePDF(){
     var btn=document.querySelector('.result-btn.success');
     if(btn){btn.disabled=true;btn.textContent='⏳ PDF তৈরি হচ্ছে...';}
     fetch('/api/solve-pdf-direct/'+CFG.cacheId).then(function(r){
-        if(!r.ok) throw new Error('HTTP '+r.status);
+        if(!r.ok) return r.json().then(function(j){throw new Error(j.message||('HTTP '+r.status));}).catch(function(){throw new Error('HTTP '+r.status);});
         return r.blob();
     }).then(function(blob){
         var url=URL.createObjectURL(blob);
         window.open(url,'_blank');
         if(btn){btn.disabled=false;btn.textContent='📄 Solve PDF';}
-    }).catch(function(){
-        window.open('/api/solve-pdf-direct/'+CFG.cacheId,'_blank');
+    }).catch(function(e){
+        showToast('❌ PDF তৈরি ব্যর্থ: '+(e&&e.message?e.message:'Unknown error'));
         if(btn){btn.disabled=false;btn.textContent='📄 Solve PDF';}
     });
 }
