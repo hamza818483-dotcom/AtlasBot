@@ -822,7 +822,13 @@ async def api_solve_pdf_html(cache_id: str):
         data = _get_exam(cache_id)
         if not data:
             return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
-        answers = data.get("last_answers", {}) or {}
+        raw_answers = data.get("last_answers", {}) or {}
+        answers = {}
+        try:
+            for k, v in raw_answers.items():
+                answers[str(k)] = v
+        except Exception:
+            answers = {}
         html = generate_solve_pdf_html(data, answers)
         return HTMLResponse(html)
     except Exception as e:
@@ -1381,21 +1387,25 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
     # Build per-question render data (answered or not, all questions included)
     items = []
     for i, q in enumerate(mcqs):
-        correct_idx = q.get("answer", 0)
-        if isinstance(correct_idx, str):
-            correct_idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(correct_idx.upper(), 0)
         try:
-            correct_idx = int(correct_idx)
-        except (TypeError, ValueError):
-            correct_idx = 0
-        if correct_idx < 0 or correct_idx > 3:
-            correct_idx = 0
-        user_answer = answers.get(str(i))
-        try:
-            user_idx = int(user_answer) if (user_answer is not None and user_answer != -1) else -1
-        except (TypeError, ValueError):
-            user_idx = -1
-        items.append({"q": q, "num": i + 1, "correct_idx": correct_idx, "user_idx": user_idx})
+            correct_idx = q.get("answer", 0)
+            if isinstance(correct_idx, str):
+                correct_idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(correct_idx.upper(), 0)
+            try:
+                correct_idx = int(correct_idx)
+            except (TypeError, ValueError):
+                correct_idx = 0
+            if correct_idx < 0 or correct_idx > 3:
+                correct_idx = 0
+            user_answer = answers.get(str(i))
+            try:
+                user_idx = int(user_answer) if (user_answer is not None and user_answer != -1) else -1
+            except (TypeError, ValueError):
+                user_idx = -1
+            items.append({"q": q, "num": i + 1, "correct_idx": correct_idx, "user_idx": user_idx})
+        except Exception as e:
+            print(f"[solve-pdf] skipped malformed MCQ at index {i}: {e}")
+            continue
 
     correct_ct = sum(1 for it in items if it["user_idx"] == it["correct_idx"])
     wrong_ct = sum(1 for it in items if it["user_idx"] != -1 and it["user_idx"] != it["correct_idx"])
@@ -1458,8 +1468,14 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
                     f'<div class="q-text"><span class="q-num">{num}.</span> {q_text}</div>'
                     f'<div class="opts-grid">{opts_html}</div>{exp_html}</div>')
 
-        left_html = "".join(render_q(it) for it in left_col)
-        right_html = "".join(render_q(it) for it in right_col)
+        def _safe_render(it):
+            try:
+                return render_q(it)
+            except Exception as e:
+                print(f"[solve-pdf] render skip q{it.get('num')}: {e}")
+                return ""
+        left_html = "".join(_safe_render(it) for it in left_col)
+        right_html = "".join(_safe_render(it) for it in right_col)
 
         pb = 'page-break-after:always;' if (p_i + 1) < total_pages else ''
         page_header = summary_html if p_i == 0 else f'<div class="header-bar">📋 ATLAS Solve Sheet — {_esc(topic)}</div>'
