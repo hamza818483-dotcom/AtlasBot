@@ -725,7 +725,19 @@ def _dedupe_mcqs(mcqs: List[Dict]) -> List[Dict]:
         out.append(m)
     return out
 
-def parse_mcq_json(response_text: str, source_text: str = "") -> List[Dict]:
+_TF_BANNED_OPT_WORDS = ("হ্যাঁ", "না।", "সত্য", "মিথ্যা", "জ্বী", "জ্বি", "yes", "no", "true", "false")
+
+def _is_tf_banned_option(opt: str) -> bool:
+    """True/False style (prompt_2) forbids bare yes/no/true/false-ish options —
+    every option must be a full fact statement, not a one-word verdict."""
+    o = opt.strip().lower()
+    if len(o) <= 12:
+        for w in _TF_BANNED_OPT_WORDS:
+            if w.lower() in o:
+                return True
+    return False
+
+def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str = "") -> List[Dict]:
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider.
     If source_text is provided, also enforces STRICT_LANGUAGE_LOCK by
     rejecting MCQs whose script doesn't match the source's dominant script."""
@@ -793,6 +805,8 @@ def parse_mcq_json(response_text: str, source_text: str = "") -> List[Dict]:
             continue  # duplicate question within same batch
         if _mcq_violates_language_lock(mcq, source_script):
             continue  # 🔒 STRICT_LANGUAGE_LOCK violation — script mismatch with source
+        if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
+            continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
         seen_questions.add(q_norm)
         valid.append(mcq)
     return valid
@@ -2318,7 +2332,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         if not response_text:
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
-        valid_mcqs = parse_mcq_json(response_text)
+        valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
         # v5.0: code-level count enforcement — loop retrying (not just once) until
         # MIN_MCQ reached or max attempts used, always dedupe, always hard-clamp MAX_MCQ.
@@ -2329,7 +2343,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
             retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
             rt, rp = await ai_generate(retry_prompt, image_bytes)
             if rt:
-                retry_mcqs = _dedupe_mcqs(parse_mcq_json(rt))
+                retry_mcqs = _dedupe_mcqs(parse_mcq_json(rt, prompt_type=prompt_type))
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
@@ -2367,13 +2381,13 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
         if not response_text:
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
-        valid_mcqs = parse_mcq_json(response_text, source_text=text)
+        valid_mcqs = parse_mcq_json(response_text, source_text=text, prompt_type=prompt_type)
         if 0 < len(valid_mcqs) < MIN_MCQ:
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (text) — retrying for more")
             retry_prompt = full_prompt + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।"
             rt, rp = await ai_generate(retry_prompt, None)
             if rt:
-                retry_mcqs = parse_mcq_json(rt, source_text=text)
+                retry_mcqs = parse_mcq_json(rt, source_text=text, prompt_type=prompt_type)
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
