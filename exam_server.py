@@ -1397,6 +1397,24 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
             user_idx = -1
         items.append({"q": q, "num": i + 1, "correct_idx": correct_idx, "user_idx": user_idx})
 
+    correct_ct = sum(1 for it in items if it["user_idx"] == it["correct_idx"])
+    wrong_ct = sum(1 for it in items if it["user_idx"] != -1 and it["user_idx"] != it["correct_idx"])
+    skipped_ct = sum(1 for it in items if it["user_idx"] == -1)
+    neg_mark = round(wrong_ct * 0.25, 2)
+    score = round(correct_ct - wrong_ct * 0.25, 2)
+
+    summary_html = f'''
+    <div class="score-card">
+        <div class="score-left"><div class="score-title">📋 ATLAS Solve Sheet</div><div class="score-sub">{_esc(topic)}</div></div>
+        <div class="score-right"><div class="score-big">{score}</div><div class="score-lbl">/ {len(items)} নম্বর</div></div>
+    </div>
+    <div class="summary-bar">
+        <div class="sum-item"><div class="sum-val s-correct">✅ {correct_ct}</div><div class="sum-lbl">সঠিক</div></div>
+        <div class="sum-item"><div class="sum-val s-wrong">❌ {wrong_ct}</div><div class="sum-lbl">ভুল</div></div>
+        <div class="sum-item"><div class="sum-val s-skip">⏭️ {skipped_ct}</div><div class="sum-lbl">স্কিপ</div></div>
+        <div class="sum-item"><div class="sum-val s-neg">-{neg_mark}</div><div class="sum-lbl">নেগেটিভ</div></div>
+    </div>'''
+
     pages_html = ""
     PER_PAGE = 8  # explanations make cards taller than plain Premium PDF
     total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
@@ -1444,9 +1462,10 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
         right_html = "".join(render_q(it) for it in right_col)
 
         pb = 'page-break-after:always;' if (p_i + 1) < total_pages else ''
+        page_header = summary_html if p_i == 0 else f'<div class="header-bar">📋 ATLAS Solve Sheet — {_esc(topic)}</div>'
         pages_html += f'''
         <div class="page" style="{pb}font-size:{qfs}px;">
-            <div class="header-bar">📋 ATLAS Solve Sheet — {_esc(topic)}</div>
+            {page_header}
             <div class="columns">
                 <div class="col">{left_html}</div>
                 <div class="divider-v"></div>
@@ -1463,6 +1482,17 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
 html,body{{font-family:'Noto Sans Bengali','Inter',sans-serif;color:#111;background:#fff;line-height:1.5;}}
 .page{{padding:10mm 9mm;min-height:297mm;display:flex;flex-direction:column;}}
 .header-bar{{background:linear-gradient(135deg,#d4f1f9,#cfe9ff);border:1.5px solid #9cc8db;border-radius:8px;text-align:center;padding:9px 0;margin-bottom:16px;font-weight:700;font-size:15px;color:#0a3d5c;font-family:'Inter','Noto Sans Bengali',sans-serif;letter-spacing:.3px;}}
+.score-card{{background:linear-gradient(135deg,#1A1D2E 0%,#2D3057 50%,#1A1D2E 100%);color:#fff;border-radius:10px;padding:14px 18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;}}
+.score-title{{font-size:17px;font-weight:800;color:#5A9FE0;letter-spacing:.5px;}}
+.score-sub{{font-size:10px;opacity:.75;margin-top:2px;}}
+.score-right{{text-align:right;}}
+.score-big{{font-size:26px;font-weight:800;color:#22D47A;}}
+.score-lbl{{font-size:9px;opacity:.75;}}
+.summary-bar{{display:flex;gap:8px;margin-bottom:14px;background:#f8f9ff;border-radius:8px;padding:9px 12px;border:1px solid #e0e4ff;}}
+.sum-item{{flex:1;text-align:center;}}
+.sum-val{{font-size:16px;font-weight:800;}}
+.sum-lbl{{font-size:9px;color:#7A82A8;margin-top:1px;}}
+.s-correct{{color:#22D47A;}}.s-wrong{{color:#F87171;}}.s-skip{{color:#FBBF24;}}.s-neg{{color:#F87171;}}
 .columns{{display:flex;gap:0;flex:1;}}
 .col{{flex:1;min-width:0;padding:0 10px;}}
 .divider-v{{width:1.5px;background:linear-gradient(#bbb,#ddd,#bbb);margin:0 2px;}}
