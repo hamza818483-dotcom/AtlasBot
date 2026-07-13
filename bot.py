@@ -680,8 +680,42 @@ def _fix_missing_object_braces(t: str) -> str:
 
 
 
-def parse_mcq_json(response_text: str) -> List[Dict]:
-    """Shared cleaner+parser+validator for MCQ JSON from any AI provider."""
+_BENGALI_RE = re.compile(r'[\u0980-\u09FF]')
+_ARABIC_RE = re.compile(r'[\u0600-\u06FF]')
+_DEVANAGARI_RE = re.compile(r'[\u0900-\u097F]')
+_LATIN_RE = re.compile(r'[A-Za-z]')
+
+def _detect_script(text: str) -> str:
+    """Detects dominant script/language of a text block for language-lock checks."""
+    if not text:
+        return "unknown"
+    counts = {
+        "bengali": len(_BENGALI_RE.findall(text)),
+        "arabic": len(_ARABIC_RE.findall(text)),
+        "devanagari": len(_DEVANAGARI_RE.findall(text)),
+        "latin": len(_LATIN_RE.findall(text)),
+    }
+    best = max(counts, key=counts.get)
+    return best if counts[best] > 0 else "unknown"
+
+def _mcq_violates_language_lock(mcq: Dict, source_script: str) -> bool:
+    """🔒 STRICT_LANGUAGE_LOCK enforcement: an MCQ's question+options+explanation
+    must be in the SAME script as the source. Flags MCQs that were silently
+    translated/defaulted to a different script than the input — the single
+    most common way prompt rules get broken under speed pressure."""
+    if source_script == "unknown":
+        return False  # can't verify, don't punish
+    combined = (mcq.get('question', '') + ' ' + ' '.join(str(o) for o in mcq.get('options', [])))
+    mcq_script = _detect_script(combined)
+    if mcq_script == "unknown":
+        return False
+    return mcq_script != source_script
+
+def parse_mcq_json(response_text: str, source_text: str = "") -> List[Dict]:
+    """Shared cleaner+parser+validator for MCQ JSON from any AI provider.
+    If source_text is provided, also enforces STRICT_LANGUAGE_LOCK by
+    rejecting MCQs whose script doesn't match the source's dominant script."""
+    source_script = _detect_script(source_text) if source_text else "unknown"
     t = (response_text or "").strip()
     if t.startswith('```json'):
         t = t[7:]
@@ -743,6 +777,8 @@ def parse_mcq_json(response_text: str) -> List[Dict]:
         q_norm = re.sub(r'\s+', ' ', q_text).lower()
         if q_norm in seen_questions:
             continue  # duplicate question within same batch
+        if _mcq_violates_language_lock(mcq, source_script):
+            continue  # 🔒 STRICT_LANGUAGE_LOCK violation — script mismatch with source
         seen_questions.add(q_norm)
         valid.append(mcq)
     return valid
@@ -2290,13 +2326,13 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
         if not response_text:
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
-        valid_mcqs = parse_mcq_json(response_text)
+        valid_mcqs = parse_mcq_json(response_text, source_text=text)
         if 0 < len(valid_mcqs) < MIN_MCQ:
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (text) — retrying for more")
             retry_prompt = full_prompt + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।"
             rt, rp = await ai_generate(retry_prompt, None)
             if rt:
-                retry_mcqs = parse_mcq_json(rt)
+                retry_mcqs = parse_mcq_json(rt, source_text=text)
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
