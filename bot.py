@@ -3100,14 +3100,12 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 📸 আপনার Image থেকে MCQ বানাতে MCQ টাইপ সিলেক্ট করুন:
 
-🩺 **Medical Standard** — সাধারণ মেডিকেল MCQ
-✅ **সত্য-মিথ্যার প্রশ্ন** — True/False ফরম্যাট
-🔥 **কঠিন প্রশ্ন** — অ্যাডভান্সড লেভেল
-🎲 **Mixed** — সবগুলো মিলিয়ে
+🩺 Medical Standard — সাধারণ মেডিকেল MCQ
+✅ সত্য-মিথ্যার প্রশ্ন — True/False ফরম্যাট
+🔥 কঠিন প্রশ্ন — অ্যাডভান্সড লেভেল
+🎲 Mixed — সবগুলো মিলিয়ে
 
-🧠 **জ্ঞানমূলক** / 💡 **অনুধাবনমূলক** — সৃজনশীল PDF
-
-⏱️ Response Time: 2-4 sec""",
+🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক — সৃজনশীল PDF""",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
