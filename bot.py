@@ -1736,11 +1736,40 @@ async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: 
 # ============================================================
 
 # ============================================================
-# QBM 2-CALL CONNECTED PIPELINE (ported from QuizBot's /qbm system)
-# Call 1: strict extraction (own OCR + dedup) -- Groq primary, Gemini fallback
-# Call 2: connected miss-check audit of Call 1's specific output (not a fresh
-#         re-extraction) -- catches MCQs Call 1 missed, then re-dedupes once more
+# STRICT SOURCE-LANGUAGE LOCK — used by generate_mcq_from_image / generate_mcq_from_text.
+# bug fix (root cause of MCQs sometimes coming out in the wrong/mixed language): the old
+# instruction was a single soft sentence ("Detect the language... Generate ALL questions in
+# that SAME language") appended once at the end of the prompt — easy for the model to treat
+# as a low-priority suggestion, especially on longer prompts or when the source itself has
+# mixed languages (e.g. English scientific terms inside a Bengali paragraph). This is now a
+# zero-tolerance, explicitly-prioritized rule block instead of one soft sentence.
 # ============================================================
+STRICT_LANGUAGE_LOCK = """
+
+════════════════════════════════
+🌐 SOURCE LANGUAGE — ABSOLUTE, ZERO-TOLERANCE RULE (read this before generating anything)
+════════════════════════════════
+STEP 1 (mandatory, before writing a single MCQ): identify the language the source content is
+actually written in. Do this per distinct block of content if the source mixes languages in
+different sections — do not assume the whole source is one language from a quick glance.
+
+STEP 2: generate the question, all options, AND the explanation for each MCQ 100% in that
+SAME source language — matching script and language exactly, with these absolute rules:
+❌ NEVER translate the source content into a different language, under any circumstance.
+❌ NEVER default to Bengali (or any other language) out of habit — the source's actual
+   language always wins, even if it's English, Bangla, Hindi, Arabic, or anything else.
+❌ NEVER blend two languages within a single MCQ unless the source ITSELF genuinely mixes
+   them (e.g. an English technical term inside a Bengali sentence, exactly as written in the
+   source) — copy that exact mixing pattern faithfully, don't "clean it up" into one language.
+❌ If the source has multiple sections in different languages, each MCQ must match the
+   language of the SPECIFIC section/content it was built from — not a single language picked
+   for the whole output.
+✅ Numerals: preserve the digit script the source used for that specific content (Bengali
+   ১২৩ stays Bengali, English 123 stays English) — do not let language handling cause a
+   digit-script switch.
+This rule has the HIGHEST priority in this entire prompt and overrides any language default,
+example, or instruction stated anywhere else — if anything above conflicts, this rule wins."""
+
 
 QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
 
@@ -1860,7 +1889,9 @@ Rules while scanning:
   correct option is correct, AND brief relevant info tied to why the other options are
   wrong/related context — except in case 1, where you copy the source explanation exactly
   as-is even if it doesn't explicitly cover the wrong options.
-- Max 165 characters, Bengali language, factually accurate.
+- Max 165 characters. Language: MUST match that specific MCQ's own source language (see the
+  SOURCE LANGUAGE rule below) — never hardcoded to Bengali or any fixed language. Factually
+  accurate regardless of language.
 - This priority order (1 → 2 → 3) is permanent and always active — never skip a step or
   reorder it, on every single MCQ, every time.
 
@@ -1904,6 +1935,31 @@ Instead: ALWAYS state the actual fact, information, or content directly and natu
 it were plain general knowledge — NEVER mention or imply that it came from "the shown
 image/box/table/passage/page". This rule applies permanently, always, to every single MCQ's
 question and explanation, with absolutely no exceptions, regardless of subject or source type.
+
+════════════════════════════════
+🌐 SOURCE LANGUAGE — ABSOLUTE, ZERO-TOLERANCE, PERMANENT RULE
+════════════════════════════════
+❌ NEVER translate, transliterate, or switch the language of ANY MCQ. The question, all four
+   options, and the explanation for a given MCQ MUST be in the EXACT SAME language the source
+   MCQ itself was written in on the page — character for character, script for script.
+❌ NEVER blend languages within a single MCQ (e.g. Bengali question with English options, or
+   vice versa) UNLESS the source itself genuinely mixes them (e.g. an English technical/
+   scientific term embedded inside an otherwise-Bengali sentence, exactly as printed) — copy
+   that exact mixing pattern, do not "clean it up" into one language or the other.
+❌ NEVER default to Bengali (or any other language) for the explanation when the source MCQ is
+   in a different language — case 3 of the EXPLANATION RULES above (self-generated explanation)
+   MUST still be written in the SAME language as that specific MCQ's question/options, never a
+   fixed default language.
+✅ If the page contains MCQs in multiple different languages (e.g. some in Bengali, some in
+   English), extract each MCQ in ITS OWN original language — the output list may legitimately
+   contain MCQs in different languages side by side; that is correct behavior, not an error.
+✅ Detect the language per-MCQ, not once for the whole page — do not assume every MCQ on a page
+   shares the same language as the first one you read.
+✅ Numerals/digits: preserve the script the source used for THAT MCQ (Bengali ১২৩ stays Bengali,
+   English 123 stays English) — this is already covered above but applies doubly under this rule:
+   never let language auto-detection cause a digit-script switch either.
+This rule overrides any general "Bengali language" default mentioned elsewhere in this prompt —
+wherever a language default is implied, the SOURCE MCQ's own actual language always wins.
 
 ════════════════════════════════
 📤 OUTPUT FORMAT
@@ -2046,6 +2102,9 @@ TASK (fast audit, connected to Call 1 -- do not redo full extraction):
    (especially the LAST MCQ on the page -- most commonly missed).
 2) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
    source position order, A/B/C/D slots by position -- never relabeled/sorted).
+2b) LANGUAGE (strict, zero-tolerance): each missed MCQ's question/options/explanation MUST be
+   in that MCQ's own actual source language on the page -- never translated, never defaulted
+   to a different language, never blended unless the source itself mixes languages.
 3) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
    text to its question (self-contained), same as Call 1's rule.
 4) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
@@ -2143,7 +2202,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + '\n\nIMPORTANT (Language Auto-Detect): Detect the language of the source content. Generate ALL questions, options and explanations in that SAME language (English source -> English MCQ, Bengali source -> Bengali MCQ, any other language -> that language).'
+        prompt_text = prompt_text + STRICT_LANGUAGE_LOCK
 
         response_text, provider = await ai_generate(prompt_text, image_bytes)
         if not response_text:
@@ -2186,7 +2245,7 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + '\n\nIMPORTANT (Language Auto-Detect): Detect the language of the source content. Generate ALL questions, options and explanations in that SAME language (English source -> English MCQ, Bengali source -> Bengali MCQ, any other language -> that language).'
+        prompt_text = prompt_text + STRICT_LANGUAGE_LOCK
         if maximize:
             prompt_text += TEXT_MAX_MCQ_EXTRA
         full_prompt = f"{prompt_text}\n\n📄 INPUT TEXT:\n{text}"
