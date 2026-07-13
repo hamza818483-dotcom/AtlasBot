@@ -719,15 +719,32 @@ def parse_mcq_json(response_text: str) -> List[Dict]:
         log_error(f"parse_mcq_json: all strategies failed, input len={len(t)}, first 300 chars: {t[:300]}")
         return []
     valid = []
+    seen_questions = set()
     for mcq in mcqs:
-        if all(k in mcq for k in ['question', 'options', 'answer']):
-            if len(mcq['options']) >= 4:
-                mcq['options'] = mcq['options'][:4]
-            if isinstance(mcq['answer'], str):
-                mcq['answer'] = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(mcq['answer'].upper(), 0)
-            if 0 <= mcq['answer'] <= 3 and len(mcq['options']) == 4:
-                mcq['options'] = [clean_option_prefix(o, i) for i, o in enumerate(mcq['options'])]
-                valid.append(mcq)
+        if not all(k in mcq for k in ['question', 'options', 'answer']):
+            continue
+        if len(mcq['options']) >= 4:
+            mcq['options'] = mcq['options'][:4]
+        if isinstance(mcq['answer'], str):
+            mcq['answer'] = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(mcq['answer'].upper(), 0)
+        if not (0 <= mcq['answer'] <= 3 and len(mcq['options']) == 4):
+            continue
+        mcq['options'] = [clean_option_prefix(o, i) for i, o in enumerate(mcq['options'])]
+        # 🔒 STRICT QUALITY GATE — reject prompt-violating MCQs instead of
+        # silently accepting them (no shortcuts even under speed pressure)
+        q_text = (mcq.get('question') or '').strip()
+        if len(q_text) < 5:
+            continue  # empty/garbage question
+        opts = [str(o).strip() for o in mcq['options']]
+        if any(len(o) == 0 for o in opts):
+            continue  # empty option
+        if len(set(opts)) < 4:
+            continue  # duplicate options (must be 4 distinct choices)
+        q_norm = re.sub(r'\s+', ' ', q_text).lower()
+        if q_norm in seen_questions:
+            continue  # duplicate question within same batch
+        seen_questions.add(q_norm)
+        valid.append(mcq)
     return valid
 
 _OPT_PREFIX_RE = re.compile(r'^\s*[\(\[]?\s*([A-Da-d]|[কখগঘ])\s*[\)\.\:\]।]\s*')
