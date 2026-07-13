@@ -814,7 +814,19 @@ async def _precache_solve_pdf(cache_id: str):
     except Exception as e:
         print(f"[solve-pdf] pre-cache error: {e}")
 
+@app.get("/api/solve-pdf-html/{cache_id}")
+async def api_solve_pdf_html(cache_id: str):
+    """Browser-side Solve PDF: returns raw HTML instantly, no chromium/weasyprint needed.
+    Client renders this via html2pdf.js in-browser."""
+    data = _get_exam(cache_id)
+    if not data:
+        return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
+    answers = data.get("last_answers", {}) or {}
+    html = generate_solve_pdf_html(data, answers)
+    return HTMLResponse(html)
+
 @app.get("/api/solve-pdf-direct/{cache_id}")
+
 async def api_solve_pdf_direct(cache_id: str):
     """Instant PDF link (like Premium PDF) — serves pre-cached PDF when available."""
     data = _get_exam(cache_id)

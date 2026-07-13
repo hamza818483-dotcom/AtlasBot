@@ -863,21 +863,47 @@ function backToSource(){
     });
 }
 
+function _loadHtml2Pdf(cb){
+    if(window.html2pdf){cb();return;}
+    var s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+    s.onload=cb;
+    s.onerror=function(){showToast('❌ PDF লাইব্রেরি লোড ব্যর্থ');};
+    document.head.appendChild(s);
+}
 function solvePDF(){
     var btn=document.querySelector('.result-btn.success');
     if(btn){btn.disabled=true;btn.textContent='⏳ PDF তৈরি হচ্ছে...';}
-    fetch('/api/solve-pdf-direct/'+CFG.cacheId).then(function(r){
-        if(!r.ok) return r.json().then(function(j){throw new Error(j.message||('HTTP '+r.status));}).catch(function(){throw new Error('HTTP '+r.status);});
-        return r.blob();
-    }).then(function(blob){
-        var url=URL.createObjectURL(blob);
-        window.open(url,'_blank');
-        if(btn){btn.disabled=false;btn.textContent='📄 Solve PDF';}
+    fetch('/api/solve-pdf-html/'+CFG.cacheId).then(function(r){
+        if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));});
+        return r.text();
+    }).then(function(html){
+        _loadHtml2Pdf(function(){
+            var container=document.createElement('div');
+            container.style.position='fixed';container.style.left='-9999px';container.style.top='0';
+            container.innerHTML=html;
+            document.body.appendChild(container);
+            var opt={
+                margin:0,
+                filename:'ATLAS_Solve_'+CFG.cacheId.slice(0,8)+'.pdf',
+                image:{type:'jpeg',quality:0.98},
+                html2canvas:{scale:2,useCORS:true},
+                jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}
+            };
+            window.html2pdf().set(opt).from(container).save().then(function(){
+                document.body.removeChild(container);
+                if(btn){btn.disabled=false;btn.textContent='📄 Solve PDF';}
+            }).catch(function(e){
+                document.body.removeChild(container);
+                throw e;
+            });
+        });
     }).catch(function(e){
         showToast('❌ PDF তৈরি ব্যর্থ: '+(e&&e.message?e.message:'Unknown error'));
         if(btn){btn.disabled=false;btn.textContent='📄 Solve PDF';}
     });
 }
+
 
 function openLink(url){ if(url) window.open(url,'_blank'); }
 function zp(n){return String(n).padStart(2,'0');}
