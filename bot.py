@@ -136,7 +136,7 @@ DEFAULT_FREE_LIMIT = 3
 DEFAULT_DAILY_LIMIT = 5
 DEFAULT_NEGATIVE_MARK = -0.50
 NEW_PRACTICE_COUNT = 15
-MAX_MCQ = 35
+MAX_MCQ = 20
 MIN_MCQ = 10
 POLL_DELAY = 1.5
 
@@ -757,7 +757,7 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে(Use Every Information for Making MCQ)
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা এসব info theke mcq banabe na.
 -হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে।
--সর্বনিম্ন ১৫ থেকে ৩৫ টি Mcq বানাতে হবে।তথ্য একবারেই না থাকলে ১০/১০+ MCQ
+-গড়ে ১০ থেকে ২০ টি Mcq বানাতে হবে (তথ্যের পরিমাণ অনুযায়ী)।তথ্য কম থাকলে ১০-১২টি, বেশি থাকলে ১৫-২০টি
 
 💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
 -সোর্স থেকে সকল টাইপের প্রশ্ন বানাতে হবে
@@ -787,7 +787,7 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 
 PROMPT_02 = """MCQ TYPE: True/False Style
 
-🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ): Source এ যত তথ্য আছে তার ভিত্তিতে সর্বনিম্ন ১৫ থেকে ৩৫ টি MCQ অবশ্যই বানাতে হবে। কখনোই মাত্র ১-২টি MCQ বানিয়ে থামবে না। তথ্য কম থাকলেও কমপক্ষে ১০টি বানাও — একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করো।
+🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ): Source এ যত তথ্য আছে তার ভিত্তিতে গড়ে ১০ থেকে ২০ টি MCQ বানাতে হবে। কখনোই মাত্র ১-২টি MCQ বানিয়ে থামবে না। তথ্য কম থাকলে ১০-১২টি, তথ্য বেশি থাকলে ১৫-২০টি — একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করো।
 
 💥প্রশ্নের ধরন (randomly mix করো, একঘেয়ে নয়):
 - "নিচের কোনটিকে সত্য বললে ভুল হবে না?" → সত্য চাই
@@ -813,7 +813,7 @@ PROMPT_02 = """MCQ TYPE: True/False Style
 -কোনটা সঠিক, কেন সঠিক ও এর সাথে Input Source থেকেই সামঞ্জস্যপূর্ণ তথ্য দেওয়া থাকবে Precisely.
 -Input source থেকেই সব
 -Bengali, max 165 chars
--JSON output only (একটি বড় array, কমপক্ষে ১৫টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-JSON output only (একটি বড় array, ১০-২০টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
 
 PROMPT_03 = """MCQ TYPE: Short Question, Long Options
@@ -825,7 +825,7 @@ PROMPT_03 = """MCQ TYPE: Short Question, Long Options
 -ব্যাখ্যা: সঠিকটা কেন সঠিক + বাকিগুলো কেন ভুল (Precisely)
 -Input source থেকেই সব
 -Bengali, max 165 chars
--সর্বনিম্ন ১৫ থেকে ৩৫ টি Mcq
+-গড়ে ১০ থেকে ২০ টি Mcq (তথ্যের পরিমাণ অনুযায়ী)
 -JSON output only. Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)
 -৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must. হ্যাঁ/না টাইপ কথা থাকবে না।
@@ -834,7 +834,7 @@ PROMPT_03 = """MCQ TYPE: Short Question, Long Options
 PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Options)
 
 🔴 সংখ্যা ও মিশ্রণ (সবচেয়ে গুরুত্বপূর্ণ):
-- Source এর তথ্যের ভিত্তিতে সর্বনিম্ন ১৫ থেকে ৩৫ টি MCQ অবশ্যই বানাতে হবে। কখনোই ১-২টি বানিয়ে থামবে না।
+- Source এর তথ্যের ভিত্তিতে গড়ে ১০ থেকে ২০ টি MCQ বানাতে হবে (তথ্য কম হলে ১০-১২টি, বেশি হলে ১৫-২০টি)। কখনোই ১-২টি বানিয়ে থামবে না।
 - নিচের ৩ ধরনের প্রশ্ন বাধ্যতামূলকভাবে মিশ্রিত করতে হবে — প্রতিটি ধরন থেকে প্রায় সমান সংখ্যক (≈৩ ভাগের ১ ভাগ করে):
   Type 1 (Standard Easy): সাধারণ প্রশ্ন, ৪টি অপশন, একটি সঠিক
   Type 2 (True/False): "নিচের কোনটিকে সত্য/মিথ্যা বললে ভুল হবে (না)?" ধরনের — সত্য/মিথ্যা ভঙ্গি randomly
@@ -849,7 +849,7 @@ PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Opt
 -টপিকের নাম, অধ্যায়ের নাম, পেইজ সংখ্যা থেকে MCQ বানাবে না
 -Input source থেকেই সব তথ্য
 -Bengali explanation, max 165-200 chars
--JSON output only (একটি বড় array, কমপক্ষে ১৫টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-JSON output only (একটি বড় array, ১০-২০টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
 
 PROMPT_MAP = {
@@ -1744,6 +1744,25 @@ async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: 
 # mixed languages (e.g. English scientific terms inside a Bengali paragraph). This is now a
 # zero-tolerance, explicitly-prioritized rule block instead of one soft sentence.
 # ============================================================
+ACCURACY_AND_COUNT_LOCK = """
+
+================================
+🎯 ACCURACY + IMAGE INFO USAGE + COUNT — ABSOLUTE RULE
+================================
+বানান (SPELLING): প্রতিটি প্রশ্ন, অপশন ও ব্যাখ্যার বানান/স্পেলিং ১০০% নির্ভুল হতে হবে। লেখার আগে
+প্রতিটি শব্দ দুইবার চেক করবে। সোর্সে ভুল বানান থাকলেও নিজের আউটপুটে শুদ্ধ বানান লিখবে (মূল
+তথ্য/অর্থ পরিবর্তন না করে)।
+
+তথ্য নির্ভুলতা: ছবিতে/সোর্সে যা লেখা আছে তার বাইরে কোনো ভুল তথ্য বা অনুমান দেওয়া যাবে না।
+
+ইমেজের সর্বোচ্চ তথ্য ব্যবহার (image হলে): ছবির প্রতিটি অংশ — মূল লেখা, ছক/টেবিল, ডায়াগ্রাম/ছবির
+ভিতরের লেবেল, ফুটনোট, মার্জিনে লেখা, হাইলাইট/আন্ডারলাইন করা অংশ — সব কিছু থেকে MCQ বানানোর
+সুযোগ খুঁজে বের করবে।
+
+MCQ সংখ্যা: গড়ে ১০ থেকে ২০টি MCQ বানাবে। তথ্য কম থাকলে ১০-১২টি, তথ্য বেশি থাকলে ১৫-২০টি।
+Quality সবসময় Quantity এর আগে।
+"""
+
 STRICT_LANGUAGE_LOCK = """
 
 ════════════════════════════════
@@ -2202,7 +2221,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + STRICT_LANGUAGE_LOCK
+        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK
 
         response_text, provider = await ai_generate(prompt_text, image_bytes)
         if not response_text:
@@ -2213,7 +2232,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         # retry once with an explicit "more questions" instruction.
         if 0 < len(valid_mcqs) < MIN_MCQ:
             log(f"⚠️ Only {len(valid_mcqs)} MCQs — retrying for more (prompt: {prompt_type})")
-            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও, source এর প্রতিটি তথ্য ব্যবহার করো। JSON array তে ১৫+ object থাকতেই হবে।"
+            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১০টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে ১০+ object থাকতেই হবে।"
             rt, rp = await ai_generate(retry_prompt, image_bytes)
             if rt:
                 retry_mcqs = parse_mcq_json(rt)
