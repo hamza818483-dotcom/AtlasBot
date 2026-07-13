@@ -385,7 +385,21 @@ async function init() {
                 preImg.onerror = () => { preImg.style.display = 'none'; };
             }
         }
-        setMode('PreExam');
+        let savedMode = null;
+        try{
+            var sMode = sessionStorage.getItem('atlas_mode');
+            var sCache = sessionStorage.getItem('atlas_cacheid');
+            if(sMode && sCache && CFG.cacheId===sCache && (sMode==='Hall'||sMode==='Result')) savedMode = sMode;
+        }catch(e){}
+        if (savedMode === 'Hall') {
+            loadHallState();
+            startHall(true);
+        } else if (savedMode === 'Result') {
+            loadHallState();
+            doSubmit(true);
+        } else {
+            setMode('PreExam');
+        }
     } catch(err) {
         document.getElementById('modeLoading').innerHTML =
             '<div class="loading"><div style="font-size:40px;margin-bottom:14px">⚠️</div>' +
@@ -410,9 +424,9 @@ function selectTimer2(val) {
     }
 }
 
-function startHall() {
+function startHall(restore) {
     if (!USER_NAME) USER_NAME = 'Student';
-    userAnswers = {}; bookmarks = {}; submitted = false; totalLeft = totalSec;
+    if (!restore) { userAnswers = {}; bookmarks = {}; submitted = false; totalLeft = totalSec; }
     let html = '';
     questions.forEach((q, qi) => {
         const tagPrefix = q._tag ? '['+q._tag+']\n\n' : '';
@@ -427,6 +441,17 @@ function startHall() {
         html += '</div>';
     });
     document.getElementById('hallArea').innerHTML = html;
+    if (restore) {
+        for (var qi2 in userAnswers) {
+            if (userAnswers.hasOwnProperty(qi2)) lockQuestion(Number(qi2), userAnswers[qi2]);
+        }
+        for (var bqi in bookmarks) {
+            if (bookmarks.hasOwnProperty(bqi) && bookmarks[bqi]) {
+                var bmb = document.getElementById('bmBtn'+bqi);
+                if (bmb) bmb.classList.add('active');
+            }
+        }
+    }
     document.getElementById('submitBtn').style.display = 'block';
     document.getElementById('navFab').style.display = 'flex';
     document.getElementById('examHdr').classList.add('visible');
@@ -436,6 +461,7 @@ function startHall() {
     updateHdrTimer(); clearInterval(totalTimer);
     totalTimer = setInterval(() => {
         totalLeft--; updateHdrTimer();
+        if(totalLeft%5===0) saveHallState();
         if (totalLeft <= 0) { stopAll(); doSubmit(); }
     }, 1000);
     updateHdrProg();
@@ -461,6 +487,7 @@ function pickOpt(qi, oi) {
     userAnswers[qi] = oi;
     lockQuestion(qi, oi);
     updateHdrProg();
+    saveHallState();
     // Let the lock state (🔒 icon, dim, border color) paint first,
     // then move to next card — short enough to feel instant,
     // long enough that the lock is visible.
@@ -581,8 +608,8 @@ function doConfirmSubmit() {
 
 function stopAll() { clearInterval(totalTimer); }
 
-function doSubmit() {
-    if (submitted) return;
+function doSubmit(isRestore) {
+    if (submitted && !isRestore) return;
     submitted = true; stopAll();
     document.getElementById('submitBtn').style.display='none';
     document.getElementById('navFab').style.display='none';
@@ -611,8 +638,11 @@ function doSubmit() {
         finAfterTimer2 = parseFloat((timer2Main - timer2Deduction).toFixed(2));
     }
     _saveAnswerSnapshot();
-    fetch('/api/save-answers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cache_id:CFG.cacheId,answers:lastAnswers})}).catch(()=>{});
+    if (!isRestore) {
+        fetch('/api/save-answers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cache_id:CFG.cacheId,answers:lastAnswers})}).catch(()=>{});
+    }
     renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,'','',timer2Deduction,finAfterTimer2);
+    if (isRestore) { setMode('Result'); return; }
     fetch('/api/exam/result',{
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID,user_name:USER_NAME,correct,wrong,skipped,time_taken:timeTaken,challenger_id:CFG.challengerId||0})
@@ -917,9 +947,39 @@ function solvePDF(){
 
 function openLink(url){ if(url) window.open(url,'_blank'); }
 function zp(n){return String(n).padStart(2,'0');}
+function saveHallState(){
+    try{
+        sessionStorage.setItem('atlas_answers', JSON.stringify(userAnswers));
+        sessionStorage.setItem('atlas_bookmarks', JSON.stringify(bookmarks));
+        sessionStorage.setItem('atlas_totalleft', String(totalLeft));
+    }catch(e){}
+}
+function loadHallState(){
+    try{
+        var a=sessionStorage.getItem('atlas_answers');
+        var b=sessionStorage.getItem('atlas_bookmarks');
+        var t=sessionStorage.getItem('atlas_totalleft');
+        if(a) userAnswers=JSON.parse(a);
+        if(b) bookmarks=JSON.parse(b);
+        if(t) totalLeft=parseInt(t,10)||totalLeft;
+    }catch(e){}
+}
+function clearHallState(){
+    try{
+        sessionStorage.removeItem('atlas_mode');
+        sessionStorage.removeItem('atlas_cacheid');
+        sessionStorage.removeItem('atlas_answers');
+        sessionStorage.removeItem('atlas_bookmarks');
+        sessionStorage.removeItem('atlas_totalleft');
+    }catch(e){}
+}
 function setMode(m){
     document.querySelectorAll('.mode').forEach(el=>el.classList.remove('active'));
     document.getElementById('mode'+m).classList.add('active');
+    try{
+        sessionStorage.setItem('atlas_mode', m);
+        if(CFG&&CFG.cacheId) sessionStorage.setItem('atlas_cacheid', CFG.cacheId);
+    }catch(e){}
 }
 function showToast(msg,dur){
     dur=dur||2800;
