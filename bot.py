@@ -831,9 +831,10 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 -একাধিক উত্তর যেনো সঠিক না হয় এই বিষয় সর্বাধিক গুরুত্ব দিতে হবে।
 -Answer Gulo different Option e hote hobe must.
 
-💥ব্যাখ্যা: 
--সঠিক উত্তর + ওই টপিকে রিলেটেড বাকি তথ্য (Source থেকে) থাকবে,যাতে একটা MCQ Solve করতে গিয়ে ইউজার ব্যাখ্যা দেখে আরো কয়েকটা তথ্য শিখার মাধ্যমে জ্ঞান অর্জন করতে পারে।
--Input source থেকেই সব তথ্য
+💥ব্যাখ্যা (STRICT): 
+-শুধু সঠিক উত্তরের ব্যাখ্যা না — Options A, B, C, D প্রতিটি নিয়ে আলাদা আলাদা তথ্য থাকতে হবে Must (কেনটা সঠিক + বাকি ৩টা কেন ভুল/কী)।
+-এক লাইনের সাধারণ ব্যাখ্যা (শুধু "সঠিক উত্তর X" টাইপ) দেওয়া 100% নিষেধ।
+-সব তথ্য 100% Input Source (Image/Text) থেকেই আসবে — নিজে থেকে তথ্য বানানো/অনুমান করা সম্পূর্ণ নিষেধ।
 -Bengali explanation, max 200 character
 -JSON output only. Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
@@ -862,9 +863,9 @@ PROMPT_02 = """MCQ TYPE: True/False Style
 -প্রশ্ন অনুযায়ী উত্তর অবশ্যই একটিই হবে।
 -একাধিক উত্তর যেনো সঠিক না হয় এই বিষয় সর্বাধিক গুরুত্ব দিতে হবে।
 
-💥ব্যাখ্যা:
--কোনটা সঠিক, কেন সঠিক ও এর সাথে Input Source থেকেই সামঞ্জস্যপূর্ণ তথ্য দেওয়া থাকবে Precisely.
--Input source থেকেই সব
+💥ব্যাখ্যা (STRICT):
+-4টা Option A, B, C, D প্রতিটির তথ্য আলাদাভাবে থাকবে (কোনটা সত্য/মিথ্যা ও কেন) — শুধু 1 লাইনের সাধারণ ব্যাখ্যা নিষেধ।
+-সব তথ্য 100% Input Source থেকেই — নিজে থেকে তথ্য বানানো নিষেধ।
 -Bengali, max 165 chars
 -JSON output only (একটি বড় array, ১০-২০টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
@@ -875,8 +876,8 @@ PROMPT_03 = """MCQ TYPE: Short Question, Long Options
 -প্রশ্ন: ছোট, এক লাইন
 -অপশন: ৪টি বড় (বাক্য বা phrase)
 -উত্তর: A/B/C/D এর মধ্যে একটি (A/B/C/D format)
--ব্যাখ্যা: সঠিকটা কেন সঠিক + বাকিগুলো কেন ভুল (Precisely)
--Input source থেকেই সব
+-ব্যাখ্যা (STRICT): 4টা Option A,B,C,D প্রতিটির তথ্য আলাদা থাকবে — সঠিকটা কেন সঠিক + বাকি ৩টা কেন ভুল, সবই Precisely। শুধু 1 লাইনের সাধারণ ব্যাখ্যা নিষেধ।
+-Input source থেকেই সব, নিজে থেকে তথ্য বানানো নিষেধ
 -Bengali, max 165 chars
 -গড়ে ১০ থেকে ২০ টি Mcq (তথ্যের পরিমাণ অনুযায়ী)
 -JSON output only. Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
@@ -900,7 +901,8 @@ PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Opt
 -হাইলাইটেড/কালার মার্ক করা টেক্সট priority পাবে
 -ছক/table থাকলে special priority
 -টপিকের নাম, অধ্যায়ের নাম, পেইজ সংখ্যা থেকে MCQ বানাবে না
--Input source থেকেই সব তথ্য
+-Input source থেকেই সব তথ্য, নিজে থেকে তথ্য বানানো নিষেধ
+-ব্যাখ্যা (STRICT): 4টা Option A,B,C,D প্রতিটির তথ্য আলাদা থাকবে, শুধু 1 লাইনের সাধারণ ব্যাখ্যা নিষেধ
 -Bengali explanation, max 165-200 chars
 -JSON output only (একটি বড় array, ১০-২০টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
@@ -935,7 +937,10 @@ PROMPT_MAP = {
         "EXPLANATION (strict priority): 1) if the page already shows an explanation under the MCQ "
         "-> copy it 100% verbatim; 2) else if the page has other relevant info about this MCQ's topic "
         "-> build explanation from that info; 3) else generate the best accurate explanation yourself. "
-        "Max 165 characters, Bengali.\n\n"
+        "STRICT: the explanation MUST cover all 4 options A/B/C/D individually (why the correct one is "
+        "right, why each of the other 3 is wrong) -- a single generic one-line explanation is FORBIDDEN. "
+        "ALL info must come from the source image/page/text -- never invent facts not present in source. "
+        "Max 200 characters, Bengali.\n\n"
         "MATH/CHEMISTRY: always use proper Unicode subscript/superscript -- H\u2082O, CO\u2082, Na\u207a, Ca\u00b2\u207a, x\u00b2, "
         "10\u00b3, \u00b0C -- never raw H2O/x^2/x_0 notation. Apply consistently in question, options, explanation.\n\n"
         "NEVER reference the source itself in question or explanation text -- no \u0989\u09b2\u09cd\u09b2\u09c7\u0996\u09bf\u09a4 "
