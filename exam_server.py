@@ -1349,8 +1349,12 @@ async def _render_pdf_subprocess(html: str) -> bytes:
 # SECTION 12: HTML GENERATORS
 # ============================================================
 
-def _esc(s: str) -> str:
-    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def _esc(s) -> str:
+    if s is None:
+        s = ""
+    elif not isinstance(s, str):
+        s = str(s)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def _not_found_html() -> str:
     return """<!DOCTYPE html>
@@ -1364,8 +1368,10 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
     topic = data.get("topic", "ATLAS Exam")
     labels = ["a", "b", "c", "d"]
 
-    def strip_prefix(opt: str, oi: int) -> str:
-        clean = opt
+    def strip_prefix(opt, oi: int) -> str:
+        clean = opt if isinstance(opt, str) else str(opt if opt is not None else "")
+        if oi < 0 or oi >= len(labels):
+            return clean
         for pfx in [f"{labels[oi].upper()}) ", f"{labels[oi].upper()})", f"({labels[oi]}) ",
                     f"({labels[oi]})", f"{labels[oi]}) ", f"{labels[oi]})"]:
             if clean.startswith(pfx):
@@ -1378,8 +1384,17 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
         correct_idx = q.get("answer", 0)
         if isinstance(correct_idx, str):
             correct_idx = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(correct_idx.upper(), 0)
+        try:
+            correct_idx = int(correct_idx)
+        except (TypeError, ValueError):
+            correct_idx = 0
+        if correct_idx < 0 or correct_idx > 3:
+            correct_idx = 0
         user_answer = answers.get(str(i))
-        user_idx = int(user_answer) if (user_answer is not None and user_answer != -1) else -1
+        try:
+            user_idx = int(user_answer) if (user_answer is not None and user_answer != -1) else -1
+        except (TypeError, ValueError):
+            user_idx = -1
         items.append({"q": q, "num": i + 1, "correct_idx": correct_idx, "user_idx": user_idx})
 
     pages_html = ""
@@ -1406,7 +1421,7 @@ def generate_solve_pdf_html(data: Dict, answers: Dict) -> str:
             correct_idx = it["correct_idx"]
             user_idx = it["user_idx"]
             q_text = _esc(q.get("question", ""))
-            opts = q.get("options", [])[:4]
+            opts = (q.get("options") or [])[:4]
             opts_html = ""
             for oi, opt in enumerate(opts):
                 clean = _esc(strip_prefix(opt, oi))
@@ -1484,7 +1499,7 @@ def generate_premium_pdf_html(mcqs: List[Dict], header_label: str = "ATLAS Pract
                 ci = 0
             if ci < 0 or ci > 3:
                 ci = 0
-            opts = q.get("options", [])[:4]
+            opts = (q.get("options") or [])[:4]
             ans_label = labels[ci] if ci < len(opts) else "A"
             exp = _esc(q.get("explanation", ""))
 
