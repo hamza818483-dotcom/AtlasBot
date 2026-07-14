@@ -1594,13 +1594,15 @@ def get_prompts_from_db() -> Dict:
         client = get_supabase()
         result = client.table('prompts').select('*').execute()
         if result.data and len(result.data) > 0:
-            prompts = {}
+            prompts = dict(PROMPT_MAP)  # start from built-in defaults
             for row in result.data:
                 pkey = row.get('prompt_key')
-                if not pkey:
-                    continue
-                prompts[pkey] = {'name': row.get('prompt_name', pkey), 'text': row.get('prompt_text', '')}
-            return prompts or PROMPT_MAP
+                if not pkey or pkey not in PROMPT_MAP:
+                    continue  # ignore unknown/corrupt keys from DB
+                name = row.get('prompt_name') or PROMPT_MAP[pkey]['name']
+                text = row.get('prompt_text') or PROMPT_MAP[pkey]['text']
+                prompts[pkey] = {'name': name, 'text': text}
+            return prompts
         return PROMPT_MAP
     except Exception as e:
         log_error(f"get_prompts_from_db error: {e}")
