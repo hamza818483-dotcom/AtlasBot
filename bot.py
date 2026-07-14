@@ -3281,7 +3281,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user = query.from_user
     chat_id = query.message.chat_id
     log(f"🔘 Callback: {data} from {user.id}")
-    await query.answer()  # instant feedback to user
+    try:
+        await query.answer()  # instant feedback to user
+    except Exception as e:
+        log(f"⚠️ query.answer() failed (stale/expired callback): {e}")
     try:
         if data.startswith("txtmcq_"):
             await handle_text_mcq_generation(query, data.replace("txtmcq_", ""), context)
