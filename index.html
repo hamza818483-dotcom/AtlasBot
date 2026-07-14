@@ -265,6 +265,7 @@ async function _resolveCfgFromApi() {
     USER_NAME = decodeURIComponent(name);
 
     const RENDER = 'https://atlasbot-pvp7.onrender.com';
+    window.RENDER = RENDER;
     const RENDER2 = 'https://atlasbot-3tgq.onrender.com';
     const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
@@ -534,7 +535,7 @@ function toggleBm(qi) {
     if (btnR) btnR.className = 'bm-btn'+(bookmarks[qi]?' active':'');
     showToast(bookmarks[qi]?'🔖 বুকমার্ক করা হয়েছে':'🔖 বুকমার্ক রিমুভ');
     const payload = {user_id:USER_ID,cache_id:CFG.cacheId,question_index:qi,question_data:questions[qi],topic:CFG.topic||'',page:CFG.page||0};
-    fetch('/api/bookmark',{
+    fetch((window.RENDER||'')+'/api/bookmark',{
         method: bookmarks[qi]?'POST':'DELETE',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify(payload)
@@ -639,11 +640,11 @@ function doSubmit(isRestore) {
     }
     _saveAnswerSnapshot();
     if (!isRestore) {
-        fetch('/api/save-answers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cache_id:CFG.cacheId,answers:lastAnswers})}).catch(()=>{});
+        fetch((window.RENDER||'')+'/api/save-answers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cache_id:CFG.cacheId,answers:lastAnswers})}).catch(()=>{});
     }
     renderResult(correct,wrong,skipped,timeTaken,fin,neg,pct,mins,secs,'','',timer2Deduction,finAfterTimer2);
     if (isRestore) { setMode('Result'); return; }
-    fetch('/api/exam/result',{
+    fetch((window.RENDER||'')+'/api/exam/result',{
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID,user_name:USER_NAME,correct,wrong,skipped,time_taken:timeTaken,challenger_id:CFG.challengerId||0})
     }).then(r=>r.json()).then(d=>{
@@ -837,7 +838,7 @@ function startNewExam(){
     },1000);
     var ctrl=new AbortController();
     var tid=setTimeout(function(){ctrl.abort();},120000);
-    fetch('/api/new-exam',{
+    fetch((window.RENDER||'')+'/api/new-exam',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID}),
@@ -877,7 +878,7 @@ function neGoToExam(){
 function backToSource(){
     const btn=document.getElementById('backSrcBtn');
     if(btn){btn.disabled=true;btn.textContent='⏳ পাঠানো হচ্ছে...';}
-    fetch('/api/back-to-source',{
+    fetch((window.RENDER||'')+'/api/back-to-source',{
         method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({cache_id:CFG.cacheId,user_id:USER_ID})
     }).then(r=>r.json()).then(d=>{
@@ -905,7 +906,7 @@ function _loadHtml2Pdf(cb){
 function solvePDF(){
     var btn=document.querySelector('.result-btn.success');
     if(btn){btn.disabled=true;btn.textContent='⏳ PDF তৈরি হচ্ছে...';}
-    fetch('/api/solve-pdf-html/'+CFG.cacheId).then(function(r){
+    fetch((window.RENDER||'')+'/api/solve-pdf-html/'+CFG.cacheId).then(function(r){
         if(!r.ok) return r.text().then(function(t){
             var msg='PDF তৈরি ব্যর্থ হয়েছে।';
             try{var j=JSON.parse(t);if(j&&j.message)msg=j.message;}catch(e){}
