@@ -5260,9 +5260,12 @@ async def cross_bot_watchdog_task() -> None:
         if quizbot_url:
             healthy = False
             try:
-                async with httpx.AsyncClient(timeout=20) as client:
+                async with httpx.AsyncClient(timeout=45) as client:
                     r = await client.get(f"{quizbot_url}/health")
                     healthy = r.status_code == 200
+                    if not healthy and r.status_code == 404:
+                        r2 = await client.get(quizbot_url)
+                        healthy = r2.status_code == 200
             except Exception:
                 healthy = False
             if healthy:
@@ -5272,10 +5275,10 @@ async def cross_bot_watchdog_task() -> None:
                     was_down = False
             else:
                 fails += 1
-                if fails >= 2 and not was_down:
+                if fails >= 3 and not was_down:
                     await notify_owner(f"🚨 QuizBot unreachable via cross-bot check ({fails}x) — checked from AtlasBot.")
                     was_down = True
-                if fails >= 2:
+                if fails >= 3:
                     try:
                         async with httpx.AsyncClient(timeout=30) as client:
                             await client.get(quizbot_url)
@@ -5284,7 +5287,7 @@ async def cross_bot_watchdog_task() -> None:
         if sca_url:
             sca_healthy = False
             try:
-                async with httpx.AsyncClient(timeout=20) as client:
+                async with httpx.AsyncClient(timeout=45) as client:
                     r2 = await client.get(sca_url)
                     sca_healthy = r2.status_code == 200
             except Exception:
@@ -5296,10 +5299,10 @@ async def cross_bot_watchdog_task() -> None:
                     sca_was_down = False
             else:
                 sca_fails += 1
-                if sca_fails >= 2 and not sca_was_down:
+                if sca_fails >= 3 and not sca_was_down:
                     await notify_owner(f"🚨 SaveContentAtlas unreachable via cross-bot check ({sca_fails}x) — checked from AtlasBot.")
                     sca_was_down = True
-                if sca_fails >= 2:
+                if sca_fails >= 3:
                     try:
                         async with httpx.AsyncClient(timeout=30) as client:
                             await client.get(sca_url)
