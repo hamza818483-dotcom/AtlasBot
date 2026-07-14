@@ -737,6 +737,11 @@ def _is_tf_banned_option(opt: str) -> bool:
                 return True
     return False
 
+def _is_tf_style_question(q: str) -> bool:
+    """prompt_2 requires questions in one of 4 exact 'বললে ভুল হবে (না)' patterns."""
+    q = q.strip()
+    return ("বললে ভুল হবে" in q) and ("সত্য" in q or "মিথ্যা" in q)
+
 def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str = "") -> List[Dict]:
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider.
     If source_text is provided, also enforces STRICT_LANGUAGE_LOCK by
@@ -808,6 +813,8 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             continue  # 🔒 STRICT_LANGUAGE_LOCK violation — script mismatch with source
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
+        if prompt_type == 'prompt_2' and not _is_tf_style_question(q_text):
+            continue  # 🔒 True/False style: question must use the required "বললে ভুল হবে (না)" phrasing
         # 🔒 Reject meaningless mnemonic/rhyme-fragment options (e.g. "রূপা","পাশে","থাকে","সার")
         # — single Bangla word ≤3 chars with no digits/punctuation, when ALL 4 options are like this,
         # strongly indicates a rhyme-word leak from a mnemonic table rather than real MCQ content.
