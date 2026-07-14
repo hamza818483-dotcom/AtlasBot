@@ -743,6 +743,7 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
     rejecting MCQs whose script doesn't match the source's dominant script."""
     source_script = _detect_script(source_text) if source_text else "unknown"
     t = (response_text or "").strip()
+    t = t.replace('\u060c', ',')  # Arabic comma → normal comma (fixes all-strategies-failed bug)
     if t.startswith('```json'):
         t = t[7:]
     if t.startswith('```'):
