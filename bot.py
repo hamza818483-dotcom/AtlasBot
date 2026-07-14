@@ -808,6 +808,19 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             continue  # 🔒 STRICT_LANGUAGE_LOCK violation — script mismatch with source
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
+        # 🔒 Reject meaningless mnemonic/rhyme-fragment options (e.g. "রূপা","পাশে","থাকে","সার")
+        # — single Bangla word ≤3 chars with no digits/punctuation, when ALL 4 options are like this,
+        # strongly indicates a rhyme-word leak from a mnemonic table rather than real MCQ content.
+        def _is_bare_fragment(o: str) -> bool:
+            stripped = re.sub(r'[^\u0980-\u09FF]', '', o)
+            return 1 <= len(stripped) <= 4 and stripped == o.strip()
+        if all(_is_bare_fragment(o) for o in opts):
+            continue  # 🔒 all 4 options are bare 1-3 char fragments — likely mnemonic leak, not real MCQ
+        # 🔒 Reject if the question's own subject term is repeated verbatim as one of the options
+        # (self-referential/contradictory, common in "X এর সাথে সম্পর্কিত নয়" style questions)
+        q_words = re.findall(r'[\u0980-\u09FF]{4,}', q_text)
+        if q_words and any(any(w == opt.strip() for w in q_words) for opt in opts):
+            continue  # 🔒 question subject reused as its own option
         seen_questions.add(q_norm)
         valid.append(mcq)
     return valid
@@ -838,6 +851,7 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 -এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে।
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে(Use Every Information for Making MCQ)
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা এসব info theke mcq banabe na.
+-🚫 STRICT: সোর্সে যদি মনে রাখার কৌশল/ছন্দ/rhyme/mnemonic শব্দ থাকে (যেমন "রূপা-রেটিনোব্লাস্টোমা", "পাশে/থাকে/সার" এর মত অর্থহীন সাউন্ড-শব্দ যেগুলো শুধু মুখস্থ করানোর জন্য ব্যবহৃত হয়), সেই ছন্দের শব্দগুলো (রূপা/পাশে/থাকে/সার টাইপ) কখনোই MCQ প্রশ্ন বা অপশন হিসেবে ব্যবহার করা যাবে না। শুধুমাত্র mnemonic এর সাথে যুক্ত আসল মেডিকেল/একাডেমিক তথ্য (রোগের নাম, লক্ষণ, সংজ্ঞা ইত্যাদি) নিয়ে MCQ বানাতে হবে — অর্থহীন ছন্দ-শব্দ নিয়ে না।
 -হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে।
 -গড়ে ১০ থেকে ২০ টি Mcq বানাতে হবে (তথ্যের পরিমাণ অনুযায়ী)।তথ্য কম থাকলে ১০-১২টি, বেশি থাকলে ১৫-২০টি
 
@@ -853,6 +867,7 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 -সোর্স অনুযায়ী বিভিন্ন অপশনে মিক্সড তথ্য থাকলেও সমস্যা নাই।
 -যে টপিক/অংশ থেকে প্রশ্ন বানাবে সেখানে কাছাকাছি অপশন থাকলে সেখান থেকেই অপশন নিবে(Hight Priority),যাতে করে User Confused হয় কোনটা আন্সার হবে ভাবতে গিয়ে।
 -অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে,বাকিগুলো ভুল উত্তর।
+-🚫 প্রশ্নে যে বিষয়/রোগ/টার্ম নিয়ে জিজ্ঞেস করা হচ্ছে (যেমন "X এর সাথে সম্পর্কিত নয় কোনটি?"), সেই X নিজেই কোনো অপশনে থাকতে পারবে না — এটা স্ববিরোধী ও অর্থহীন।
 -৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must.অর্থাৎ অপশনে হ্যাঁ,না,সত্য,মিথ্যা,জ্বী,না এসব টাইপ কথা থাকবে না।
 
 💥উত্তর: 
