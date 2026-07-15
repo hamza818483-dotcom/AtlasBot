@@ -3782,7 +3782,7 @@ EXPLAIN_IMAGE_PROMPT = """তুমি একজন অভিজ্ঞ শিক
 2. প্রাসঙ্গিক ফর্মুলা/সূত্র থাকলে আলাদা করে দেখাও।
 3. সম্পর্কিত অন্য প্রক্রিয়া/গুরুত্বপূর্ণ তথ্য থাকলে শেষে যোগ করো।
 
-আউটপুট শুধু plain readable text — কোনো JSON/markdown code-block না, স্বাভাবিক লেখার মতো হবে। প্রয়োজনমতো heading/bullet ব্যবহার করতে পারো।"""
+আউটপুট শুধু প্লেইন টেক্সট হবে — **, __, #, markdown, কোনো special formatting symbol ব্যবহার করা যাবে না। Heading এর জন্য শুধু সাধারণ শব্দ লিখো (যেমন: "সঠিক উত্তর:" বা "ব্যাখ্যা:") এবং bullet এর জন্য শুধু "-" বা সংখ্যা (1. 2. 3.) ব্যবহার করো, কোনো bold/italic marker না।"""
 
 def _chunk_text_for_telegram(text: str, limit: int = 3900) -> List[str]:
     """Split long text into Telegram-safe chunks, breaking on paragraph/line
@@ -3833,7 +3833,10 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
         await wait_msg.delete()
     except Exception:
         pass
-    clean_text = response_text.strip().replace('**', '').replace('__', '')
+    clean_text = response_text.strip()
+    for sym in ('**', '__', '```', '`'):
+        clean_text = clean_text.replace(sym, '')
+    clean_text = re.sub(r'(?m)^#{1,6}\s*', '', clean_text)  # strip markdown headings
     chunks = _chunk_text_for_telegram(clean_text)
     for i, chunk in enumerate(chunks):
         prefix = "📖 ব্যাখ্যা:\n\n" if i == 0 else ""
