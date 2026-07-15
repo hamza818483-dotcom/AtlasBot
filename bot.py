@@ -3833,9 +3833,10 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
         await wait_msg.delete()
     except Exception:
         pass
-    chunks = _chunk_text_for_telegram(response_text.strip())
+    clean_text = response_text.strip().replace('**', '').replace('__', '')
+    chunks = _chunk_text_for_telegram(clean_text)
     for i, chunk in enumerate(chunks):
-        prefix = "📖 **ব্যাখ্যা:**\n\n" if i == 0 else ""
+        prefix = "📖 ব্যাখ্যা:\n\n" if i == 0 else ""
         await query.message.reply_text(prefix + chunk, parse_mode=None)
 
 async def handle_creative_from_pending(query, ctype_short: str, context: ContextTypes.DEFAULT_TYPE) -> None:
