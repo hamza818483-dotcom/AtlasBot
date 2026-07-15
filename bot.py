@@ -782,6 +782,23 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
     if mcqs is None:
         mcqs = _extract_mcq_objects(t)
     if not mcqs:
+        # 🔧 Last resort: response likely got cut off mid-object (hit token limit).
+        # Salvage every complete top-level {...} object before the truncation point,
+        # drop the dangling incomplete tail instead of failing the whole batch.
+        try:
+            last_complete = t.rfind('},')
+            if last_complete == -1:
+                last_complete = t.rfind('}')
+            if last_complete != -1:
+                salvage = t[:last_complete+1]
+                if not salvage.rstrip().endswith(']'):
+                    salvage = salvage.rstrip().rstrip(',') + ']'
+                if not salvage.lstrip().startswith('['):
+                    salvage = '[' + salvage
+                mcqs = json.loads(salvage)
+        except Exception:
+            mcqs = None
+    if not mcqs:
         log_error(f"parse_mcq_json: all strategies failed, input len={len(t)}, first 300 chars: {t[:300]}")
         return []
     valid = []
