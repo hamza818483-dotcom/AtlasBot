@@ -796,6 +796,26 @@ def _is_tf_style_question(q: str) -> bool:
     q = q.strip()
     return ("বললে ভুল হবে" in q) and ("সত্য" in q or "মিথ্যা" in q)
 
+_BN_WORD_RE = re.compile(r'[\u0980-\u09FF]+')
+
+def _mcq_violates_word_fidelity(mcq: Dict, source_text: str) -> bool:
+    """v5.1: if OCR ground-truth text is available, flag MCQs whose question
+    contains Bengali words that don't appear anywhere in the source — catches
+    invented/misspelled/hallucinated words the AI made up instead of reading
+    the actual page text."""
+    if not source_text or len(source_text.strip()) < 10:
+        return False  # OCR failed/unavailable, can't verify, don't punish
+    source_words = set(_BN_WORD_RE.findall(source_text))
+    if len(source_words) < 5:
+        return False  # too little source text to judge fairly
+    q_words = [w for w in _BN_WORD_RE.findall(mcq.get('question', '')) if len(w) >= 3]
+    if not q_words:
+        return False
+    unknown = [w for w in q_words if w not in source_words]
+    # allow some slack (grammar variants, connector words) — flag only if
+    # a large fraction of substantial words are unrecognized
+    return len(unknown) / len(q_words) > 0.6
+
 def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str = "") -> List[Dict]:
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider.
     If source_text is provided, also enforces STRICT_LANGUAGE_LOCK by
@@ -898,6 +918,8 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             mcq['options'] = opts
         if _violates_lethal_gene_mnemonic(mcq):
             continue  # 🔒 Lethal gene mnemonic word paired with wrong/incomplete disease name after autocorrect
+        if _mcq_violates_word_fidelity(mcq, source_text):
+            continue  # 🔒 word-fidelity violation — question still uses words not found in source after autocorrect (invented/misspelled)
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
         if prompt_type == 'prompt_2' and not _is_tf_style_question(q_text):
