@@ -1924,6 +1924,23 @@ SAME source language — matching script and language exactly, with these absolu
 This rule has the HIGHEST priority in this entire prompt and overrides any language default,
 example, or instruction stated anywhere else — if anything above conflicts, this rule wins."""
 
+MNEMONIC_TABLE_LOCK = """
+
+════════════════════════════════
+🔤 MNEMONIC / ছন্দ TABLE SOURCE — VERBATIM PAIRING RULE
+════════════════════════════════
+সোর্সে যদি "মনে রাখার ছন্দ/কৌশল" টেবিল থাকে (একটা ছন্দের শব্দ ↔ একটা নির্দিষ্ট রোগ/টার্ম/তথ্যের
+পেয়ার, যেমন "হিমুর → হিমোফিলিয়া", "রূপা → রেটিনোব্লাস্টোমা"), তাহলে:
+✅ প্রতিটি mnemonic শব্দের সাথে যুক্ত রোগ/টার্মের নাম টেবিল থেকে হুবহু (verbatim, exact spelling)
+   কপি করতে হবে — নিজে থেকে সংক্ষেপ, বানান পরিবর্তন, বা ভিন্ন নাম বসানো যাবে না।
+✅ যদি একটি mnemonic শব্দের সাথে একাধিক রোগ/টার্ম যুক্ত থাকে (যেমন "কে → সিকল সেল অ্যানিমিয়া,
+   সিস্টিক ফাইব্রোসিস"), option-এ সবগুলো টার্মই রাখতে হবে — একটা বাদ দেওয়া বা কাটছাঁট করা নিষেধ।
+❌ ভুল pairing করা (এক mnemonic শব্দের সাথে অন্য শব্দের রোগ জুড়ে দেওয়া) সম্পূর্ণ নিষিদ্ধ — এটা
+   সবচেয়ে বড় ভুল যা এই টাইপের সোর্সে হয়ে থাকে, তাই MCQ লেখার আগে টেবিলের প্রতিটি সারি আবার
+   দেখে pairing যাচাই করবে।
+❌ mnemonic শব্দ (হিমুর/বা/সার/পাশে/কে/ই/থা/রূপা টাইপ ছোট শব্দ) একা কখনো option হবে না —
+   অবশ্যই "[mnemonic শব্দ] + [তার সাথে যুক্ত পূর্ণ, সঠিক রোগ/টার্মের নাম]" এই ফরম্যাটে option লিখতে হবে।"""
+
 
 SELF_VERIFY_THOUGHT_LOCK = """
 
@@ -2375,7 +2392,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + SELF_VERIFY_THOUGHT_LOCK
+        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK + SELF_VERIFY_THOUGHT_LOCK
 
         response_text, provider = await ai_generate(prompt_text, image_bytes)
         if not response_text:
@@ -2421,7 +2438,7 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK
+        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK
         if maximize:
             prompt_text += TEXT_MAX_MCQ_EXTRA
         full_prompt = f"{prompt_text}\n\n📄 INPUT TEXT:\n{text}"
