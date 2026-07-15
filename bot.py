@@ -715,21 +715,22 @@ def _terms_in_source(text: str) -> set:
     """Extract 4+ char Bangla word tokens from source text for spelling-fidelity checks."""
     return set(re.findall(r'[\u0980-\u09FF]{4,}', text or ''))
 
-def _has_spelling_drift(option: str, source_terms: set) -> bool:
+def _autocorrect_option_spelling(option: str, source_terms: set) -> str:
     """Generic rule: if an option contains a Bangla term that's NOT found verbatim in the
-    source, but a close-spelling variant (edit-distance-ish via difflib) IS in the source,
-    the AI likely mangled the spelling instead of copying it exactly."""
+    source, but a close-spelling variant IS in the source, auto-correct it to the source's
+    exact spelling instead of rejecting the whole MCQ — the source page is the ground truth,
+    so when the AI's spelling is merely unclear/drifted, fix it in place with the closest match."""
     if not source_terms:
-        return False
-    opt_terms = re.findall(r'[\u0980-\u09FF]{4,}', option)
+        return option
+    opt_terms = set(re.findall(r'[\u0980-\u09FF]{4,}', option))
+    fixed = option
     for term in opt_terms:
         if term in source_terms:
-            continue  # exact match, fine
+            continue  # exact match, fine, leave as-is
         close = difflib.get_close_matches(term, source_terms, n=1, cutoff=0.65)
         if close:
-            return True  # source has a similar-but-different-spelled term — likely drift
-    return False
-    """Remove duplicate MCQs (same question text) so retry-merges don't inflate count with repeats."""
+            fixed = fixed.replace(term, close[0])
+    return fixed
     seen = set()
     out = []
     for m in mcqs:
@@ -882,10 +883,13 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             continue  # duplicate question within same batch
         if _mcq_violates_language_lock(mcq, source_script):
             continue  # 🔒 STRICT_LANGUAGE_LOCK violation — script mismatch with source
+        if source_terms:
+            q_text = _autocorrect_option_spelling(q_text, source_terms)
+            mcq['question'] = q_text
+            opts = [_autocorrect_option_spelling(o, source_terms) for o in opts]
+            mcq['options'] = opts
         if _violates_lethal_gene_mnemonic(mcq):
-            continue  # 🔒 Lethal gene mnemonic word paired with wrong/incomplete disease name
-        if source_terms and any(_has_spelling_drift(o, source_terms) for o in opts):
-            continue  # 🔒 Option term's spelling drifted from a similar term actually in source
+            continue  # 🔒 Lethal gene mnemonic word paired with wrong/incomplete disease name after autocorrect
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
         if prompt_type == 'prompt_2' and not _is_tf_style_question(q_text):
