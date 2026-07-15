@@ -731,6 +731,9 @@ def _autocorrect_option_spelling(option: str, source_terms: set) -> str:
         if close:
             fixed = fixed.replace(term, close[0])
     return fixed
+
+def _dedupe_mcqs(mcqs: list) -> list:
+    """Remove duplicate MCQs (same question text) so retry-merges don't inflate count with repeats."""
     seen = set()
     out = []
     for m in mcqs:
