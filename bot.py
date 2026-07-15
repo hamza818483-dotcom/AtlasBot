@@ -3416,6 +3416,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data="qaimg_k"),
             InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data="qaimg_c"),
         ])
+        keyboard.append([InlineKeyboardButton("📖 ব্যাখ্যা চাই", callback_data="explimg")])
         await update.message.reply_photo(
             photo=image_bytes,
             caption=f"""🌟 স্বাগতম {user['first_name']}..!
@@ -3427,7 +3428,8 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 🔥 কঠিন প্রশ্ন — অ্যাডভান্সড লেভেল
 🎲 Mixed — সবগুলো মিলিয়ে
 
-🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক — সৃজনশীল PDF""",
+🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক — সৃজনশীল PDF
+📖 ব্যাখ্যা চাই — টপিক/MCQ বিস্তারিত ব্যাখ্যা""",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
@@ -3489,6 +3491,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await handle_mcq_generation(query, data.replace("genmcq_", ""), context)
         elif data.startswith("qaimg_"):
             await handle_creative_from_pending(query, data.replace("qaimg_", ""), context)
+        elif data == "explimg":
+            await handle_explain_from_pending(query, context)
         elif data.startswith("qbm_"):
             await handle_qbm_extract(query, data.replace("qbm_", ""), user)
         elif data.startswith("crpdf_k_"):
@@ -3759,6 +3763,81 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
             pass
 
 # ── v4.0: Creative (জ্ঞানমূলক/অনুধাবনমূলক) from fresh image ──
+EXPLAIN_IMAGE_PROMPT = """তুমি একজন অভিজ্ঞ শিক্ষক। এই ছবিতে যা আছে (টপিক/প্যারাগ্রাফ অথবা MCQ প্রশ্ন) তা বিস্তারিতভাবে ব্যাখ্যা করো।
+
+🔒 নিয়ম:
+- ছবির ভাষা যা (বাংলা/ইংরেজি) সেই ভাষাতেই ব্যাখ্যা লিখবে।
+- ধাপে ধাপে (Step by step) বুঝিয়ে বলবে, কোনো ধাপ বাদ দেওয়া যাবে না।
+
+📌 যদি ছবিতে MCQ (প্রশ্ন + অপশন) থাকে:
+1. প্রশ্নটি প্রথমে স্পষ্টভাবে লিখো।
+2. প্রতিটি অপশন (A, B, C, D) আলাদাভাবে ধরে ধরে বিশ্লেষণ করো —
+   - কোনটি সঠিক উত্তর এবং কেন সঠিক (যুক্তি + প্রাসঙ্গিক তথ্য সহ)
+   - বাকি প্রতিটি ভুল অপশন কেন ভুল তা আলাদাভাবে ব্যাখ্যা করো (শুধু "ভুল" বললে হবে না — কেন ভুল সেটা বিস্তারিত বলো)
+3. প্রাসঙ্গিক কোনো ফর্মুলা/সূত্র থাকলে তা আলাদা করে দেখাও এবং কীভাবে ব্যবহার হয় বুঝিয়ে দাও।
+4. সম্পর্কিত অন্য কোনো গুরুত্বপূর্ণ প্রক্রিয়া/কনসেপ্ট/এক্সসেপশন থাকলে শেষে যোগ করো।
+
+📌 যদি ছবিতে শুধু একটি টপিক/প্যারাগ্রাফ থাকে (MCQ না থাকে):
+1. টপিকটি ধাপে ধাপে ভেঙে ব্যাখ্যা করো — মূল সংজ্ঞা, কীভাবে কাজ করে, উদাহরণ।
+2. প্রাসঙ্গিক ফর্মুলা/সূত্র থাকলে আলাদা করে দেখাও।
+3. সম্পর্কিত অন্য প্রক্রিয়া/গুরুত্বপূর্ণ তথ্য থাকলে শেষে যোগ করো।
+
+আউটপুট শুধু plain readable text — কোনো JSON/markdown code-block না, স্বাভাবিক লেখার মতো হবে। প্রয়োজনমতো heading/bullet ব্যবহার করতে পারো।"""
+
+def _chunk_text_for_telegram(text: str, limit: int = 3900) -> List[str]:
+    """Split long text into Telegram-safe chunks, breaking on paragraph/line
+    boundaries where possible instead of mid-word."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind('\n\n', 0, limit)
+        if cut == -1:
+            cut = remaining.rfind('\n', 0, limit)
+        if cut == -1:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """User pressed 📖 ব্যাখ্যা চাই on a freshly sent image: sends the image
+    directly to AI with a detailed step-by-step explanation prompt (topic
+    explanation, or per-option MCQ analysis with formulas/related concepts)."""
+    image_bytes = context.user_data.get('pending_image')
+    if not image_bytes:
+        await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
+        return
+    wait_msg = await query.message.reply_text(
+        "📖 **ব্যাখ্যা তৈরি হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    async def _edit_wait(t):
+        await wait_msg.edit_text(t)
+    prog_task = asyncio.create_task(live_progress_task(_edit_wait, "Explanation", total_eta=15))
+    try:
+        response_text, provider = await ai_generate(EXPLAIN_IMAGE_PROMPT, image_bytes)
+    except Exception as e:
+        prog_task.cancel()
+        log_error(f"handle_explain_from_pending error: {e}")
+        await wait_msg.edit_text("❌ ব্যাখ্যা তৈরি করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        return
+    prog_task.cancel()
+    if not response_text or not response_text.strip():
+        await wait_msg.edit_text("❌ ব্যাখ্যা তৈরি করা যায়নি। সব AI Provider ব্যস্ত, কিছুক্ষণ পর আবার চেষ্টা করুন।")
+        return
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+    chunks = _chunk_text_for_telegram(response_text.strip())
+    for i, chunk in enumerate(chunks):
+        prefix = "📖 **ব্যাখ্যা:**\n\n" if i == 0 else ""
+        await query.message.reply_text(prefix + chunk, parse_mode=None)
+
 async def handle_creative_from_pending(query, ctype_short: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     """User pressed জ্ঞানমূলক/অনুধাবনমূলক on a freshly sent image:
        1) save image as a lightweight mcqs row (for file_id reference)
