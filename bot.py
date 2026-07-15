@@ -2244,6 +2244,18 @@ wherever a language default is implied, the SOURCE MCQ's own actual language alw
 Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
 If NO MCQ exists on this page → return exactly: []
 
+════════════════════════════════
+🔠 SPELLING FIDELITY (STRICT — apply while extracting, not while inventing)
+════════════════════════════════
+- প্রতিটি question ও option-এর প্রতিটি শব্দ/নাম/টার্মের বানান পেজে যেভাবে লেখা ঠিক সেভাবেই
+  হুবহু রাখতে হবে — নিজে থেকে ভিন্ন/কাছাকাছি বানানে বদলানো যাবে না।
+- পেজে যদি mnemonic/ছন্দ টেবিল থাকে (একটা ছন্দ-শব্দ ↔ একটা নির্দিষ্ট রোগ/টার্মের পেয়ার), সেই
+  পেয়ারিং অক্ষরে-অক্ষরে সোর্স থেকে verbatim কপি করবে — ভুল pairing বা multi-term list থেকে
+  একটা বাদ দেওয়া নিষেধ।
+- Output JSON array-এর একদম শেষে এই object টি অতিরিক্ত যোগ করবে (এটি MCQ না, metadata):
+  {"_source_terms": ["পেজে থাকা গুরুত্বপূর্ণ নাম/টার্ম/রোগ/শব্দ exact বানানে", "..."]}
+  এখানে পেজে থাকা সব গুরুত্বপূর্ণ বিশেষ্য/টেকনিক্যাল টার্ম/রোগের নাম exact সোর্স বানানে লিস্ট করবে।
+
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
 
 
@@ -2277,8 +2289,14 @@ def _qbm_parse_json(text: str) -> list:
     if not isinstance(raw, list):
         return []
     valid = []
+    qbm_source_terms = set()
     for mc in raw:
         try:
+            if '_source_terms' in mc:
+                terms = mc.get('_source_terms') or []
+                if isinstance(terms, list):
+                    qbm_source_terms |= {str(x).strip() for x in terms if str(x).strip()}
+                continue
             q = mc.get("question", "")
             opts = mc.get("options", {})
             if not q or not opts:
@@ -2298,6 +2316,10 @@ def _qbm_parse_json(text: str) -> list:
             })
         except Exception:
             continue
+    if qbm_source_terms:
+        for mc in valid:
+            mc["question"] = _autocorrect_option_spelling(mc["question"], qbm_source_terms)
+            mc["options"] = [_autocorrect_option_spelling(o, qbm_source_terms) for o in mc["options"]]
     return valid
 
 
@@ -2452,7 +2474,11 @@ async def qbm_extract_from_image(image_bytes: bytes) -> list:
     try:
         call1 = await _qbm_call1_extract(image_bytes)
         combined = await _qbm_call2_miss_check(image_bytes, call1)
-        return _qbm_answer_letter_to_index(combined)
+        result = _qbm_answer_letter_to_index(combined)
+        # 🔒 Same mnemonic-pairing ground-truth check used elsewhere — catches wrong/
+        # incomplete word↔disease pairing even in extraction (not just generation) flow.
+        result = [mc for mc in result if not _violates_lethal_gene_mnemonic(mc)]
+        return result
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
 
