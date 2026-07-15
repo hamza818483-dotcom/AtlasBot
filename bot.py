@@ -856,6 +856,14 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
     if not mcqs:
         log_error(f"parse_mcq_json: all strategies failed, input len={len(t)}, first 300 chars: {t[:300]}")
         return []
+    # 🔤 Pull out embedded _source_terms object (image flow has no separate source_text,
+    # so the AI is asked to self-report source terms inline for spelling autocorrection).
+    for item in list(mcqs):
+        if isinstance(item, dict) and '_source_terms' in item:
+            embedded_terms = item.get('_source_terms') or []
+            if isinstance(embedded_terms, list):
+                source_terms |= {str(x).strip() for x in embedded_terms if str(x).strip()}
+            mcqs.remove(item)
     valid = []
     seen_questions = set()
     for mcq in mcqs:
@@ -2010,7 +2018,15 @@ MNEMONIC_TABLE_LOCK = """
 প্রশ্ন ও অপশনেও ঠিক সেই বানানেই হুবহু লিখতে হবে — একটি অক্ষরও পরিবর্তন, সংক্ষেপ, বা কাছাকাছি
 বানানে বদলানো যাবে না। MCQ লেখার পর প্রতিটি টার্ম সোর্সের সাথে অক্ষরে-অক্ষরে মিলিয়ে
 self-check করবে — সামান্য মিল থাকা ভিন্ন বানান (যেমন সোর্সে "ব্র্যাকিফ্যালাঞ্জি" থাকলে output-এ
-"ব্র্যাকিফ্যাংগিয়া" লেখা) সম্পূর্ণ নিষিদ্ধ।"""
+"ব্র্যাকিফ্যাংগিয়া" লেখা) সম্পূর্ণ নিষিদ্ধ।
+
+════════════════════════════════
+📋 SOURCE TERMS EXTRACTION (JSON output-এ শেষে একটি extra object দিতে হবে)
+════════════════════════════════
+MCQ array এর শেষ element হিসেবে এই object টি অবশ্যই যোগ করবে:
+{"_source_terms": ["সোর্সে থাকা গুরুত্বপূর্ণ নাম/টার্ম/রোগ/শব্দ", "..."]}
+এখানে সোর্সে যত গুরুত্বপূর্ণ বিশেষ্য/টার্ম/নাম আছে (রোগের নাম, টেকনিক্যাল টার্ম, mnemonic শব্দ
+ইত্যাদি) সবগুলো তাদের EXACT সোর্স বানানে (হুবহু) লিস্ট করে দিবে — এটা spell-check এর জন্য ব্যবহার হবে।"""
 
 
 SELF_VERIFY_THOUGHT_LOCK = """
