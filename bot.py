@@ -2479,19 +2479,6 @@ async def qbm_extract_from_image(image_bytes: bytes) -> list:
         _QBM_EXTRACT_HARD_CAP.release()
 
 
-async def ocr_extract_text(image_bytes: bytes) -> str:
-    """v5.1: lightweight OCR pass to get ground-truth source text for spelling/
-    fidelity validation. Best-effort — returns '' on failure (validation skips)."""
-    try:
-        txt = await _call_gemini(
-            "এই ছবিতে যা যা লেখা আছে (বাংলা/ইংরেজি, সব টেক্সট) হুবহু, অক্ষরে অক্ষরে, "
-            "কোনো সংশোধন/অনুবাদ ছাড়া আউটপুট দাও। শুধু raw text, কোনো ব্যাখ্যা/ফরম্যাটিং না।",
-            image_bytes
-        )
-        return txt or ""
-    except Exception:
-        return ""
-
 async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
     """Generate MCQs from an image — Gemini→NVIDIA→OpenRouter chain + cache."""
     try:
@@ -2516,13 +2503,11 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
         prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK + SELF_VERIFY_THOUGHT_LOCK
 
-        ocr_text = await ocr_extract_text(image_bytes)  # ground-truth for fidelity check
-
         response_text, provider = await ai_generate(prompt_text, image_bytes)
         if not response_text:
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
-        valid_mcqs = parse_mcq_json(response_text, source_text=ocr_text, prompt_type=prompt_type)
+        valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
         # v5.0: code-level count enforcement — loop retrying (not just once) until
         # MIN_MCQ reached or max attempts used, always dedupe, always hard-clamp MAX_MCQ.
@@ -2533,7 +2518,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
             retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
             rt, rp = await ai_generate(retry_prompt, image_bytes)
             if rt:
-                retry_mcqs = _dedupe_mcqs(parse_mcq_json(rt, source_text=ocr_text, prompt_type=prompt_type))
+                retry_mcqs = _dedupe_mcqs(parse_mcq_json(rt, prompt_type=prompt_type))
                 if len(retry_mcqs) > len(valid_mcqs):
                     valid_mcqs = retry_mcqs
                     provider = rp
