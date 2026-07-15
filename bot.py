@@ -727,6 +727,42 @@ def _dedupe_mcqs(mcqs: List[Dict]) -> List[Dict]:
 
 _TF_BANNED_OPT_WORDS = ("হ্যাঁ", "না।", "সত্য", "মিথ্যা", "জ্বী", "জ্বি", "yes", "no", "true", "false")
 
+# 🔒 Hardcoded ground-truth for the "লিথাল জিনের ছন্দ" (Lethal Gene Mnemonic) source page —
+# maps each mnemonic word to its EXACT, COMPLETE disease/term list. Used to catch AI
+# scrambling (wrong pairing, truncated multi-disease lists, spelling drift) at code level,
+# since prompt-only instructions kept failing on this specific source.
+LETHAL_GENE_MNEMONIC_MAP = {
+    "হিমুর": ["হিমোফিলিয়া"],
+    "বা": ["ব্র্যাকিফ্যালাঞ্জি"],
+    "সার": ["ক্রীপার মুরগী"],
+    "পাশে": ["পা-বিহীন বাচ্চুর"],
+    "কে": ["সিকল সেল অ্যানিমিয়া", "সিস্টিক ফাইব্রোসিস"],
+    "ই": ["জন্মগত ইকথিওসিস", "ইনফ্যান্টাইল অ্যামারটিক ইডিওসি"],
+    "থা": ["থ্যালাসেমিয়া"],
+    "রূপা": ["রেটিনোব্লাস্টোমা"],
+}
+
+def _violates_lethal_gene_mnemonic(mcq: Dict) -> bool:
+    """Returns True if any option references a লিথাল জিন mnemonic word but pairs it
+    with a wrong/misspelled/incomplete disease name instead of the exact source mapping."""
+    opts = [str(o) for o in mcq.get('options', [])]
+    q = mcq.get('question', '') or ''
+    combined = q + ' ' + ' '.join(opts)
+    # Only apply this check when the MCQ is actually about this mnemonic (avoid false positives)
+    if not any(k in combined for k in LETHAL_GENE_MNEMONIC_MAP.keys()):
+        return False
+    if "নির্দেশ করে" not in combined and "সম্পর্কিত" not in combined:
+        return False
+    for opt in opts:
+        for word, correct_terms in LETHAL_GENE_MNEMONIC_MAP.items():
+            # option starts with this mnemonic word (as the leading token)
+            if opt.strip().startswith(word):
+                rest = opt.strip()[len(word):].strip()
+                # must contain ALL correct terms for this word (verbatim), nothing substituted
+                if not all(term in rest for term in correct_terms):
+                    return True
+    return False
+
 def _is_tf_banned_option(opt: str) -> bool:
     """True/False style (prompt_2) forbids bare yes/no/true/false-ish options —
     every option must be a full fact statement, not a one-word verdict."""
@@ -828,6 +864,8 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             continue  # duplicate question within same batch
         if _mcq_violates_language_lock(mcq, source_script):
             continue  # 🔒 STRICT_LANGUAGE_LOCK violation — script mismatch with source
+        if _violates_lethal_gene_mnemonic(mcq):
+            continue  # 🔒 Lethal gene mnemonic word paired with wrong/incomplete disease name
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
         if prompt_type == 'prompt_2' and not _is_tf_style_question(q_text):
