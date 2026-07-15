@@ -711,7 +711,24 @@ def _mcq_violates_language_lock(mcq: Dict, source_script: str) -> bool:
         return False
     return mcq_script != source_script
 
-def _dedupe_mcqs(mcqs: List[Dict]) -> List[Dict]:
+def _terms_in_source(text: str) -> set:
+    """Extract 4+ char Bangla word tokens from source text for spelling-fidelity checks."""
+    return set(re.findall(r'[\u0980-\u09FF]{4,}', text or ''))
+
+def _has_spelling_drift(option: str, source_terms: set) -> bool:
+    """Generic rule: if an option contains a Bangla term that's NOT found verbatim in the
+    source, but a close-spelling variant (edit-distance-ish via difflib) IS in the source,
+    the AI likely mangled the spelling instead of copying it exactly."""
+    if not source_terms:
+        return False
+    opt_terms = re.findall(r'[\u0980-\u09FF]{4,}', option)
+    for term in opt_terms:
+        if term in source_terms:
+            continue  # exact match, fine
+        close = difflib.get_close_matches(term, source_terms, n=1, cutoff=0.65)
+        if close:
+            return True  # source has a similar-but-different-spelled term — likely drift
+    return False
     """Remove duplicate MCQs (same question text) so retry-merges don't inflate count with repeats."""
     seen = set()
     out = []
@@ -783,6 +800,7 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
     If source_text is provided, also enforces STRICT_LANGUAGE_LOCK by
     rejecting MCQs whose script doesn't match the source's dominant script."""
     source_script = _detect_script(source_text) if source_text else "unknown"
+    source_terms = _terms_in_source(source_text) if source_text else set()
     t = (response_text or "").strip()
     t = t.replace('\u060c', ',')  # Arabic comma → normal comma (fixes all-strategies-failed bug)
     if t.startswith('```json'):
@@ -866,6 +884,8 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             continue  # 🔒 STRICT_LANGUAGE_LOCK violation — script mismatch with source
         if _violates_lethal_gene_mnemonic(mcq):
             continue  # 🔒 Lethal gene mnemonic word paired with wrong/incomplete disease name
+        if source_terms and any(_has_spelling_drift(o, source_terms) for o in opts):
+            continue  # 🔒 Option term's spelling drifted from a similar term actually in source
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
         if prompt_type == 'prompt_2' and not _is_tf_style_question(q_text):
@@ -1977,7 +1997,16 @@ MNEMONIC_TABLE_LOCK = """
    সবচেয়ে বড় ভুল যা এই টাইপের সোর্সে হয়ে থাকে, তাই MCQ লেখার আগে টেবিলের প্রতিটি সারি আবার
    দেখে pairing যাচাই করবে।
 ❌ mnemonic শব্দ (হিমুর/বা/সার/পাশে/কে/ই/থা/রূপা টাইপ ছোট শব্দ) একা কখনো option হবে না —
-   অবশ্যই "[mnemonic শব্দ] + [তার সাথে যুক্ত পূর্ণ, সঠিক রোগ/টার্মের নাম]" এই ফরম্যাটে option লিখতে হবে।"""
+   অবশ্যই "[mnemonic শব্দ] + [তার সাথে যুক্ত পূর্ণ, সঠিক রোগ/টার্মের নাম]" এই ফরম্যাটে option লিখতে হবে।
+
+════════════════════════════════
+🔠 VERBATIM SPELLING RULE (সব ধরনের সোর্সের জন্য, শুধু mnemonic টেবিল না)
+════════════════════════════════
+সোর্সে (টেবিল/টেক্সট/ছবি যেকোনো জায়গায়) যেকোনো নাম/টার্ম/শব্দ যেভাবে বানানে লেখা আছে, MCQ-র
+প্রশ্ন ও অপশনেও ঠিক সেই বানানেই হুবহু লিখতে হবে — একটি অক্ষরও পরিবর্তন, সংক্ষেপ, বা কাছাকাছি
+বানানে বদলানো যাবে না। MCQ লেখার পর প্রতিটি টার্ম সোর্সের সাথে অক্ষরে-অক্ষরে মিলিয়ে
+self-check করবে — সামান্য মিল থাকা ভিন্ন বানান (যেমন সোর্সে "ব্র্যাকিফ্যালাঞ্জি" থাকলে output-এ
+"ব্র্যাকিফ্যাংগিয়া" লেখা) সম্পূর্ণ নিষিদ্ধ।"""
 
 
 SELF_VERIFY_THOUGHT_LOCK = """
