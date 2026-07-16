@@ -93,7 +93,7 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
 # alongside keys — comma-separated env override supported, sane defaults otherwise.
 GROQ_MODELS = [m.strip() for m in os.getenv(
     "GROQ_MODELS",
-    "meta-llama/llama-4-scout-17b-16e-instruct,meta-llama/llama-4-maverick-17b-128e-instruct"
+    "meta-llama/llama-4-scout-17b-16e-instruct,openai/gpt-oss-120b"
 ).split(",") if m.strip()]
 if GROQ_MODEL not in GROQ_MODELS:
     GROQ_MODELS.insert(0, GROQ_MODEL)
@@ -345,7 +345,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
                     contents.append(Image.open(BytesIO(image_bytes)))
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.5-flash",
                     contents=contents,
                     config=types.GenerateContentConfig(
                         temperature=0.7, top_p=0.95, top_k=40,
