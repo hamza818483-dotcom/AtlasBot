@@ -2688,8 +2688,8 @@ def _progress_bar(pct: int) -> str:
     filled = int(round(PROGRESS_BAR_LEN * pct / 100))
     return "▰" * filled + "▱" * (PROGRESS_BAR_LEN - filled)
 
-async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8) -> None:
-    """Edits a message every ~1.5s with live ETA countdown, % and MCQ count."""
+async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8, verb: str = "থেকে MCQ তৈরি হচ্ছে") -> None:
+    """Edits a message every ~1.5s with live ETA countdown, % and progress bar."""
     start = time.time()
     try:
         while True:
@@ -2698,7 +2698,7 @@ async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8) -> 
             eta_left = max(1, int(total_eta - elapsed))
             made = max(1, int(pct / 100 * 22))
             text = (
-                f"🔄 {source_label} থেকে MCQ তৈরি হচ্ছে...\n"
+                f"🔄 {source_label} {verb}...\n"
                 f"⏱️ আনুমানিক সময়: {eta_left} সেকেন্ড\n"
                 f"📊 Progress: {_progress_bar(pct)} {pct}%\n"
                 f"✅ তৈরি হয়েছে: {made} টি MCQ"
@@ -2710,6 +2710,26 @@ async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8) -> 
             await asyncio.sleep(1.5)
     except asyncio.CancelledError:
         pass
+
+async def run_with_live_progress(message, label: str, coro, total_eta: int = 8, verb: str = "প্রসেস হচ্ছে"):
+    """Reusable wrapper: runs `coro` while live-editing `message` with %+ETA,
+    then cancels the ticker once the work is done. Returns coro's result.
+    Usage: result = await run_with_live_progress(wait_msg, "PDF", make_pdf_coro(), total_eta=15, verb="তৈরি হচ্ছে")"""
+    async def _edit(t):
+        try:
+            await message.edit_text(t)
+        except Exception:
+            pass
+    prog_task = asyncio.create_task(live_progress_task(_edit, label, total_eta=total_eta, verb=verb))
+    try:
+        result = await coro
+    finally:
+        prog_task.cancel()
+        try:
+            await prog_task
+        except Exception:
+            pass
+    return result
 
 async def send_countdown(chat_id: int) -> None:
     """3-2-1 countdown (~1 sec total) before Poll/Quiz starts."""
@@ -3026,7 +3046,13 @@ async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "📭 আপনার কোনো Bookmark করা MCQ নেই।\n\n🌐 Website Exam এ গিয়ে 🔖 বাটনে চাপ দিয়ে প্রশ্ন Bookmark করুন!\n\n💡 Bookmark MCQ দিয়ে Exam দিতে: /bmexam"
         )
         return
-    wait_msg = await update.message.reply_text(f"🔖 **Bookmark PDF তৈরি হচ্ছে...**\n📦 মোট {len(bms)} টি Bookmark MCQ\n⏱️ অনুগ্রহ করে অপেক্ষা করুন...", parse_mode=ParseMode.MARKDOWN)
+    wait_msg = await update.message.reply_text(f"🔖 Bookmark PDF তৈরি হচ্ছে...\n📦 মোট {len(bms)} টি Bookmark MCQ")
+    async def _edit_bm(t):
+        try:
+            await wait_msg.edit_text(t)
+        except Exception:
+            pass
+    bm_prog = asyncio.create_task(live_progress_task(_edit_bm, "Bookmark", total_eta=15, verb="PDF তৈরি হচ্ছে"))
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
@@ -3043,6 +3069,7 @@ async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     reason = f"status {resp.status_code}"
                 raise Exception(f"Bookmark PDF API failed: {reason}")
+        bm_prog.cancel()
         pdf_file = BytesIO(pdf_bytes)
         pdf_file.name = f"ATLAS_Bookmark_Sheet.pdf"
         await update.message.chat.send_document(
@@ -3057,7 +3084,11 @@ async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         log_error(f"Bookmark PDF error: {e}")
         try:
-            await wait_msg.edit_text(f"❌ **Bookmark PDF তৈরি করা যায়নি**\n📋 কারণ: {str(e)[:200]}", parse_mode=ParseMode.MARKDOWN)
+            bm_prog.cancel()
+        except Exception:
+            pass
+        try:
+            await wait_msg.edit_text(f"❌ Bookmark PDF তৈরি করা যায়নি\n📋 কারণ: {str(e)[:200]}")
         except Exception:
             pass
 
@@ -3943,10 +3974,17 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
 async def handle_creative_pdf(query, quiz_id: str, ctype: str) -> None:
     """Calls exam_server /api/creative-pdf — sends premium PDF or explains why not possible."""
     label = "🧠 জ্ঞানমূলক প্রশ্ন" if ctype == "knowledge" else "💡 অনুধাবনমূলক প্রশ্ন"
-    wait_msg = await query.message.reply_text(f"{label} **PDF তৈরি হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন (10-25 sec)", parse_mode=ParseMode.MARKDOWN)
+    wait_msg = await query.message.reply_text(f"{label} PDF তৈরি হচ্ছে...")
+    async def _edit_cpdf(t):
+        try:
+            await wait_msg.edit_text(t)
+        except Exception:
+            pass
+    cpdf_prog = asyncio.create_task(live_progress_task(_edit_cpdf, label, total_eta=18, verb="PDF তৈরি হচ্ছে"))
     try:
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.get(f"{HF_SPACE_URL}/api/creative-pdf/{quiz_id}", params={"ctype": ctype})
+            cpdf_prog.cancel()
             ct = resp.headers.get("content-type", "")
             if resp.status_code == 200 and "pdf" in ct:
                 pdf_file = BytesIO(resp.content)
@@ -3978,6 +4016,10 @@ async def handle_creative_pdf(query, quiz_id: str, ctype: str) -> None:
             )
     except Exception as e:
         log_error(f"Creative PDF error: {e}")
+        try:
+            cpdf_prog.cancel()
+        except Exception:
+            pass
         try:
             await wait_msg.edit_text(BUSY_MSG)
         except Exception:
@@ -5096,10 +5138,17 @@ async def handle_premium_pdf(query, quiz_id: str) -> None:
     if not mcq_data:
         await query.message.reply_text("❌ MCQ data পাওয়া যায়নি।")
         return
-    wait_msg = await query.message.reply_text("💎 **Premium PDF তৈরি হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন (10-20 sec)", parse_mode=ParseMode.MARKDOWN)
+    wait_msg = await query.message.reply_text("💎 Premium PDF তৈরি হচ্ছে...")
+    async def _edit_ppdf(t):
+        try:
+            await wait_msg.edit_text(t)
+        except Exception:
+            pass
+    ppdf_prog = asyncio.create_task(live_progress_task(_edit_ppdf, "💎 Premium", total_eta=15, verb="PDF তৈরি হচ্ছে"))
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.get(f"{HF_SPACE_URL}/api/premium-pdf/{quiz_id}")
+            ppdf_prog.cancel()
             ct = resp.headers.get("content-type", "")
             if resp.status_code == 200 and "pdf" in ct:
                 pdf_bytes = resp.content
@@ -5124,7 +5173,11 @@ async def handle_premium_pdf(query, quiz_id: str) -> None:
     except Exception as e:
         log_error(f"Premium PDF error: {e}")
         try:
-            await wait_msg.edit_text(f"❌ **Premium PDF তৈরি করা যায়নি**\n📋 কারণ: {str(e)[:200]}", parse_mode=ParseMode.MARKDOWN)
+            ppdf_prog.cancel()
+        except Exception:
+            pass
+        try:
+            await wait_msg.edit_text(f"❌ Premium PDF তৈরি করা যায়নি\n📋 কারণ: {str(e)[:200]}")
         except Exception:
             pass
 
