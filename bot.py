@@ -240,19 +240,28 @@ def _patch_supabase_execute_with_retry() -> None:
 
     original_execute = SyncQueryRequestBuilder.execute
 
+    def _is_transient(e):
+        if isinstance(e, (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError, httpx.TimeoutException)):
+            return True
+        msg = str(e)
+        if "JSON could not be generated" in msg or any(c in msg for c in ("522", "523", "524", "502", "503", "Connection timed out")):
+            return True
+        return False
+
     def patched_execute(self):
         last_exc = None
         for attempt in range(4):  # initial try + 3 retries
             try:
                 return original_execute(self)
-            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+            except Exception as e:
+                if not _is_transient(e):
+                    raise
                 last_exc = e
                 _reset_supabase_client()
                 get_supabase()
                 if attempt < 3:
-                    time.sleep(0.5 * (attempt + 1))
-        # সব retry fail — তখনই log করো
-        log(f"[Supabase] All 4 attempts failed: {type(last_exc).__name__}", "WARNING")
+                    time.sleep(1.5 * (attempt + 1))
+        log(f"[Supabase] All 4 attempts failed: {type(last_exc).__name__}: {last_exc}", "WARNING")
         raise last_exc
 
     SyncQueryRequestBuilder.execute = patched_execute
