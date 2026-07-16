@@ -1068,7 +1068,7 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
     last_reason = "তথ্য অপর্যাপ্ত।"
     for p in (prompt, fallback_prompt):
         try:
-            obj = _call(p)
+            obj = await asyncio.wait_for(asyncio.to_thread(_call, p), timeout=25)
             if isinstance(obj, dict) and obj.get("error"):
                 last_reason = str(obj.get("error"))[:300]
                 continue
