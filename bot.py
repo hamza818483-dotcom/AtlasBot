@@ -3846,8 +3846,7 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
         return
     wait_msg = await query.message.reply_text(
-        "📖 **ব্যাখ্যা তৈরি হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন...",
-        parse_mode=ParseMode.MARKDOWN
+        "📖 ব্যাখ্যা তৈরি হচ্ছে..."
     )
     async def _edit_wait(t):
         await wait_msg.edit_text(t)
@@ -3925,8 +3924,7 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
         return
     image_file_id = mcq_data['image_file_id']
     wait_msg = await query.message.reply_text(
-        "📌 **পেইজে থাকা MCQ খোঁজা হচ্ছে...**\n⏱️ অনুগ্রহ করে অপেক্ষা করুন...",
-        parse_mode=ParseMode.MARKDOWN
+        "📌 পেইজে থাকা MCQ খোঁজা হচ্ছে..."
     )
     async def _edit_wait(t):
         await wait_msg.edit_text(t)
