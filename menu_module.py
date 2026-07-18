@@ -29,9 +29,12 @@ MENU_ADD_PENDING = {}
 MENU_COUNT_PENDING = {}
 # uid -> current parent_id jekhane user ekhon reply-keyboard menu-te ache (navigation state)
 MENU_NAV_STATE = {}
+# uid -> item_id jar new naam ashar opekkhay
+MENU_EDIT_PENDING = {}
 
 ADD_LABEL = "➕ Add"
 DELETE_LABEL = "🗑 Delete"
+EDIT_LABEL = "✏️ Edit"
 BACK_LABEL = "🔙 Back"
 CLOSE_LABEL = "❌ Close Menu"
 
@@ -89,6 +92,11 @@ async def _delete_item_recursive(item_id: int):
     await d1_query("DELETE FROM menu_items WHERE id = ?", [item_id])
 
 
+async def _rename_item(item_id: int, new_name: str):
+    await _ensure_table()
+    await d1_query("UPDATE menu_items SET name = ? WHERE id = ?", [new_name, item_id])
+
+
 def _item_row_buttons(item_id: int, name: str) -> list:
     return [InlineKeyboardButton(f"📁 {name}", callback_data=f"mnuopen_{item_id}")]
 
@@ -125,6 +133,7 @@ async def _build_reply_keyboard(parent_id: int) -> ReplyKeyboardMarkup:
     action_row = [KeyboardButton(ADD_LABEL)]
     if children:
         action_row.append(KeyboardButton(DELETE_LABEL))
+        action_row.append(KeyboardButton(EDIT_LABEL))
     rows.append(action_row)
     if parent_id:
         rows.append([KeyboardButton(BACK_LABEL)])
@@ -195,7 +204,18 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
         await msg.reply_text("🗑 কোনটা Delete করবে?", reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
         return True
 
-    if parent_id <= -1_000_000:
+    if text == EDIT_LABEL:
+        children = await _get_children(parent_id)
+        if not children:
+            await msg.reply_text("❌ Edit করার মতো কিছু নেই।")
+            return True
+        rows = [[KeyboardButton(f"✏️ {ch['name']}")] for ch in children]
+        rows.append([KeyboardButton(BACK_LABEL)])
+        MENU_NAV_STATE[uid] = -parent_id - 2_000_000  # sentinel: negative-offset = edit-pick mode
+        await msg.reply_text("✏️ কোনটা Edit করবে?", reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
+        return True
+
+    if parent_id <= -1_000_000 and parent_id > -2_000_000:
         real_parent = -(parent_id + 1_000_000)
         if text == BACK_LABEL:
             MENU_NAV_STATE[uid] = real_parent
@@ -212,6 +232,27 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
             MENU_NAV_STATE[uid] = real_parent
             kb = await _build_reply_keyboard(real_parent)
             await msg.reply_text("📋 Menu", reply_markup=kb)
+            return True
+        return False
+
+    if parent_id <= -2_000_000:
+        real_parent = -(parent_id + 2_000_000)
+        if text == BACK_LABEL:
+            MENU_NAV_STATE[uid] = real_parent
+            kb = await _build_reply_keyboard(real_parent)
+            await msg.reply_text("📋 Menu", reply_markup=kb)
+            return True
+        if text.startswith("✏️ "):
+            name = text[2:].strip()
+            children = await _get_children(real_parent)
+            match = next((c for c in children if c["name"] == name), None)
+            if match:
+                MENU_EDIT_PENDING[uid] = {"item_id": match["id"], "parent_id": real_parent}
+                await msg.reply_text(f"✏️ <b>{name}</b>-এর নতুন নাম লিখে পাঠাও:", parse_mode=ParseMode.HTML)
+            else:
+                MENU_NAV_STATE[uid] = real_parent
+                kb = await _build_reply_keyboard(real_parent)
+                await msg.reply_text("📋 Menu", reply_markup=kb)
             return True
         return False
 
@@ -358,6 +399,18 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text(f"✅ যোগ হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
         MENU_NAV_STATE[uid] = parent_id
         kb = await _build_reply_keyboard(parent_id)
+        await msg.reply_text("📋 Menu", reply_markup=kb)
+        return True
+
+    if uid in MENU_EDIT_PENDING:
+        text = (msg.text or "").strip()
+        if not text or text.startswith("/"):
+            return False
+        info = MENU_EDIT_PENDING.pop(uid)
+        await _rename_item(info["item_id"], text)
+        await msg.reply_text(f"✅ নতুন নাম সেভ হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
+        MENU_NAV_STATE[uid] = info["parent_id"]
+        kb = await _build_reply_keyboard(info["parent_id"])
         await msg.reply_text("📋 Menu", reply_markup=kb)
         return True
 

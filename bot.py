@@ -5349,8 +5349,8 @@ async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    from menu_module import MENU_ADD_PENDING, MENU_COUNT_PENDING, MENU_NAV_STATE, handle_menu_pending, handle_menu_reply_keyboard
-    if user_id in MENU_ADD_PENDING or user_id in MENU_COUNT_PENDING:
+    from menu_module import MENU_ADD_PENDING, MENU_COUNT_PENDING, MENU_EDIT_PENDING, MENU_NAV_STATE, handle_menu_pending, handle_menu_reply_keyboard
+    if user_id in MENU_ADD_PENDING or user_id in MENU_COUNT_PENDING or user_id in MENU_EDIT_PENDING:
         consumed = await handle_menu_pending(update, context)
         if consumed:
             return
