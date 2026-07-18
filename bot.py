@@ -2617,6 +2617,32 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
         log_error(f"AI text generation error: {e}")
         return [], "MCQ তৈরি করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
 
+async def _wiki_search_snippets(query: str, limit: int = 3) -> str:
+    """Fetch short factual snippets from Wikipedia (bn + en) to ground the explanation."""
+    snippets = []
+    async with httpx.AsyncClient(timeout=8) as client:
+        for lang in ("bn", "en"):
+            try:
+                r = await client.get(
+                    f"https://{lang}.wikipedia.org/w/api.php",
+                    params={
+                        "action": "query", "list": "search", "srsearch": query,
+                        "format": "json", "srlimit": limit
+                    },
+                )
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                for item in data.get("query", {}).get("search", []):
+                    title = item.get("title", "")
+                    snippet = re.sub("<[^<]+?>", "", item.get("snippet", ""))
+                    if title and snippet:
+                        snippets.append(f"[{lang}] {title}: {snippet}")
+            except Exception:
+                continue
+    return "\n".join(snippets[:limit * 2])
+
+
 async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     log(f"📊 /atlas from {user['user_id']}")
@@ -2630,26 +2656,10 @@ async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     options = [o.text for o in poll.options]
     correct_idx = poll.correct_option_id
 
-    wait_msg = await update.message.reply_text("⏳ ব্যাখ্যা তৈরি করা হচ্ছে...")
-
-    opts_str = "\n".join(f"{chr(65+i)}) {o}" for i, o in enumerate(options))
-    if correct_idx is not None:
-        hint = f"\nসঠিক উত্তর: {chr(65+correct_idx)}"
-    else:
-        hint = "\nসঠিক উত্তর জানা নেই — নিজে বিশ্লেষণ করে বলো কোনটা সঠিক এবং কেন।"
-
-    prompt = (
-        "নিচের MCQ প্রশ্নের প্রতিটি অপশন নিয়ে বাংলায় স্পষ্ট ব্যাখ্যা দাও।\n"
-        "কোন অপশনটি সঠিক এবং কেন, বাকি অপশনগুলো কেন ভুল — প্রতিটির জন্য আলাদা আলাদা ব্যাখ্যা দাও।\n"
-        "সব তথ্য অবশ্যই ১০০% সঠিক ও ফ্যাক্ট-চেকড হতে হবে, ভুল/অনুমাননির্ভর তথ্য দেওয়া যাবে না।\n"
-        "সংক্ষিপ্ত কিন্তু স্পষ্ট রাখো। সবার শেষে সঠিক উত্তর সম্পর্কে আরও কিছু অতিরিক্ত গুরুত্বপূর্ণ তথ্য/প্রসঙ্গ যুক্ত করো যাতে ইউজার টপিকটা আরও ভালোভাবে শিখতে পারে।\n"
-        "Format:\n"
-        "✅ সঠিক উত্তর: [option] — কারণ...\n"
-        "❌ [option A]: কেন ভুল...\n"
-        "❌ [option B]: কেন ভুল...\n"
-        "❌ [option C]: কেন ভুল...\n\n"
-        "📌 অতিরিক্ত তথ্য: (সঠিক উত্তরের টপিক নিয়ে আরও ২-৩টি গুরুত্বপূর্ণ, সঠিক তথ্য)\n\n"
-        f"প্রশ্ন: {question}\n{opts_str}{hint}"
+    wait_msg = await update.message.reply_text(
+        f"🔄 Poll থেকে ব্যাখ্যা তৈরি হচ্ছে...\n"
+        f"⏱️ আনুমানিক সময়: 8 সেকেন্ড\n"
+        f"📊 Progress: {_progress_bar(0)} 0%"
     )
 
     async def _edit_wait(t):
@@ -2657,7 +2667,37 @@ async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await wait_msg.edit_text(t)
         except Exception:
             pass
-    prog_task = asyncio.create_task(live_progress_task(_edit_wait, "Poll", total_eta=8))
+    prog_task = asyncio.create_task(
+        live_progress_task(_edit_wait, "Poll", total_eta=8, verb="থেকে ব্যাখ্যা তৈরি হচ্ছে")
+    )
+
+    web_facts = await _wiki_search_snippets(question)
+
+    opts_str = "\n".join(f"{chr(65+i)}) {o}" for i, o in enumerate(options))
+    if correct_idx is not None:
+        hint = f"\nসঠিক উত্তর: {chr(65+correct_idx)}"
+    else:
+        hint = "\nসঠিক উত্তর জানা নেই — নিজে বিশ্লেষণ করে বলো কোনটা সঠিক এবং কেন।"
+
+    facts_block = (
+        f"\n\nWikipedia থেকে প্রাপ্ত তথ্য (যাচাইয়ের জন্য ব্যবহার করো, ভুল হলে এড়িয়ে নিজের সঠিক জ্ঞান ব্যবহার করো):\n{web_facts}"
+        if web_facts else ""
+    )
+
+    prompt = (
+        "নিচের MCQ প্রশ্নের প্রতিটি অপশন নিয়ে বাংলায় স্পষ্ট ব্যাখ্যা দাও।\n"
+        "কোন অপশনটি সঠিক এবং কেন, বাকি অপশনগুলো কেন ভুল — প্রতিটির জন্য আলাদা আলাদা ব্যাখ্যা দাও।\n"
+        "সব তথ্য অবশ্যই ১০০% সঠিক ও ফ্যাক্ট-চেকড হতে হবে, ভুল/অনুমাননির্ভর তথ্য দেওয়া যাবে না।\n"
+        "নিচে দেওয়া Wikipedia তথ্য থাকলে সেটা ক্রস-চেক করে ব্যবহার করো।\n"
+        "সংক্ষিপ্ত কিন্তু স্পষ্ট রাখো। সবার শেষে সঠিক উত্তর সম্পর্কে আরও কিছু অতিরিক্ত গুরুত্বপূর্ণ তথ্য/প্রসঙ্গ যুক্ত করো যাতে ইউজার টপিকটা আরও ভালোভাবে শিখতে পারে।\n"
+        "Format:\n"
+        "✅ সঠিক উত্তর: [option] — কারণ...\n"
+        "❌ [option A]: কেন ভুল...\n"
+        "❌ [option B]: কেন ভুল...\n"
+        "❌ [option C]: কেন ভুল...\n\n"
+        "📌 অতিরিক্ত তথ্য: (সঠিক উত্তরের টপিক নিয়ে আরও ২-৩টি গুরুত্বপূর্ণ, সঠিক তথ্য)\n\n"
+        f"প্রশ্ন: {question}\n{opts_str}{hint}{facts_block}"
+    )
 
     response_text, _ = await ai_generate(prompt, None)
     prog_task.cancel()
