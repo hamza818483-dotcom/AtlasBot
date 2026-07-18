@@ -127,9 +127,7 @@ async def _build_reply_keyboard(parent_id: int) -> ReplyKeyboardMarkup:
         action_row.append(KeyboardButton(DELETE_LABEL))
     rows.append(action_row)
     if parent_id:
-        rows.append([KeyboardButton(BACK_LABEL), KeyboardButton(CLOSE_LABEL)])
-    else:
-        rows.append([KeyboardButton(CLOSE_LABEL)])
+        rows.append([KeyboardButton(BACK_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
