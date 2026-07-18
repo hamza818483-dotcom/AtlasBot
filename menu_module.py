@@ -83,11 +83,7 @@ async def _delete_item_recursive(item_id: int):
 
 
 def _item_row_buttons(item_id: int, name: str) -> list:
-    return [
-        InlineKeyboardButton(f"📁 {name}", callback_data=f"mnuopen_{item_id}"),
-        InlineKeyboardButton("➕", callback_data=f"mnuadd_{item_id}"),
-        InlineKeyboardButton("🗑", callback_data=f"mnudelask_{item_id}"),
-    ]
+    return [InlineKeyboardButton(f"📁 {name}", callback_data=f"mnuopen_{item_id}")]
 
 
 async def _render_listing(parent_id: int):
@@ -100,8 +96,15 @@ async def _render_listing(parent_id: int):
         back_target = None
 
     children = await _get_children(parent_id)
-    rows = [_item_row_buttons(ch["id"], ch["name"]) for ch in children]
-    rows.append([InlineKeyboardButton("➕ Add more (এখানে)", callback_data=f"mnuadd_{parent_id}")])
+    # Grid layout: 3 buttons per row (SS-এর মতো row-wise)
+    flat = [InlineKeyboardButton(f"📁 {ch['name']}", callback_data=f"mnuopen_{ch['id']}") for ch in children]
+    rows = [flat[i:i + 3] for i in range(0, len(flat), 3)]
+    action_row = [
+        InlineKeyboardButton("➕ Add", callback_data=f"mnuadd_{parent_id}"),
+    ]
+    if children:
+        action_row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"mnudelpick_{parent_id}"))
+    rows.append(action_row)
     if back_target:
         rows.append([InlineKeyboardButton("🔙 Back", callback_data=back_target)])
     return title, InlineKeyboardMarkup(rows)
@@ -138,6 +141,20 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         MENU_ADD_PENDING[uid] = parent_id
         await query.edit_message_text(
             "✏️ নতুন item-এর নাম লিখে পাঠাও।\n📎 অথবা CSV ফাইল পাঠাও (নাম হিসেবে ফাইলের নাম ব্যবহার হবে)।"
+        )
+        return True
+
+    if data.startswith("mnudelpick_"):
+        parent_id = int(data[len("mnudelpick_"):])
+        children = await _get_children(parent_id)
+        if not children:
+            return True
+        flat = [InlineKeyboardButton(f"🗑 {ch['name']}", callback_data=f"mnudelask_{ch['id']}") for ch in children]
+        rows = [flat[i:i + 2] for i in range(0, len(flat), 2)]
+        back_target = f"mnuopen_{parent_id}" if parent_id else "mnuroot"
+        rows.append([InlineKeyboardButton("🔙 Back", callback_data=back_target)])
+        await query.edit_message_text(
+            "🗑 কোনটা Delete করবে?", reply_markup=InlineKeyboardMarkup(rows)
         )
         return True
 
