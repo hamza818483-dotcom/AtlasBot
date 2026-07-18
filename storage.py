@@ -254,6 +254,12 @@ CREATE TABLE IF NOT EXISTS mistakes (
   question_data TEXT, status TEXT, created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_mistakes_user ON mistakes(user_id);
+
+CREATE TABLE IF NOT EXISTS menu_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL DEFAULT 0,
+  name TEXT NOT NULL, csv_data TEXT, created_by INTEGER, created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_menu_items_parent ON menu_items(parent_id);
 """
 
 async def bootstrap_d1_schema():

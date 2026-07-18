@@ -8,11 +8,10 @@
 #                              practice korte chan seta jiggesh korbe. Count dile Quiz/Poll/
 #                              Website Exam banaye inline button hisebe dibe.
 # - "🗑 Delete" tap          -> ওই item + tar shob sub-item delete (confirm shoho)
-# Storage: Supabase table menu_items (self-referencing parent_id)
+# Storage: D1 table menu_items (self-referencing parent_id)
 # ============================================================
 import json
 import time
-import asyncio
 import csv as _csv_mod
 from io import StringIO
 
@@ -20,7 +19,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-_TABLE_READY = True  # Supabase table created manually, no DDL needed here
+from storage import d1_query
+
+_TABLE_READY = False
 
 # uid -> parent_id (0 = root) jekhane "Add more" chaper por naya item add hobe
 MENU_ADD_PENDING = {}
@@ -35,74 +36,57 @@ BACK_LABEL = "🔙 Back"
 CLOSE_LABEL = "❌ Close Menu"
 
 
-def _sb_client():
-    from bot import supabase_call
-    return supabase_call
-
-
 async def _ensure_table():
-    return  # no-op: table `menu_items` must exist in Supabase (see bottom of file for SQL)
+    global _TABLE_READY
+    if _TABLE_READY:
+        return
+    await d1_query(
+        "CREATE TABLE IF NOT EXISTS menu_items ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "parent_id INTEGER NOT NULL DEFAULT 0, "
+        "name TEXT NOT NULL, "
+        "csv_data TEXT, "
+        "created_by INTEGER, "
+        "created_at INTEGER)"
+    )
+    _TABLE_READY = True
 
 
 async def _add_item(parent_id: int, name: str, uid: int, csv_data: str = None) -> int:
-    supabase_call = _sb_client()
-
-    def _op(c):
-        row = {
-            "parent_id": parent_id,
-            "name": name,
-            "csv_data": csv_data,
-            "created_by": uid,
-            "created_at": int(time.time()),
-        }
-        res = c.table("menu_items").insert(row).execute()
-        return res.data[0]["id"] if res.data else 0
-
-    return await asyncio.to_thread(lambda: supabase_call(_op))
+    await _ensure_table()
+    await d1_query(
+        "INSERT INTO menu_items (parent_id, name, csv_data, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        [parent_id, name, csv_data, uid, int(time.time())],
+    )
+    res = await d1_query(
+        "SELECT id FROM menu_items WHERE parent_id = ? AND name = ? ORDER BY id DESC LIMIT 1",
+        [parent_id, name],
+    )
+    rows = res.get("results", [])
+    return rows[0]["id"] if rows else 0
 
 
 async def _get_children(parent_id: int) -> list:
-    supabase_call = _sb_client()
-
-    def _op(c):
-        res = (
-            c.table("menu_items")
-            .select("id,name,csv_data")
-            .eq("parent_id", parent_id)
-            .order("id", desc=False)
-            .execute()
-        )
-        return res.data or []
-
-    return await asyncio.to_thread(lambda: supabase_call(_op))
+    await _ensure_table()
+    res = await d1_query(
+        "SELECT id, name, csv_data FROM menu_items WHERE parent_id = ? ORDER BY id ASC",
+        [parent_id],
+    )
+    return res.get("results", []) or []
 
 
 async def _get_item(item_id: int) -> dict:
-    supabase_call = _sb_client()
-
-    def _op(c):
-        res = (
-            c.table("menu_items")
-            .select("id,parent_id,name,csv_data")
-            .eq("id", item_id)
-            .limit(1)
-            .execute()
-        )
-        return res.data[0] if res.data else None
-
-    return await asyncio.to_thread(lambda: supabase_call(_op))
+    await _ensure_table()
+    res = await d1_query("SELECT id, parent_id, name, csv_data FROM menu_items WHERE id = ?", [item_id])
+    rows = res.get("results", [])
+    return rows[0] if rows else None
 
 
 async def _delete_item_recursive(item_id: int):
     children = await _get_children(item_id)
     for ch in children:
         await _delete_item_recursive(ch["id"])
-    supabase_call = _sb_client()
-
-    def _op(c):
-        c.table("menu_items").delete().eq("id", item_id).execute()
-
-    await asyncio.to_thread(lambda: supabase_call(_op))
+    await d1_query("DELETE FROM menu_items WHERE id = ?", [item_id])
 
 
 def _item_row_buttons(item_id: int, name: str) -> list:
@@ -460,17 +444,3 @@ async def _generate_from_item(update: Update, context: ContextTypes.DEFAULT_TYPE
                 continue
         await context.bot.send_message(chat_id, f"✅ {sent} টি poll পাঠানো হয়েছে ({name})।")
         return
-
-
-# ============================================================
-# SUPABASE SETUP (run once in Supabase SQL editor)
-# ============================================================
-# CREATE TABLE IF NOT EXISTS menu_items (
-#   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-#   parent_id BIGINT NOT NULL DEFAULT 0,
-#   name TEXT NOT NULL,
-#   csv_data TEXT,
-#   created_by BIGINT,
-#   created_at BIGINT
-# );
-# CREATE INDEX IF NOT EXISTS idx_menu_items_parent ON menu_items(parent_id);
