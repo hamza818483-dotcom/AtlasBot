@@ -3568,6 +3568,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         log(f"⚠️ query.answer() failed (stale/expired callback): {e}")
     try:
+        if data.startswith("mnu"):
+            from menu_module import handle_menu_callback
+            handled = await handle_menu_callback(update, context)
+            if handled:
+                return
         if data.startswith("txtmcq_"):
             await handle_text_mcq_generation(query, data.replace("txtmcq_", ""), context)
         elif data.startswith("genmcq_"):
@@ -5333,6 +5338,11 @@ async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    from menu_module import MENU_ADD_PENDING, MENU_COUNT_PENDING, handle_menu_pending
+    if user_id in MENU_ADD_PENDING or user_id in MENU_COUNT_PENDING:
+        consumed = await handle_menu_pending(update, context)
+        if consumed:
+            return
     state = _pending_input.get(user_id)
     if not state:
         return
@@ -6075,8 +6085,19 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("cancel", cmd_pdfc_cancel))
     application.add_handler(CommandHandler("atlas", cmd_atlas))
     application.add_handler(CommandHandler("txt", cmd_txt))
+    from menu_module import cmd_menu
+    application.add_handler(CommandHandler("menu", cmd_menu))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
     application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_image))
+
+    async def _menu_csv_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        from menu_module import MENU_ADD_PENDING, handle_menu_pending
+        if update.effective_user.id in MENU_ADD_PENDING:
+            await handle_menu_pending(update, context)
+
+    application.add_handler(MessageHandler(
+        filters.Document.FileExtension("csv"), _menu_csv_router
+    ))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pending_input), group=0)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt_edit_text), group=1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text), group=2)
