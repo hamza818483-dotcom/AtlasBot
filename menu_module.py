@@ -144,6 +144,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     title, kb = await _render_listing(0)
+    from telegram import ReplyKeyboardRemove
+    await update.message.reply_text("📋", reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
