@@ -15,7 +15,7 @@ import time
 import csv as _csv_mod
 from io import StringIO
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
@@ -27,6 +27,13 @@ _TABLE_READY = False
 MENU_ADD_PENDING = {}
 # uid -> {"item_id": int, "max": int} jekhane CSV shobe save hoyeche, count jiggesh kora hocche
 MENU_COUNT_PENDING = {}
+# uid -> current parent_id jekhane user ekhon reply-keyboard menu-te ache (navigation state)
+MENU_NAV_STATE = {}
+
+ADD_LABEL = "➕ Add"
+DELETE_LABEL = "🗑 Delete"
+BACK_LABEL = "🔙 Back"
+CLOSE_LABEL = "❌ Close Menu"
 
 
 async def _ensure_table():
@@ -110,6 +117,22 @@ async def _render_listing(parent_id: int):
     return title, InlineKeyboardMarkup(rows)
 
 
+async def _build_reply_keyboard(parent_id: int) -> ReplyKeyboardMarkup:
+    """Persistent bottom keyboard (box-icon area) — row-wise, 3 names per row."""
+    children = await _get_children(parent_id)
+    names = [ch["name"] for ch in children]
+    rows = [[KeyboardButton(n) for n in names[i:i + 3]] for i in range(0, len(names), 3)]
+    action_row = [KeyboardButton(ADD_LABEL)]
+    if children:
+        action_row.append(KeyboardButton(DELETE_LABEL))
+    rows.append(action_row)
+    if parent_id:
+        rows.append([KeyboardButton(BACK_LABEL), KeyboardButton(CLOSE_LABEL)])
+    else:
+        rows.append([KeyboardButton(CLOSE_LABEL)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+
+
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     uid = update.effective_user.id
@@ -120,8 +143,100 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"✅ Menu-তে যোগ হয়েছে: <b>{name}</b>", parse_mode=ParseMode.HTML)
         return
 
-    title, kb = await _render_listing(0)
-    await update.message.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+    MENU_NAV_STATE[uid] = 0
+    kb = await _build_reply_keyboard(0)
+    await update.message.reply_text("📋 <b>Main Menu</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Handles taps on the persistent bottom keyboard. Returns True if consumed."""
+    uid = update.effective_user.id
+    if uid not in MENU_NAV_STATE:
+        return False
+    msg = update.message
+    text = (msg.text or "").strip()
+    if not text:
+        return False
+
+    parent_id = MENU_NAV_STATE[uid]
+
+    if text == CLOSE_LABEL:
+        MENU_NAV_STATE.pop(uid, None)
+        from telegram import ReplyKeyboardRemove
+        await msg.reply_text("✅ Menu বন্ধ করা হয়েছে।", reply_markup=ReplyKeyboardRemove())
+        return True
+
+    if text == BACK_LABEL:
+        item = await _get_item(parent_id) if parent_id else None
+        new_parent = item["parent_id"] if item else 0
+        MENU_NAV_STATE[uid] = new_parent
+        kb = await _build_reply_keyboard(new_parent)
+        if new_parent:
+            parent_item = await _get_item(new_parent)
+            title = f"📁 {parent_item['name']}" if parent_item else "📋 Menu"
+        else:
+            title = "📋 Main Menu"
+        await msg.reply_text(title, reply_markup=kb)
+        return True
+
+    if text == ADD_LABEL:
+        MENU_ADD_PENDING[uid] = parent_id
+        await msg.reply_text(
+            "✏️ নতুন item-এর নাম লিখে পাঠাও।\n📎 অথবা CSV ফাইল পাঠাও (নাম হিসেবে ফাইলের নাম ব্যবহার হবে)।"
+        )
+        return True
+
+    if text == DELETE_LABEL:
+        children = await _get_children(parent_id)
+        if not children:
+            await msg.reply_text("❌ Delete করার মতো কিছু নেই।")
+            return True
+        rows = [[KeyboardButton(f"🗑 {ch['name']}")] for ch in children]
+        rows.append([KeyboardButton(BACK_LABEL)])
+        MENU_NAV_STATE[uid] = -parent_id - 1_000_000  # sentinel: negative-offset = delete-pick mode
+        await msg.reply_text("🗑 কোনটা Delete করবে?", reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
+        return True
+
+    if parent_id <= -1_000_000:
+        real_parent = -(parent_id + 1_000_000)
+        if text == BACK_LABEL:
+            MENU_NAV_STATE[uid] = real_parent
+            kb = await _build_reply_keyboard(real_parent)
+            await msg.reply_text("📋 Menu", reply_markup=kb)
+            return True
+        if text.startswith("🗑 "):
+            name = text[2:].strip()
+            children = await _get_children(real_parent)
+            match = next((c for c in children if c["name"] == name), None)
+            if match:
+                await _delete_item_recursive(match["id"])
+                await msg.reply_text(f"✅ <b>{name}</b> delete হয়েছে।", parse_mode=ParseMode.HTML)
+            MENU_NAV_STATE[uid] = real_parent
+            kb = await _build_reply_keyboard(real_parent)
+            await msg.reply_text("📋 Menu", reply_markup=kb)
+            return True
+        return False
+
+    # Otherwise: check if text matches a child item name -> open it
+    children = await _get_children(parent_id)
+    match = next((c for c in children if c["name"] == text), None)
+    if not match:
+        return False
+
+    if match.get("csv_data"):
+        mcqs = json.loads(match["csv_data"])
+        MENU_COUNT_PENDING[uid] = {"item_id": match["id"], "max": len(mcqs)}
+        await msg.reply_text(
+            f"📁 <b>{match['name']}</b> — {len(mcqs)} টি MCQ সংরক্ষিত আছে।\n\n"
+            "কয়টি MCQ practice করতে চান, সংখ্যা লিখে পাঠান:",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    MENU_NAV_STATE[uid] = match["id"]
+    kb = await _build_reply_keyboard(match["id"])
+    await msg.reply_text(f"📁 <b>{match['name']}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+    return True
 
 
 async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -243,8 +358,9 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
         parent_id = MENU_ADD_PENDING.pop(uid)
         await _add_item(parent_id, text, uid)
         await msg.reply_text(f"✅ যোগ হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
-        title, kb = await _render_listing(parent_id)
-        await msg.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        MENU_NAV_STATE[uid] = parent_id
+        kb = await _build_reply_keyboard(parent_id)
+        await msg.reply_text("📋 Menu", reply_markup=kb)
         return True
 
     if uid in MENU_COUNT_PENDING:
