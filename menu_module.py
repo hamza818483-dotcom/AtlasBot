@@ -107,7 +107,7 @@ async def _render_listing(parent_id: int):
     flat = [InlineKeyboardButton(f"📁 {ch['name']}", callback_data=f"mnuopen_{ch['id']}") for ch in children]
     rows = [flat[i:i + 3] for i in range(0, len(flat), 3)]
     action_row = [
-        InlineKeyboardButton("➕ Add", callback_data=f"mnuadd_{parent_id}"),
+        InlineKeyboardButton("➕ Add more", callback_data=f"mnuadd_{parent_id}"),
     ]
     if children:
         action_row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"mnudelpick_{parent_id}"))
@@ -143,9 +143,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"✅ Menu-তে যোগ হয়েছে: <b>{name}</b>", parse_mode=ParseMode.HTML)
         return
 
-    MENU_NAV_STATE[uid] = 0
-    kb = await _build_reply_keyboard(0)
-    await update.message.reply_text("📋 <b>Main Menu</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+    title, kb = await _render_listing(0)
+    await update.message.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -357,10 +356,8 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
             return False
         parent_id = MENU_ADD_PENDING.pop(uid)
         await _add_item(parent_id, text, uid)
-        await msg.reply_text(f"✅ যোগ হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
-        MENU_NAV_STATE[uid] = parent_id
-        kb = await _build_reply_keyboard(parent_id)
-        await msg.reply_text("📋 Menu", reply_markup=kb)
+        title, kb = await _render_listing(parent_id)
+        await msg.reply_text(f"✅ যোগ হয়েছে: <b>{text}</b>\n\n{title}", parse_mode=ParseMode.HTML, reply_markup=kb)
         return True
 
     if uid in MENU_COUNT_PENDING:
