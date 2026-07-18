@@ -6108,6 +6108,7 @@ async def set_bot_commands() -> None:
     """User menu = user commands only. Owner gets full set via owner-scope."""
     try:
         user_commands = [
+            BotCommand("menu", "📋 Main Menu"),
             BotCommand("start", "🤖 বট শুরু / স্বাগতম"),
             BotCommand("all", "📚 আমার সব MCQ সেট দেখুন"),
             BotCommand("bmexam", "🔖 Bookmark MCQ দিয়ে Exam"),
