@@ -47,7 +47,7 @@ jobs:
           if [ "$STATUS" != "200" ]; then
             echo "::warning::Render health check returned $STATUS after retries (instance may be sleeping/starting or down)"
             if [ -n "$BOT_TOKEN" ] && [ -n "$OWNER_ID" ]; then
-              MSG="⚠️ Render bot DOWN ধরা পড়েছে!%0A%0AStatus code: ${STATUS}%0AURL: ${URL}%0A%0AHF Space ban থাকায় auto-failover নেই — manually চেক করুন Render Dashboard এ।"
+              MSG="⚠️ Render Primary DOWN ধরা পড়েছে!%0A%0AStatus code: ${STATUS}%0AURL: ${URL}%0A%0AAuto-failover চলছে (watchdog-render-failover.yml, প্রতি ৫ মিনিটে) — Backup Render-এ webhook switch হয়ে যাবে যদি Primary সত্যিই down থাকে।"
               curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
                 -d "chat_id=${OWNER_ID}" \
                 -d "text=${MSG}" \
