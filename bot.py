@@ -3520,7 +3520,17 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         log_error(f"Image handler error: {e}")
         await safe_user_reply(update.message)
 
+async def cmd_mcq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['awaiting_mcq_text'] = True
+    await update.message.reply_text(
+        "📝 এখন MCQ বানানোর জন্য টেক্সট পাঠান (কমপক্ষে ৪-৫ লাইন, ৩০+ শব্দ)।"
+    )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.user_data.get('awaiting_mcq_text'):
+        return
+    context.user_data['awaiting_mcq_text'] = False
     user = get_user_info(update)
     user_id = user['user_id']
     text = update.message.text
@@ -6058,6 +6068,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 async def register_handlers() -> None:
     application.add_error_handler(global_error_handler)
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("mcq", cmd_mcq))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("all", cmd_all))
     application.add_handler(CommandHandler("bm", cmd_bm))
