@@ -103,6 +103,7 @@ async def _rename_item(item_id: int, new_name: str):
 
 
 CLOSE_LABEL = "❌ Close"
+OPEN_LABEL = "📋 Menu খুলো"
 
 
 async def _build_reply_keyboard(parent_id: int = 0) -> ReplyKeyboardMarkup:
@@ -152,8 +153,13 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
         return False
 
     if text == CLOSE_LABEL:
-        from telegram import ReplyKeyboardRemove
-        await msg.reply_text("📋 Menu বন্ধ হয়েছে। খুলতে হলে নিচের keyboard-icon এ ট্যাপ করো।", reply_markup=ReplyKeyboardRemove())
+        reopen_kb = ReplyKeyboardMarkup([[KeyboardButton(OPEN_LABEL)]], resize_keyboard=True, is_persistent=True)
+        await msg.reply_text("📋 Menu বন্ধ হয়েছে। খুলতে নিচের বাটনে ট্যাপ করো।", reply_markup=reopen_kb)
+        return True
+
+    if text == OPEN_LABEL:
+        kb = await _build_reply_keyboard(0)
+        await msg.reply_text("📋 Menu", reply_markup=kb)
         return True
 
     match = await _get_item_by_name(0, text)
