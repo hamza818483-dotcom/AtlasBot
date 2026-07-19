@@ -126,7 +126,11 @@ async def _render_listing(parent_id: int = 0):
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot import is_admin
     uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("❌ এই কমান্ড শুধু Admin-এর জন্য।")
+        return
     MENU_NAV_STATE[uid] = True
     kb_reply = await _build_reply_keyboard(0)
     await update.message.reply_text("📋 Menu (box-icon)", reply_markup=kb_reply)
@@ -135,10 +139,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handles taps on the persistent bottom keyboard items. Returns True if consumed."""
+    """Handles taps on the persistent bottom keyboard items — works for ALL users. Returns True if consumed."""
     uid = update.effective_user.id
-    if uid not in MENU_NAV_STATE:
-        return False
     msg = update.message
     text = (msg.text or "").strip()
     if not text:
@@ -167,6 +169,13 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     data = query.data
     uid = update.effective_user.id
+
+    MANAGEMENT_PREFIXES = ("mnuadd_", "mnudelpick_", "mnudelask_", "mnudelyes_", "mnueditpick_", "mnueditask_")
+    if data.startswith(MANAGEMENT_PREFIXES) or data == "mnuroot":
+        from bot import is_admin
+        if not is_admin(uid):
+            await query.answer("❌ শুধু Admin ব্যবহার করতে পারবে।", show_alert=True)
+            return True
 
     if data.startswith("mnuadd_"):
         MENU_ADD_PENDING[uid] = True

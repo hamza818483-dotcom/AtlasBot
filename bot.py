@@ -2916,7 +2916,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
   /bm — বুকমার্ক করা MCQ এর PDF ডাউনলোড
   /pdfc — 📸 একাধিক Image → PDF বানান
   /help — সাহায্য"""
-    await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+    from menu_module import _build_reply_keyboard
+    menu_kb = await _build_reply_keyboard(0)
+    await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN, reply_markup=menu_kb)
 
 # ============================================================
 # FEATURE: /pdfc — multi-image → single PDF (ported from QuizBot)
