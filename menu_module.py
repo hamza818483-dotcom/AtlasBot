@@ -184,6 +184,14 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
     return True
 
 
+async def _safe_edit(query, text, **kwargs):
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
 async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Returns True if handled."""
     query = update.callback_query
@@ -201,7 +209,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         parent_id = int(data[len("mnuadd_"):])
         MENU_ADD_PENDING[uid] = parent_id
         await query.answer()
-        await query.edit_message_text(
+        await _safe_edit(query, 
             "✏️ নতুন item-এর নাম লিখে পাঠাও।\n📎 অথবা CSV ফাইল পাঠাও (MCQ practice item হিসেবে)।"
         )
         return True
@@ -217,7 +225,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         back_target = f"mnuopen_{parent_id}" if parent_id else "mnuroot"
         rows.append([InlineKeyboardButton("🔙 Back", callback_data=back_target)])
         await query.answer()
-        await query.edit_message_text("🗑 কোনটা Delete করবে?", reply_markup=InlineKeyboardMarkup(rows))
+        await _safe_edit(query, "🗑 কোনটা Delete করবে?", reply_markup=InlineKeyboardMarkup(rows))
         return True
 
     if data.startswith("mnudelask_"):
@@ -234,7 +242,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton("❌ না", callback_data=back_target),
         ]])
         await query.answer()
-        await query.edit_message_text(
+        await _safe_edit(query, 
             f"🗑 <b>{item['name']}</b> delete করবে?", parse_mode=ParseMode.HTML, reply_markup=kb,
         )
         return True
@@ -245,8 +253,15 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         item_id, parent_id = int(item_id_s), int(parent_id_s)
         await _delete_item_recursive(item_id)
         await query.answer("✅ Delete হয়েছে")
+        import asyncio as _asyncio
+        children = await _get_children(parent_id)
+        for _attempt in range(4):
+            if not any(c["id"] == item_id for c in children):
+                break
+            await _asyncio.sleep(0.3 * (_attempt + 1))
+            children = await _get_children(parent_id)
         title, kb = await _render_listing(parent_id)
-        await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await _safe_edit(query, title, parse_mode=ParseMode.HTML, reply_markup=kb)
         if parent_id == 0:
             await context.bot.send_message(
                 update.effective_chat.id, "📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0)
@@ -264,7 +279,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         back_target = f"mnuopen_{parent_id}" if parent_id else "mnuroot"
         rows.append([InlineKeyboardButton("🔙 Back", callback_data=back_target)])
         await query.answer()
-        await query.edit_message_text("✏️ কোনটা Edit করবে?", reply_markup=InlineKeyboardMarkup(rows))
+        await _safe_edit(query, "✏️ কোনটা Edit করবে?", reply_markup=InlineKeyboardMarkup(rows))
         return True
 
     if data.startswith("mnueditask_"):
@@ -273,13 +288,13 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         item_id, parent_id = int(item_id_s), int(parent_id_s)
         MENU_EDIT_PENDING[uid] = {"item_id": item_id, "parent_id": parent_id}
         await query.answer()
-        await query.edit_message_text("✏️ নতুন নাম লিখে পাঠাও।")
+        await _safe_edit(query, "✏️ নতুন নাম লিখে পাঠাও।")
         return True
 
     if data == "mnuroot":
         title, kb = await _render_listing(0)
         await query.answer()
-        await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await _safe_edit(query, title, parse_mode=ParseMode.HTML, reply_markup=kb)
         return True
 
     if data.startswith("mnuopen_"):
@@ -292,7 +307,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if item.get("csv_data"):
             mcqs = json.loads(item["csv_data"])
             MENU_COUNT_PENDING[uid] = {"item_id": item_id, "max": len(mcqs)}
-            await query.edit_message_text(
+            await _safe_edit(query, 
                 f"📁 <b>{item['name']}</b> — {len(mcqs)} টি MCQ সংরক্ষিত আছে।\n\n"
                 "কয়টি MCQ practice করতে চান, সংখ্যা লিখে পাঠান:",
                 parse_mode=ParseMode.HTML,
@@ -300,17 +315,17 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return True
         if is_admin(uid):
             title, kb = await _render_listing(item_id)
-            await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await _safe_edit(query, title, parse_mode=ParseMode.HTML, reply_markup=kb)
         else:
             children = await _get_children(item_id)
             if not children:
-                await query.edit_message_text(f"📁 <b>{item['name']}</b> — এখনো কিছু যোগ করা হয়নি।", parse_mode=ParseMode.HTML)
+                await _safe_edit(query, f"📁 <b>{item['name']}</b> — এখনো কিছু যোগ করা হয়নি।", parse_mode=ParseMode.HTML)
             else:
                 flat = [InlineKeyboardButton(f"📁 {ch['name']}", callback_data=f"mnuopen_{ch['id']}") for ch in children]
                 rows = [flat[i:i + 3] for i in range(0, len(flat), 3)]
                 back_target = f"mnuopen_{item['parent_id']}" if item["parent_id"] else "mnuroot"
                 rows.append([InlineKeyboardButton("🔙 Back", callback_data=back_target)])
-                await query.edit_message_text(f"📁 <b>{item['name']}</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+                await _safe_edit(query, f"📁 <b>{item['name']}</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
         return True
 
     if data.startswith("mnucnt_"):
