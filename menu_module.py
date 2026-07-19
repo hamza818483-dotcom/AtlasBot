@@ -102,20 +102,16 @@ async def _rename_item(item_id: int, new_name: str):
     await d1_query("UPDATE menu_items SET name = ? WHERE id = ?", [new_name, item_id])
 
 
-CLOSE_LABEL = "❌ Close"
-OPEN_LABEL = "📋 Menu খুলো"
-
-
 async def _build_reply_keyboard(parent_id: int = 0) -> ReplyKeyboardMarkup:
-    """Bottom keyboard (box-icon area) — items + a Close row. Tapping Close removes it;
-    tapping the box-icon again re-opens it (Telegram re-shows last keyboard on icon tap)."""
+    """Bottom keyboard (box-icon area) — ONLY items, like Exampedia's persistent menu.
+    Open/close is handled purely by Telegram's native keyboard-toggle icon; the bot
+    never removes this keyboard, so the icon stays available forever."""
     children = await _get_children(parent_id)
     names = [ch["name"] for ch in children]
     if not names:
         rows = [[KeyboardButton("📋 Menu খালি — /menu <নাম> দিয়ে যোগ করো")]]
     else:
         rows = [[KeyboardButton(n) for n in names[i:i + 3]] for i in range(0, len(names), 3)]
-    rows.append([KeyboardButton(CLOSE_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -151,16 +147,6 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
     text = (msg.text or "").strip()
     if not text:
         return False
-
-    if text == CLOSE_LABEL:
-        reopen_kb = ReplyKeyboardMarkup([[KeyboardButton(OPEN_LABEL)]], resize_keyboard=True, is_persistent=True)
-        await msg.reply_text("📋 Menu বন্ধ হয়েছে। খুলতে নিচের বাটনে ট্যাপ করো।", reply_markup=reopen_kb)
-        return True
-
-    if text == OPEN_LABEL:
-        kb = await _build_reply_keyboard(0)
-        await msg.reply_text("📋 Menu", reply_markup=kb)
-        return True
 
     match = await _get_item_by_name(0, text)
     if not match:
