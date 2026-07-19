@@ -102,14 +102,19 @@ async def _rename_item(item_id: int, new_name: str):
     await d1_query("UPDATE menu_items SET name = ? WHERE id = ?", [new_name, item_id])
 
 
+CLOSE_LABEL = "❌ Close"
+
+
 async def _build_reply_keyboard(parent_id: int = 0) -> ReplyKeyboardMarkup:
-    """Persistent bottom keyboard (box-icon area) — ONLY items, row-wise, 3 per row. No action buttons."""
+    """Bottom keyboard (box-icon area) — items + a Close row. Tapping Close removes it;
+    tapping the box-icon again re-opens it (Telegram re-shows last keyboard on icon tap)."""
     children = await _get_children(parent_id)
     names = [ch["name"] for ch in children]
     if not names:
         rows = [[KeyboardButton("📋 Menu খালি — /menu <নাম> দিয়ে যোগ করো")]]
     else:
         rows = [[KeyboardButton(n) for n in names[i:i + 3]] for i in range(0, len(names), 3)]
+    rows.append([KeyboardButton(CLOSE_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -145,6 +150,11 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
     text = (msg.text or "").strip()
     if not text:
         return False
+
+    if text == CLOSE_LABEL:
+        from telegram import ReplyKeyboardRemove
+        await msg.reply_text("📋 Menu বন্ধ হয়েছে। খুলতে হলে নিচের keyboard-icon এ ট্যাপ করো।", reply_markup=ReplyKeyboardRemove())
+        return True
 
     match = await _get_item_by_name(0, text)
     if not match:
