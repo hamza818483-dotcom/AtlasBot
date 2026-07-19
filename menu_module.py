@@ -28,6 +28,10 @@ _TABLE_READY = False
 MENU_COUNT_PENDING = {}
 # uid -> True mane ei uid /menu box-icon active kore rekheche (item-tap detect korar jonno)
 MENU_NAV_STATE = {}
+# uid -> True mane notun item-er naam ashar opekkhay (inline "Add more" theke)
+MENU_ADD_PENDING = {}
+# uid -> item_id jar notun naam ashar opekkhay (inline "Edit" theke)
+MENU_EDIT_PENDING = {}
 
 
 async def _ensure_table():
@@ -109,49 +113,25 @@ async def _build_reply_keyboard(parent_id: int = 0) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
+async def _render_listing(parent_id: int = 0):
+    children = await _get_children(parent_id)
+    flat = [InlineKeyboardButton(f"📁 {ch['name']}", callback_data=f"mnuopen_{ch['id']}") for ch in children]
+    rows = [flat[i:i + 3] for i in range(0, len(flat), 3)]
+    action_row = [InlineKeyboardButton("➕ Add more", callback_data=f"mnuadd_{parent_id}")]
+    if children:
+        action_row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"mnudelpick_{parent_id}"))
+        action_row.append(InlineKeyboardButton("✏️ Edit", callback_data=f"mnueditpick_{parent_id}"))
+    rows.append(action_row)
+    return "📋 <b>Main Menu</b>", InlineKeyboardMarkup(rows)
+
+
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (update.message.text or "").strip()
     uid = update.effective_user.id
-    arg = text[len("/menu"):].strip()
-
-    if arg.lower().startswith("del "):
-        name = arg[4:].strip()
-        item = await _get_item_by_name(0, name)
-        if not item:
-            await update.message.reply_text(f"❌ <b>{name}</b> পাওয়া যায়নি।", parse_mode=ParseMode.HTML)
-            return
-        await _delete_item_recursive(item["id"])
-        await update.message.reply_text(f"✅ Delete হয়েছে: <b>{name}</b>", parse_mode=ParseMode.HTML)
-        kb = await _build_reply_keyboard(0)
-        await update.message.reply_text("📋 Menu updated", reply_markup=kb)
-        return
-
-    if arg.lower().startswith("edit "):
-        rest = arg[5:].strip()
-        if "|" not in rest:
-            await update.message.reply_text("❌ ফরম্যাট: /menu edit পুরনো নাম | নতুন নাম")
-            return
-        old_name, new_name = [p.strip() for p in rest.split("|", 1)]
-        item = await _get_item_by_name(0, old_name)
-        if not item:
-            await update.message.reply_text(f"❌ <b>{old_name}</b> পাওয়া যায়নি।", parse_mode=ParseMode.HTML)
-            return
-        await _rename_item(item["id"], new_name)
-        await update.message.reply_text(f"✅ <b>{old_name}</b> → <b>{new_name}</b>", parse_mode=ParseMode.HTML)
-        kb = await _build_reply_keyboard(0)
-        await update.message.reply_text("📋 Menu updated", reply_markup=kb)
-        return
-
-    if arg:
-        await _add_item(0, arg, uid)
-        await update.message.reply_text(f"✅ Menu-তে যোগ হয়েছে: <b>{arg}</b>", parse_mode=ParseMode.HTML)
-        kb = await _build_reply_keyboard(0)
-        await update.message.reply_text("📋 Menu updated", reply_markup=kb)
-        return
-
     MENU_NAV_STATE[uid] = True
-    kb = await _build_reply_keyboard(0)
-    await update.message.reply_text("📋 <b>Main Menu</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+    kb_reply = await _build_reply_keyboard(0)
+    await update.message.reply_text("📋 Menu (box-icon)", reply_markup=kb_reply)
+    title, kb_inline = await _render_listing(0)
+    await update.message.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb_inline)
 
 
 async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -183,9 +163,96 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
 
 
 async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Returns True if handled. Only mnucnt_ remains (from CSV count-flow -> quiz/poll/exam)."""
+    """Returns True if handled."""
     query = update.callback_query
     data = query.data
+    uid = update.effective_user.id
+
+    if data.startswith("mnuadd_"):
+        MENU_ADD_PENDING[uid] = True
+        await query.answer()
+        await query.edit_message_text("✏️ নতুন item-এর নাম লিখে পাঠাও।")
+        return True
+
+    if data.startswith("mnudelpick_"):
+        children = await _get_children(0)
+        if not children:
+            await query.answer("❌ Delete করার মতো কিছু নেই।", show_alert=True)
+            return True
+        flat = [InlineKeyboardButton(f"🗑 {ch['name']}", callback_data=f"mnudelask_{ch['id']}") for ch in children]
+        rows = [flat[i:i + 2] for i in range(0, len(flat), 2)]
+        rows.append([InlineKeyboardButton("🔙 Back", callback_data="mnuroot")])
+        await query.answer()
+        await query.edit_message_text("🗑 কোনটা Delete করবে?", reply_markup=InlineKeyboardMarkup(rows))
+        return True
+
+    if data.startswith("mnudelask_"):
+        item_id = int(data[len("mnudelask_"):])
+        item = await _get_item(item_id)
+        if not item:
+            await query.answer()
+            return True
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ হ্যাঁ, Delete করো", callback_data=f"mnudelyes_{item_id}"),
+            InlineKeyboardButton("❌ না", callback_data="mnuroot"),
+        ]])
+        await query.answer()
+        await query.edit_message_text(
+            f"🗑 <b>{item['name']}</b> delete করবে?", parse_mode=ParseMode.HTML, reply_markup=kb,
+        )
+        return True
+
+    if data.startswith("mnudelyes_"):
+        item_id = int(data[len("mnudelyes_"):])
+        await _delete_item_recursive(item_id)
+        await query.answer("✅ Delete হয়েছে")
+        title, kb = await _render_listing(0)
+        await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await context.bot.send_message(
+            update.effective_chat.id, "📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0)
+        )
+        return True
+
+    if data.startswith("mnueditpick_"):
+        children = await _get_children(0)
+        if not children:
+            await query.answer("❌ Edit করার মতো কিছু নেই।", show_alert=True)
+            return True
+        flat = [InlineKeyboardButton(f"✏️ {ch['name']}", callback_data=f"mnueditask_{ch['id']}") for ch in children]
+        rows = [flat[i:i + 2] for i in range(0, len(flat), 2)]
+        rows.append([InlineKeyboardButton("🔙 Back", callback_data="mnuroot")])
+        await query.answer()
+        await query.edit_message_text("✏️ কোনটা Edit করবে?", reply_markup=InlineKeyboardMarkup(rows))
+        return True
+
+    if data.startswith("mnueditask_"):
+        item_id = int(data[len("mnueditask_"):])
+        MENU_EDIT_PENDING[uid] = item_id
+        await query.answer()
+        await query.edit_message_text("✏️ নতুন নাম লিখে পাঠাও।")
+        return True
+
+    if data == "mnuroot":
+        title, kb = await _render_listing(0)
+        await query.answer()
+        await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return True
+
+    if data.startswith("mnuopen_"):
+        item_id = int(data[len("mnuopen_"):])
+        item = await _get_item(item_id)
+        await query.answer()
+        if item and item.get("csv_data"):
+            mcqs = json.loads(item["csv_data"])
+            MENU_COUNT_PENDING[uid] = {"item_id": item_id, "max": len(mcqs)}
+            await query.edit_message_text(
+                f"📁 <b>{item['name']}</b> — {len(mcqs)} টি MCQ সংরক্ষিত আছে।\n\n"
+                "কয়টি MCQ practice করতে চান, সংখ্যা লিখে পাঠান:",
+                parse_mode=ParseMode.HTML,
+            )
+        elif item:
+            await query.edit_message_text(f"📁 <b>{item['name']}</b>", parse_mode=ParseMode.HTML)
+        return True
 
     if data.startswith("mnucnt_"):
         parts = data.split("_")
@@ -199,9 +266,33 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Returns True if consumed (uid was awaiting a CSV MCQ count)."""
+    """Returns True if consumed (uid was awaiting a menu-add name / edit-name / CSV count)."""
     uid = update.effective_user.id
     msg = update.message
+
+    if uid in MENU_ADD_PENDING:
+        text = (msg.text or "").strip()
+        if not text or text.startswith("/"):
+            return False
+        MENU_ADD_PENDING.pop(uid)
+        await _add_item(0, text, uid)
+        await msg.reply_text(f"✅ যোগ হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
+        title, kb = await _render_listing(0)
+        await msg.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await msg.reply_text("📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0))
+        return True
+
+    if uid in MENU_EDIT_PENDING:
+        text = (msg.text or "").strip()
+        if not text or text.startswith("/"):
+            return False
+        item_id = MENU_EDIT_PENDING.pop(uid)
+        await _rename_item(item_id, text)
+        await msg.reply_text(f"✅ নতুন নাম সেভ হয়েছে: <b>{text}</b>", parse_mode=ParseMode.HTML)
+        title, kb = await _render_listing(0)
+        await msg.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await msg.reply_text("📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0))
+        return True
 
     if uid in MENU_COUNT_PENDING:
         text = (msg.text or "").strip()
