@@ -26,7 +26,7 @@ _TABLE_READY = False
 
 # uid -> {"item_id": int, "max": int} jekhane CSV shobe save hoyeche, count jiggesh kora hocche
 MENU_COUNT_PENDING = {}
-# uid -> True mane ei uid /menu box-icon active kore rekheche (item-tap detect korar jonno)
+# uid -> current parent_id (0 = root) — tracks where user is navigating in box-icon
 MENU_NAV_STATE = {}
 # uid -> True mane notun item-er naam ashar opekkhay (inline "Add more" theke)
 MENU_ADD_PENDING = {}
@@ -113,16 +113,21 @@ async def _rename_item(item_id: int, new_name: str):
     await d1_query("UPDATE menu_items SET name = ? WHERE id = ?", [new_name, item_id])
 
 
+BACK_LABEL = "🔙 Back"
+
+
 async def _build_reply_keyboard(parent_id: int = 0, expect_name: str = None) -> ReplyKeyboardMarkup:
-    """Bottom keyboard (box-icon area) — ONLY items, like Exampedia's persistent menu.
-    Open/close is handled purely by Telegram's native keyboard-toggle icon; the bot
-    never removes this keyboard, so the icon stays available forever."""
+    """Bottom keyboard (box-icon area) — items at the current level, like Exampedia's
+    persistent menu. Nested items appear when the user taps into a parent item (drill-down),
+    with a Back button to go up a level."""
     children = await _get_children_fresh(parent_id, expect_name) if expect_name else await _get_children(parent_id)
     names = [ch["name"] for ch in children]
     if not names:
         rows = [[KeyboardButton("📋 Menu খালি — /menu <নাম> দিয়ে যোগ করো")]]
     else:
         rows = [[KeyboardButton(n) for n in names[i:i + 3]] for i in range(0, len(names), 3)]
+    if parent_id:
+        rows.append([KeyboardButton(BACK_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -159,14 +164,24 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handles taps on the persistent bottom keyboard items — works for ALL users. Returns True if consumed."""
+    """Handles taps on the persistent bottom keyboard items — works for ALL users, drill-down nested. Returns True if consumed."""
     uid = update.effective_user.id
     msg = update.message
     text = (msg.text or "").strip()
     if not text:
         return False
 
-    match = await _get_item_by_name(0, text)
+    current_parent = MENU_NAV_STATE.get(uid, 0)
+
+    if text == BACK_LABEL:
+        item = await _get_item(current_parent) if current_parent else None
+        new_parent = item["parent_id"] if item else 0
+        MENU_NAV_STATE[uid] = new_parent
+        kb = await _build_reply_keyboard(new_parent)
+        await msg.reply_text("📋 Menu", reply_markup=kb)
+        return True
+
+    match = await _get_item_by_name(current_parent, text)
     if not match:
         return False
 
@@ -180,7 +195,14 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
         )
         return True
 
-    await msg.reply_text(f"📁 <b>{match['name']}</b>", parse_mode=ParseMode.HTML)
+    children = await _get_children(match["id"])
+    if children:
+        MENU_NAV_STATE[uid] = match["id"]
+        kb = await _build_reply_keyboard(match["id"])
+        await msg.reply_text(f"📁 <b>{match['name']}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+        return True
+
+    await msg.reply_text(f"📁 <b>{match['name']}</b> — এখনো কিছু যোগ করা হয়নি।", parse_mode=ParseMode.HTML)
     return True
 
 

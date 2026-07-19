@@ -5356,10 +5356,9 @@ async def handle_pending_input(update: Update, context: ContextTypes.DEFAULT_TYP
         consumed = await handle_menu_pending(update, context)
         if consumed:
             return
-    if user_id in MENU_NAV_STATE:
-        consumed = await handle_menu_reply_keyboard(update, context)
-        if consumed:
-            return
+    consumed = await handle_menu_reply_keyboard(update, context)
+    if consumed:
+        return
     state = _pending_input.get(user_id)
     if not state:
         return
