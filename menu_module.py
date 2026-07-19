@@ -328,27 +328,33 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
             try:
                 reader = _csv_mod.DictReader(StringIO(raw.decode("utf-8-sig")))
                 mcqs = []
-                for row in reader:
-                    q = (row.get("question") or row.get("Question") or row.get("questions") or row.get("Questions") or "").strip()
+                for raw_row in reader:
+                    row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw_row.items()}
+                    q = row.get("question") or row.get("questions") or ""
                     if not q:
                         continue
-                    opts = [
-                        (row.get(f"option{i}") or row.get(f"Option{i}") or "").strip()
-                        for i in range(1, 5)
-                    ]
+                    opts = [row.get(f"option{i}") or "" for i in range(1, 5)]
                     opts = [o for o in opts if o]
-                    ans_raw = (row.get("answer") or row.get("Answer") or "0").strip()
+                    ans_raw = row.get("answer") or "0"
                     try:
                         ans = int(ans_raw)
                     except ValueError:
                         ans = 0
-                    expl = (row.get("explanation") or row.get("Explanation") or "").strip()
+                    expl = row.get("explanation") or ""
                     mcqs.append({"question": q, "options": opts, "answer": ans, "explanation": expl})
             except Exception as e:
                 await msg.reply_text(f"❌ CSV পড়তে সমস্যা হয়েছে: {e}")
                 return True
             if not mcqs:
-                await msg.reply_text("❌ CSV-তে কোনো valid MCQ পাওয়া যায়নি। কলাম: question, option1-4, answer, explanation")
+                try:
+                    headers = reader.fieldnames
+                except Exception:
+                    headers = None
+                await msg.reply_text(
+                    f"❌ CSV-তে কোনো valid MCQ পাওয়া যায়নি।\n"
+                    f"প্রয়োজনীয় কলাম: question(s), option1-4, answer, explanation\n"
+                    f"পাওয়া গেছে: {headers}"
+                )
                 return True
             name = msg.document.file_name.rsplit(".", 1)[0]
             await _add_item(parent_id, name, uid, csv_data=json.dumps(mcqs))
