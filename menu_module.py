@@ -52,16 +52,27 @@ async def _ensure_table():
 
 async def _add_item(parent_id: int, name: str, uid: int, csv_data: str = None) -> int:
     await _ensure_table()
-    await d1_query(
+    res = await d1_query(
         "INSERT INTO menu_items (parent_id, name, csv_data, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
         [parent_id, name, csv_data, uid, int(time.time())],
     )
-    res = await d1_query(
-        "SELECT id FROM menu_items WHERE parent_id = ? AND name = ? ORDER BY id DESC LIMIT 1",
-        [parent_id, name],
-    )
-    rows = res.get("results", [])
-    return rows[0]["id"] if rows else 0
+    results = res.get("results", [])
+    if results and isinstance(results, list) and results[0].get("meta", {}).get("last_row_id"):
+        return results[0]["meta"]["last_row_id"]
+    meta = res.get("meta") or (results[0].get("meta") if results else {}) or {}
+    return meta.get("last_row_id", 0)
+
+
+async def _get_children_fresh(parent_id: int, expect_name: str = None) -> list:
+    """Like _get_children but retries briefly if a just-inserted row (expect_name)
+    isn't visible yet — works around D1 read-replica lag."""
+    import asyncio
+    for attempt in range(4):
+        children = await _get_children(parent_id)
+        if not expect_name or any(c["name"] == expect_name for c in children):
+            return children
+        await asyncio.sleep(0.3 * (attempt + 1))
+    return children
 
 
 async def _get_children(parent_id: int) -> list:
@@ -102,11 +113,11 @@ async def _rename_item(item_id: int, new_name: str):
     await d1_query("UPDATE menu_items SET name = ? WHERE id = ?", [new_name, item_id])
 
 
-async def _build_reply_keyboard(parent_id: int = 0) -> ReplyKeyboardMarkup:
+async def _build_reply_keyboard(parent_id: int = 0, expect_name: str = None) -> ReplyKeyboardMarkup:
     """Bottom keyboard (box-icon area) — ONLY items, like Exampedia's persistent menu.
     Open/close is handled purely by Telegram's native keyboard-toggle icon; the bot
     never removes this keyboard, so the icon stays available forever."""
-    children = await _get_children(parent_id)
+    children = await _get_children_fresh(parent_id, expect_name) if expect_name else await _get_children(parent_id)
     names = [ch["name"] for ch in children]
     if not names:
         rows = [[KeyboardButton("📋 Menu খালি — /menu <নাম> দিয়ে যোগ করো")]]
@@ -362,7 +373,7 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
             title, kb = await _render_listing(parent_id)
             await msg.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
             if parent_id == 0:
-                await msg.reply_text("📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0))
+                await msg.reply_text("📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0, expect_name=name))
             return True
 
         text = (msg.text or "").strip()
@@ -374,7 +385,7 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
         title, kb = await _render_listing(parent_id)
         await msg.reply_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
         if parent_id == 0:
-            await msg.reply_text("📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0))
+            await msg.reply_text("📋 Menu (box-icon)", reply_markup=await _build_reply_keyboard(0, expect_name=text))
         return True
 
     if uid in MENU_EDIT_PENDING:
