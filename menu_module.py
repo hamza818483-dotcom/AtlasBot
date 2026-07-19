@@ -329,7 +329,7 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reader = _csv_mod.DictReader(StringIO(raw.decode("utf-8-sig")))
                 mcqs = []
                 for row in reader:
-                    q = (row.get("question") or row.get("Question") or "").strip()
+                    q = (row.get("question") or row.get("Question") or row.get("questions") or row.get("Questions") or "").strip()
                     if not q:
                         continue
                     opts = [
