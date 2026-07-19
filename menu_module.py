@@ -452,9 +452,11 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
         max_n = info["max"]
         count = max(1, min(count, max_n))
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎯 Quiz বানাও (bot link)", callback_data=f"mnucnt_{item_id}_{count}_quiz")],
-            [InlineKeyboardButton("📊 Poll পাঠাও (এই চ্যাটে)", callback_data=f"mnucnt_{item_id}_{count}_poll")],
-            [InlineKeyboardButton("🌐 Website Exam বানাও", callback_data=f"mnucnt_{item_id}_{count}_exam")],
+            [
+                InlineKeyboardButton("🎯 Quiz Solve", callback_data=f"mnucnt_{item_id}_{count}_quiz"),
+                InlineKeyboardButton("📊 Poll Solve", callback_data=f"mnucnt_{item_id}_{count}_poll"),
+            ],
+            [InlineKeyboardButton("🌐 Website Exam", callback_data=f"mnucnt_{item_id}_{count}_exam")],
         ])
         await msg.reply_text(f"✅ {count} টি MCQ নেওয়া হবে। কোন ফরম্যাটে চান?", reply_markup=kb)
         return True
@@ -473,50 +475,34 @@ async def _generate_from_item(update: Update, context: ContextTypes.DEFAULT_TYPE
     mcqs = json.loads(item["csv_data"])[:count]
     name = item["name"]
 
-    if mode in ("quiz", "exam"):
-        from bot import save_mcq, GH_PAGES_EXAM_URL, BOT_USERNAME
-        norm_mcqs = []
-        for m in mcqs:
-            norm_mcqs.append({
-                "question": m.get("question", ""),
-                "options": m.get("options", []),
-                "answer": m.get("answer", 0),
-                "explanation": m.get("explanation", ""),
-            })
-        quiz_id = await save_mcq(user_id=uid, mcqs=norm_mcqs, source_type="menu", prompt_type="prompt_1",
-                                  image_file_id=None, chat_id=None, message_id=None)
-        await query.answer()
-        if mode == "quiz":
-            uname = BOT_USERNAME or "atlasprepbot"
-            link = f"https://t.me/{uname}?start={quiz_id}"
-            await context.bot.send_message(
-                chat_id, f"🎯 <b>Quiz তৈরি হয়েছে!</b>\n\n📝 {name} — {len(mcqs)} প্রশ্ন\n\n🔗 <code>{link}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-        else:
-            web_link = f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={uid}"
-            await context.bot.send_message(
-                chat_id, f"🌐 <b>Website Exam তৈরি হয়েছে!</b>\n\n📝 {name} — {len(mcqs)} প্রশ্ন\n\n🔗 {web_link}",
-                parse_mode=ParseMode.HTML,
-            )
+    from bot import save_mcq, GH_PAGES_EXAM_URL, clean_mcq_options, apply_tag_exp, handle_quiz_start, handle_poll_solve
+
+    norm_mcqs = []
+    for m in mcqs:
+        norm_mcqs.append({
+            "question": m.get("question", ""),
+            "options": m.get("options", []),
+            "answer": m.get("answer", 0),
+            "explanation": m.get("explanation", ""),
+        })
+    selected = apply_tag_exp(clean_mcq_options(norm_mcqs))
+    quiz_id = await save_mcq(user_id=uid, mcqs=selected, source_type="menu", prompt_type="prompt_1",
+                              image_file_id=None, chat_id=None, message_id=None)
+    await query.answer()
+
+    if mode == "quiz":
+        await handle_quiz_start(query, str(quiz_id), update.effective_user, chat_id)
         return
 
     if mode == "poll":
-        await query.answer()
-        sent = 0
-        for m in mcqs:
-            try:
-                options = m.get("options", [])[:4]
-                correct_id = m.get("answer", 0)
-                if correct_id >= len(options) or correct_id < 0:
-                    correct_id = 0
-                await context.bot.send_poll(
-                    chat_id=chat_id, question=m.get("question", "")[:300], options=options,
-                    type="quiz", correct_option_id=correct_id,
-                    explanation=(m.get("explanation") or None), is_anonymous=True,
-                )
-                sent += 1
-            except Exception:
-                continue
-        await context.bot.send_message(chat_id, f"✅ {sent} টি poll পাঠানো হয়েছে ({name})।")
+        await handle_poll_solve(query, str(quiz_id), update.effective_user)
+        return
+
+    if mode == "exam":
+        web_link = f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={uid}"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Exam-এ যাও", url=web_link)]])
+        await context.bot.send_message(
+            chat_id, f"🌐 <b>Website Exam তৈরি হয়েছে!</b>\n\n📝 {name} — {len(selected)} প্রশ্ন",
+            parse_mode=ParseMode.HTML, reply_markup=kb,
+        )
         return
