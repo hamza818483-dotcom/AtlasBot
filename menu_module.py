@@ -112,7 +112,7 @@ async def _build_reply_keyboard(parent_id: int = 0) -> ReplyKeyboardMarkup:
         rows = [[KeyboardButton("📋 Menu খালি — /menu <নাম> দিয়ে যোগ করো")]]
     else:
         rows = [[KeyboardButton(n) for n in names[i:i + 3]] for i in range(0, len(names), 3)]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 async def _render_listing(parent_id: int = 0):
