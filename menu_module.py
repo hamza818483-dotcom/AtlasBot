@@ -156,7 +156,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(uid):
         await update.message.reply_text("❌ এই কমান্ড শুধু Admin-এর জন্য।")
         return
-    MENU_NAV_STATE[uid] = True
+    MENU_NAV_STATE[uid] = 0
     kb_reply = await _build_reply_keyboard(0)
     await update.message.reply_text("📋 Menu (box-icon)", reply_markup=kb_reply)
     title, kb_inline = await _render_listing(0)
