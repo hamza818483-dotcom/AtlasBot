@@ -38,6 +38,7 @@ from PIL import Image
 # SECTION 2: CONFIGURATION
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 GENAI_API_KEY = os.getenv("GEMINI_KEY", "")
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev").rstrip("/")
 HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-pvp7.onrender.com")).rstrip("/")
@@ -780,6 +781,7 @@ async def api_solve_pdf(request: Request):
     except Exception as e:
         print(f"PDF render error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/solve-pdf failed for cache_id={cache_id}: {e}")
         return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     b64 = base64.b64encode(pdf_bytes).decode("ascii")
     return {"ok": True, "pdf_b64": b64, "filename": f"ATLAS_Solve_{cache_id[:8]}.pdf"}
@@ -813,6 +815,7 @@ async def _precache_solve_pdf(cache_id: str):
             print(f"[solve-pdf] pre-cached for {cache_id[:8]} ({len(pdf_bytes)} bytes)")
     except Exception as e:
         print(f"[solve-pdf] pre-cache error: {e}")
+        await notify_owner(f"/api/save-answers precache failed for cache_id={cache_id}: {e}")
 
 @app.get("/api/solve-pdf-html/{cache_id}")
 async def api_solve_pdf_html(cache_id: str):
@@ -834,6 +837,7 @@ async def api_solve_pdf_html(cache_id: str):
     except Exception as e:
         print(f"solve-pdf-html error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/solve-pdf-html failed for cache_id={cache_id}: {e}")
         return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে। আবার চেষ্টা করুন।"}, status_code=500)
 
 @app.get("/api/solve-pdf-direct/{cache_id}")
@@ -858,6 +862,7 @@ async def api_solve_pdf_direct(cache_id: str):
     except Exception as e:
         print(f"Solve PDF direct render error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/solve-pdf-direct failed for cache_id={cache_id}: {e}")
         return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     if cache_id in exam_store:
         exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
@@ -1185,6 +1190,20 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
 # SECTION 11.5: PDF RENDERER (Playwright / Chromium)
 # ============================================================
 _PDF_RENDER_SEMAPHORE = asyncio.Semaphore(1)  # v4.5: ~200MB/PDF render + bot/DB baseline on 512MB Render — only 1 render at a time is safe; others queue and run right after
+
+async def notify_owner(text: str):
+    """Best-effort Telegram alert to admin. Never raises."""
+    if not BOT_TOKEN or not OWNER_ID:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": OWNER_ID, "text": f"🚨 ATLAS PDF ERROR\n\n{text[:3500]}"}
+            )
+    except Exception:
+        pass
+
 
 async def _render_pdf(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
     async with _PDF_RENDER_SEMAPHORE:
