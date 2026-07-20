@@ -1066,24 +1066,31 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
         return json.loads(txt.strip())
 
     last_reason = "তথ্য অপর্যাপ্ত।"
+    gemini_tries = max(1, len(GEMINI_KEYS))
     for p in (prompt, fallback_prompt):
-        try:
-            obj = await asyncio.wait_for(asyncio.to_thread(_call, p), timeout=25)
-            if isinstance(obj, dict) and obj.get("error"):
-                last_reason = str(obj.get("error"))[:300]
-                continue
-            items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
-            clean = [it for it in items if it.get("question") and it.get("answer")]
-            if len(clean) >= 2:
-                return {"ok": True, "items": clean}
-            if len(clean) >= 1:
-                last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
-        except json.JSONDecodeError:
-            last_reason = "AI সঠিক ফরম্যাটে উত্তর দেয়নি।"
-        except Exception as e:
-            print(f"creative gen error: {e}")
-            traceback.print_exc()
-            last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
+        for attempt in range(gemini_tries):
+            try:
+                obj = await asyncio.wait_for(asyncio.to_thread(_call, p), timeout=25)
+                if isinstance(obj, dict) and obj.get("error"):
+                    last_reason = str(obj.get("error"))[:300]
+                    break
+                items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
+                clean = [it for it in items if it.get("question") and it.get("answer")]
+                if len(clean) >= 2:
+                    return {"ok": True, "items": clean}
+                if len(clean) >= 1:
+                    last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
+                break
+            except json.JSONDecodeError:
+                last_reason = "AI সঠিক ফরম্যাটে উত্তর দেয়নি।"
+                break
+            except Exception as e:
+                print(f"creative gen error: {e}")
+                last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
+                if attempt < gemini_tries - 1:
+                    _rotate_exam_key()
+                    continue
+                break
 
     # Gemini exhausted/failed both prompts — try Groq/OpenRouter fallback
     print("[creative-pdf] Gemini failed, trying Groq/OpenRouter fallback...")
