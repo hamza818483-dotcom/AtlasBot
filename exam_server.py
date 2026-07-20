@@ -45,7 +45,7 @@ BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("BASE_URL", "https://atlasbot-
 
 # Fallback providers for Creative (জ্ঞানমূলক/অনুধাবনমূলক) generation when Gemini is exhausted
 GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-vl-32b-instruct")
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEY", "").split(",") if k.strip()]
 OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "google/gemma-4-31b-it:free")
 

@@ -89,7 +89,7 @@ CF_AI_TOKEN = os.getenv("CF_AI_TOKEN", "").strip()
 CF_WORKERS_AI_MODEL = os.getenv("CF_WORKERS_AI_MODEL", "@cf/meta/llama-3.2-11b-vision-instruct")
 CF_WORKERS_AI_BASE = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1" if CF_ACCOUNT_ID else ""
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-vl-32b-instruct")
 # v4.2: Groq is now PRIMARY. Multiple vision-capable Groq models rotated
 # alongside keys — comma-separated env override supported, sane defaults otherwise.
 GROQ_MODELS = [m.strip() for m in os.getenv(
