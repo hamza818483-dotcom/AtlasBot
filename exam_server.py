@@ -179,7 +179,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
     for attempt in range(tries):
         try:
             resp = _exam_genai_client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-2.5-flash",
                 contents=[PROMPT_NEW_EXAM, img],
                 config=types.GenerateContentConfig(
                     temperature=0.7, top_p=0.95, top_k=40,
@@ -194,7 +194,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
                 return best
             # too few -> retry once on same key with stronger instruction
             resp2 = _exam_genai_client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-2.5-flash",
                 contents=[PROMPT_NEW_EXAM + "\n\n🔴 অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।", img],
                 config=types.GenerateContentConfig(
                     temperature=0.8, top_p=0.95, top_k=40, max_output_tokens=8192,
@@ -1071,7 +1071,7 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
         def _call(p: str):
             img = Image.open(BytesIO(img_bytes))
             resp = _exam_genai_client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-2.5-flash",
                 contents=[p, img],
                 config=types.GenerateContentConfig(
                     temperature=0.6, top_p=0.95, top_k=40,
