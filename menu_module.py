@@ -197,6 +197,17 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
 
     children = await _get_children(match["id"])
     if children:
+        # jodi ei level-e CSV-item thake, taar naam box-icon-e na dekhiye direct output dao
+        csv_child = next((c for c in children if c.get("csv_data")), None)
+        if csv_child:
+            mcqs = json.loads(csv_child["csv_data"])
+            MENU_COUNT_PENDING[uid] = {"item_id": csv_child["id"], "max": len(mcqs)}
+            await msg.reply_text(
+                f"📁 <b>{match['name']}</b> — {len(mcqs)} টি MCQ সংরক্ষিত আছে।\n\n"
+                "কয়টি MCQ practice করতে চান, সংখ্যা লিখে পাঠান:",
+                parse_mode=ParseMode.HTML,
+            )
+            return True
         MENU_NAV_STATE[uid] = match["id"]
         kb = await _build_reply_keyboard(match["id"])
         await msg.reply_text(f"📁 <b>{match['name']}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
