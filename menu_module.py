@@ -350,12 +350,15 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 await _safe_edit(query, f"📁 <b>{item['name']}</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
         return True
 
-    if data.startswith("mnucnt_"):
-        parts = data.split("_")
-        item_id = int(parts[1])
-        count = int(parts[2])
-        mode = parts[3]
-        await _generate_from_item(update, context, item_id, count, mode)
+    if data.startswith("mnucntgo_"):
+        rest = data[len("mnucntgo_"):]
+        quiz_id, mode = rest.rsplit("_", 1)
+        from bot import handle_quiz_start, handle_poll_solve
+        chat_id = update.effective_chat.id
+        if mode == "quiz":
+            await handle_quiz_start(query, quiz_id, update.effective_user, chat_id)
+        elif mode == "poll":
+            await handle_poll_solve(query, quiz_id, update.effective_user)
         return True
 
     return False
@@ -451,12 +454,27 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
         item_id = info["item_id"]
         max_n = info["max"]
         count = max(1, min(count, max_n))
+
+        item = await _get_item(item_id)
+        mcqs = json.loads(item["csv_data"])[:count] if item and item.get("csv_data") else []
+        from bot import save_mcq, GH_PAGES_EXAM_URL, clean_mcq_options, apply_tag_exp
+        norm_mcqs = [{
+            "question": m.get("question", ""),
+            "options": m.get("options", []),
+            "answer": m.get("answer", 0),
+            "explanation": m.get("explanation", ""),
+        } for m in mcqs]
+        selected = apply_tag_exp(clean_mcq_options(norm_mcqs))
+        quiz_id = await save_mcq(user_id=uid, mcqs=selected, source_type="menu", prompt_type="prompt_1",
+                                  image_file_id=None, chat_id=None, message_id=None)
+        web_link = f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={uid}"
+
         kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🎯 Quiz Solve", callback_data=f"mnucnt_{item_id}_{count}_quiz"),
-                InlineKeyboardButton("📊 Poll Solve", callback_data=f"mnucnt_{item_id}_{count}_poll"),
+                InlineKeyboardButton("🎯 Quiz Solve", callback_data=f"mnucntgo_{quiz_id}_quiz"),
+                InlineKeyboardButton("📊 Poll Solve", callback_data=f"mnucntgo_{quiz_id}_poll"),
             ],
-            [InlineKeyboardButton("🌐 Website Exam", callback_data=f"mnucnt_{item_id}_{count}_exam")],
+            [InlineKeyboardButton("🌐 Website Exam", url=web_link)],
         ])
         await msg.reply_text(f"✅ {count} টি MCQ নেওয়া হবে। কোন ফরম্যাটে চান?", reply_markup=kb)
         return True
@@ -464,45 +482,3 @@ async def handle_menu_pending(update: Update, context: ContextTypes.DEFAULT_TYPE
     return False
 
 
-async def _generate_from_item(update: Update, context: ContextTypes.DEFAULT_TYPE, item_id: int, count: int, mode: str):
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    uid = update.effective_user.id
-    item = await _get_item(item_id)
-    if not item or not item.get("csv_data"):
-        await query.answer("❌ CSV পাওয়া যায়নি", show_alert=True)
-        return
-    mcqs = json.loads(item["csv_data"])[:count]
-    name = item["name"]
-
-    from bot import save_mcq, GH_PAGES_EXAM_URL, clean_mcq_options, apply_tag_exp, handle_quiz_start, handle_poll_solve
-
-    norm_mcqs = []
-    for m in mcqs:
-        norm_mcqs.append({
-            "question": m.get("question", ""),
-            "options": m.get("options", []),
-            "answer": m.get("answer", 0),
-            "explanation": m.get("explanation", ""),
-        })
-    selected = apply_tag_exp(clean_mcq_options(norm_mcqs))
-    quiz_id = await save_mcq(user_id=uid, mcqs=selected, source_type="menu", prompt_type="prompt_1",
-                              image_file_id=None, chat_id=None, message_id=None)
-    await query.answer()
-
-    if mode == "quiz":
-        await handle_quiz_start(query, str(quiz_id), update.effective_user, chat_id)
-        return
-
-    if mode == "poll":
-        await handle_poll_solve(query, str(quiz_id), update.effective_user)
-        return
-
-    if mode == "exam":
-        web_link = f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={uid}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Exam-এ যাও", url=web_link)]])
-        await context.bot.send_message(
-            chat_id, f"🌐 <b>Website Exam তৈরি হয়েছে!</b>\n\n📝 {name} — {len(selected)} প্রশ্ন",
-            parse_mode=ParseMode.HTML, reply_markup=kb,
-        )
-        return
