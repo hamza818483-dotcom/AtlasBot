@@ -998,16 +998,12 @@ def _b64_data_url(image_bytes: bytes) -> str:
         mime = "image/webp"
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
-async def _call_creative_fallback(prompt: str, img_bytes: bytes) -> Optional[dict]:
-    """Groq/OpenRouter fallback when Gemini is exhausted. Returns parsed JSON dict or None."""
+async def _call_creative_chain(prompt: str, img_bytes: bytes, chains: list) -> Optional[dict]:
+    """Try each (base_url, keys, model, extra_headers) chain, all keys per chain.
+    Returns parsed JSON dict or None."""
     content = [
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": _b64_data_url(img_bytes)}},
-    ]
-    chains = [
-        ("https://api.groq.com/openai/v1", GROQ_KEYS, GROQ_MODEL, {}),
-        ("https://openrouter.ai/api/v1", OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
-         {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}),
     ]
     for base_url, keys, model, extra_headers in chains:
         for k in keys:
@@ -1037,80 +1033,107 @@ async def _call_creative_fallback(prompt: str, img_bytes: bytes) -> Optional[dic
 
 async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
     """Returns {'ok':True,'items':[...]} or {'ok':False,'reason':str}.
-    Tries primary (strict source-only) prompt first, then a lenient
-    fallback prompt so a PDF can (almost) always be produced."""
-    if _exam_genai_client is None:
-        setup_gemini()
-    if _exam_genai_client is None:
-        return {"ok": False, "reason": "Gemini API key সেট নেই।"}
+    Order: Groq (all keys) -> Gemini (all keys) -> OpenRouter (all keys)."""
     prompt = PROMPT_KNOWLEDGE if ctype == "knowledge" else PROMPT_COMPREHENSION
     fallback_prompt = PROMPT_KNOWLEDGE_FALLBACK if ctype == "knowledge" else PROMPT_COMPREHENSION_FALLBACK
-
-    def _call(p: str):
-        img = Image.open(BytesIO(img_bytes))
-        resp = _exam_genai_client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=[p, img],
-            config=types.GenerateContentConfig(
-                temperature=0.6, top_p=0.95, top_k=40,
-                max_output_tokens=8192,
-                thinking_config=types.ThinkingConfig(thinking_budget=1024),
-            )
-        )
-        txt = (resp.text or "").strip()
-        for tag in ['```json', '```']:
-            if txt.startswith(tag):
-                txt = txt[len(tag):]
-        if txt.endswith('```'):
-            txt = txt[:-3]
-        return json.loads(txt.strip())
-
     last_reason = "তথ্য অপর্যাপ্ত।"
-    gemini_tries = max(1, len(GEMINI_KEYS))
-    for p in (prompt, fallback_prompt):
-        for attempt in range(gemini_tries):
-            try:
-                obj = await asyncio.wait_for(asyncio.to_thread(_call, p), timeout=25)
-                if isinstance(obj, dict) and obj.get("error"):
-                    last_reason = str(obj.get("error"))[:300]
-                    break
-                items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
-                clean = [it for it in items if it.get("question") and it.get("answer")]
-                if len(clean) >= 2:
-                    return {"ok": True, "items": clean}
-                if len(clean) >= 1:
-                    last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
-                break
-            except json.JSONDecodeError:
-                last_reason = "AI সঠিক ফরম্যাটে উত্তর দেয়নি।"
-                break
-            except Exception as e:
-                print(f"creative gen error: {e}")
-                last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
-                if attempt < gemini_tries - 1:
-                    _rotate_exam_key()
-                    continue
-                break
 
-    # Gemini exhausted/failed both prompts — try Groq/OpenRouter fallback
-    print("[creative-pdf] Gemini failed, trying Groq/OpenRouter fallback...")
+    def _parse_items(obj):
+        items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
+        return [it for it in items if it.get("question") and it.get("answer")]
+
+    # 1) Groq (all keys)
     for p in (prompt, fallback_prompt):
         try:
-            obj = await _call_creative_fallback(p, img_bytes)
+            obj = await _call_creative_chain(p, img_bytes, [
+                ("https://api.groq.com/openai/v1", GROQ_KEYS, GROQ_MODEL, {}),
+            ])
             if obj is None:
                 continue
             if isinstance(obj, dict) and obj.get("error"):
                 last_reason = str(obj.get("error"))[:300]
                 continue
-            items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
-            clean = [it for it in items if it.get("question") and it.get("answer")]
+            clean = _parse_items(obj)
             if len(clean) >= 2:
-                print(f"[creative-pdf] fallback succeeded with {len(clean)} items")
+                print(f"[creative-pdf] Groq succeeded with {len(clean)} items")
                 return {"ok": True, "items": clean}
             if len(clean) >= 1:
                 last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
         except Exception as e:
-            print(f"[creative-pdf] fallback error: {e}")
+            print(f"[creative-pdf] Groq error: {e}")
+            continue
+
+    # 2) Gemini (all keys, round-robin)
+    print("[creative-pdf] Groq failed, trying Gemini...")
+    if _exam_genai_client is None:
+        setup_gemini()
+    if _exam_genai_client is not None:
+        def _call(p: str):
+            img = Image.open(BytesIO(img_bytes))
+            resp = _exam_genai_client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=[p, img],
+                config=types.GenerateContentConfig(
+                    temperature=0.6, top_p=0.95, top_k=40,
+                    max_output_tokens=8192,
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                )
+            )
+            txt = (resp.text or "").strip()
+            for tag in ['```json', '```']:
+                if txt.startswith(tag):
+                    txt = txt[len(tag):]
+            if txt.endswith('```'):
+                txt = txt[:-3]
+            return json.loads(txt.strip())
+
+        gemini_tries = max(1, len(GEMINI_KEYS))
+        for p in (prompt, fallback_prompt):
+            for attempt in range(gemini_tries):
+                try:
+                    obj = await asyncio.wait_for(asyncio.to_thread(_call, p), timeout=25)
+                    if isinstance(obj, dict) and obj.get("error"):
+                        last_reason = str(obj.get("error"))[:300]
+                        break
+                    clean = _parse_items(obj)
+                    if len(clean) >= 2:
+                        print(f"[creative-pdf] Gemini succeeded with {len(clean)} items")
+                        return {"ok": True, "items": clean}
+                    if len(clean) >= 1:
+                        last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
+                    break
+                except json.JSONDecodeError:
+                    last_reason = "AI সঠিক ফরম্যাটে উত্তর দেয়নি।"
+                    break
+                except Exception as e:
+                    print(f"[creative-pdf] Gemini error: {e}")
+                    last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
+                    if attempt < gemini_tries - 1:
+                        _rotate_exam_key()
+                        continue
+                    break
+
+    # 3) OpenRouter (all keys) — final fallback
+    print("[creative-pdf] Gemini failed, trying OpenRouter...")
+    for p in (prompt, fallback_prompt):
+        try:
+            obj = await _call_creative_chain(p, img_bytes, [
+                ("https://openrouter.ai/api/v1", OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
+                 {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}),
+            ])
+            if obj is None:
+                continue
+            if isinstance(obj, dict) and obj.get("error"):
+                last_reason = str(obj.get("error"))[:300]
+                continue
+            clean = _parse_items(obj)
+            if len(clean) >= 2:
+                print(f"[creative-pdf] OpenRouter succeeded with {len(clean)} items")
+                return {"ok": True, "items": clean}
+            if len(clean) >= 1:
+                last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
+        except Exception as e:
+            print(f"[creative-pdf] OpenRouter error: {e}")
             continue
 
     return {"ok": False, "reason": last_reason}
