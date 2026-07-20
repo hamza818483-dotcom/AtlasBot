@@ -114,12 +114,13 @@ async def _rename_item(item_id: int, new_name: str):
 
 
 BACK_LABEL = "🔙 Back"
+MAIN_MENU_LABEL = "🏠 Main Menu"
 
 
 async def _build_reply_keyboard(parent_id: int = 0, expect_name: str = None) -> ReplyKeyboardMarkup:
     """Bottom keyboard (box-icon area) — items at the current level, like Exampedia's
     persistent menu. Nested items appear when the user taps into a parent item (drill-down),
-    with a Back button to go up a level."""
+    with Back + Main Menu buttons (same row) to navigate up."""
     children = await _get_children_fresh(parent_id, expect_name) if expect_name else await _get_children(parent_id)
     names = [ch["name"] for ch in children]
     if not names:
@@ -127,7 +128,7 @@ async def _build_reply_keyboard(parent_id: int = 0, expect_name: str = None) -> 
     else:
         rows = [[KeyboardButton(n) for n in names[i:i + 3]] for i in range(0, len(names), 3)]
     if parent_id:
-        rows.append([KeyboardButton(BACK_LABEL)])
+        rows.append([KeyboardButton(BACK_LABEL), KeyboardButton(MAIN_MENU_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -179,6 +180,12 @@ async def handle_menu_reply_keyboard(update: Update, context: ContextTypes.DEFAU
         MENU_NAV_STATE[uid] = new_parent
         kb = await _build_reply_keyboard(new_parent)
         await msg.reply_text("📋 Menu", reply_markup=kb)
+        return True
+
+    if text == MAIN_MENU_LABEL:
+        MENU_NAV_STATE[uid] = 0
+        kb = await _build_reply_keyboard(0)
+        await msg.reply_text("📋 Main Menu", reply_markup=kb)
         return True
 
     match = await _get_item_by_name(current_parent, text)
