@@ -777,7 +777,7 @@ async def api_solve_pdf(request: Request):
         exam_store[cache_id]["last_answers"] = answers
     html = generate_solve_pdf_html(data, answers)
     try:
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, data.get("mcqs"))
     except Exception as e:
         print(f"PDF render error: {e}")
         traceback.print_exc()
@@ -809,7 +809,7 @@ async def _precache_solve_pdf(cache_id: str):
             return
         answers = data.get("last_answers", {}) or {}
         html = generate_solve_pdf_html(data, answers)
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, data.get("mcqs"))
         if cache_id in exam_store:
             exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
             print(f"[solve-pdf] pre-cached for {cache_id[:8]} ({len(pdf_bytes)} bytes)")
@@ -858,7 +858,7 @@ async def api_solve_pdf_direct(cache_id: str):
     answers = data.get("last_answers", {}) or {}
     html = generate_solve_pdf_html(data, answers)
     try:
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, data.get("mcqs"))
     except Exception as e:
         print(f"Solve PDF direct render error: {e}")
         traceback.print_exc()
@@ -979,10 +979,11 @@ async def api_bookmark_pdf(request: Request):
     header_label = body.get("header_label", "ATLAS Bookmark Practice Sheet")
     html = generate_premium_pdf_html(mcqs, header_label)
     try:
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, mcqs)
     except Exception as e:
         print(f"Bookmark PDF render error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/bookmark-pdf failed: {e}")
         return JSONResponse({"ok": False, "message": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
     return Response(
         content=pdf_bytes,
@@ -1173,6 +1174,7 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
         except Exception as e:
             print(f"[creative-pdf] PDF render error: {e}")
             traceback.print_exc()
+            await notify_owner(f"/api/creative-pdf ({ctype}) failed for cache_id={cache_id}: {e}")
             return JSONResponse({"ok": False, "reason": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
         fname = ("ATLAS_Gyanmulok_" if ctype == "knowledge" else "ATLAS_Onudhabonmulok_") + cache_id[:8] + ".pdf"
         print(f"[creative-pdf] success, pdf size={len(pdf_bytes)}")
