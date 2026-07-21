@@ -4124,7 +4124,7 @@ async def handle_poll_solve(query, quiz_id: str, user) -> None:
         try:
             q_text = format_poll_question(mcq, i + 1)
             exp_text = format_explanation(mcq)
-            options = mcq['options'][:4]
+            options = [str(o)[:100] for o in mcq['options'][:4]]
             correct_id = mcq.get('answer', 0)
             try:
                 correct_id = int(correct_id)
@@ -6024,7 +6024,7 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 exp_text = mcq.get('explanation', '')
                 if len(exp_text) > 200:
                     exp_text = exp_text[:197] + "..."
-                options = mcq['options'][:4]
+                options = [str(o)[:100] for o in mcq['options'][:4]]
                 correct_id = mcq.get('answer', 0)
                 try:
                     correct_id = int(correct_id)
