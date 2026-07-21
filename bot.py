@@ -89,7 +89,7 @@ CF_AI_TOKEN = os.getenv("CF_AI_TOKEN", "").strip()
 CF_WORKERS_AI_MODEL = os.getenv("CF_WORKERS_AI_MODEL", "@cf/meta/llama-3.2-11b-vision-instruct")
 CF_WORKERS_AI_BASE = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1" if CF_ACCOUNT_ID else ""
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-vl-32b-instruct")
 # v4.2: Groq is now PRIMARY. Multiple vision-capable Groq models rotated
 # alongside keys — comma-separated env override supported, sane defaults otherwise.
 GROQ_MODELS = [m.strip() for m in os.getenv(
@@ -100,7 +100,7 @@ if GROQ_MODEL not in GROQ_MODELS:
     GROQ_MODELS.insert(0, GROQ_MODEL)
 
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
-OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
+OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "google/gemma-4-31b-it:free")
 NEMOTRON_MODEL = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
 GEMMA_MODEL = os.getenv("GEMMA_MODEL", "google/gemma-3-27b-it:free")
 
@@ -355,7 +355,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
                     contents.append(Image.open(BytesIO(image_bytes)))
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
-                    model="gemini-3.5-flash",
+                    model="gemini-2.5-flash",
                     contents=contents,
                     config=types.GenerateContentConfig(
                         temperature=0.7, top_p=0.95, top_k=40,

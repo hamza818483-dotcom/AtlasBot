@@ -126,7 +126,7 @@ async def _build_reply_keyboard(parent_id: int = 0, expect_name: str = None) -> 
     if not names:
         rows = [[KeyboardButton("📋 Menu খালি — /menu <নাম> দিয়ে যোগ করো")]]
     else:
-        rows = [[KeyboardButton(n) for n in names[i:i + 3]] for i in range(0, len(names), 3)]
+        rows = [[KeyboardButton(n) for n in names[i:i + 2]] for i in range(0, len(names), 2)]
     if parent_id:
         rows.append([KeyboardButton(BACK_LABEL), KeyboardButton(MAIN_MENU_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)

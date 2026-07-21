@@ -38,6 +38,7 @@ from PIL import Image
 # SECTION 2: CONFIGURATION
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 GENAI_API_KEY = os.getenv("GEMINI_KEY", "")
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev").rstrip("/")
 HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-pvp7.onrender.com")).rstrip("/")
@@ -45,9 +46,9 @@ BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("BASE_URL", "https://atlasbot-
 
 # Fallback providers for Creative (জ্ঞানমূলক/অনুধাবনমূলক) generation when Gemini is exhausted
 GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-vl-32b-instruct")
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEY", "").split(",") if k.strip()]
-OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "qwen/qwen2.5-vl-72b-instruct:free")
+OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "google/gemma-4-31b-it:free")
 
 SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
@@ -179,7 +180,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
     for attempt in range(tries):
         try:
             resp = _exam_genai_client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-2.5-flash",
                 contents=[PROMPT_NEW_EXAM, img],
                 config=types.GenerateContentConfig(
                     temperature=0.7, top_p=0.95, top_k=40,
@@ -194,7 +195,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
                 return best
             # too few -> retry once on same key with stronger instruction
             resp2 = _exam_genai_client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-2.5-flash",
                 contents=[PROMPT_NEW_EXAM + "\n\n🔴 অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।", img],
                 config=types.GenerateContentConfig(
                     temperature=0.8, top_p=0.95, top_k=40, max_output_tokens=8192,
@@ -776,10 +777,11 @@ async def api_solve_pdf(request: Request):
         exam_store[cache_id]["last_answers"] = answers
     html = generate_solve_pdf_html(data, answers)
     try:
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, data.get("mcqs"))
     except Exception as e:
         print(f"PDF render error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/solve-pdf failed for cache_id={cache_id}: {e}")
         return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     b64 = base64.b64encode(pdf_bytes).decode("ascii")
     return {"ok": True, "pdf_b64": b64, "filename": f"ATLAS_Solve_{cache_id[:8]}.pdf"}
@@ -807,12 +809,13 @@ async def _precache_solve_pdf(cache_id: str):
             return
         answers = data.get("last_answers", {}) or {}
         html = generate_solve_pdf_html(data, answers)
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, data.get("mcqs"))
         if cache_id in exam_store:
             exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
             print(f"[solve-pdf] pre-cached for {cache_id[:8]} ({len(pdf_bytes)} bytes)")
     except Exception as e:
         print(f"[solve-pdf] pre-cache error: {e}")
+        await notify_owner(f"/api/save-answers precache failed for cache_id={cache_id}: {e}")
 
 @app.get("/api/solve-pdf-html/{cache_id}")
 async def api_solve_pdf_html(cache_id: str):
@@ -834,6 +837,7 @@ async def api_solve_pdf_html(cache_id: str):
     except Exception as e:
         print(f"solve-pdf-html error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/solve-pdf-html failed for cache_id={cache_id}: {e}")
         return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে। আবার চেষ্টা করুন।"}, status_code=500)
 
 @app.get("/api/solve-pdf-direct/{cache_id}")
@@ -854,10 +858,11 @@ async def api_solve_pdf_direct(cache_id: str):
     answers = data.get("last_answers", {}) or {}
     html = generate_solve_pdf_html(data, answers)
     try:
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, data.get("mcqs"))
     except Exception as e:
         print(f"Solve PDF direct render error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/solve-pdf-direct failed for cache_id={cache_id}: {e}")
         return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     if cache_id in exam_store:
         exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
@@ -974,10 +979,11 @@ async def api_bookmark_pdf(request: Request):
     header_label = body.get("header_label", "ATLAS Bookmark Practice Sheet")
     html = generate_premium_pdf_html(mcqs, header_label)
     try:
-        pdf_bytes = await _render_pdf(html)
+        pdf_bytes = await _render_pdf(html, mcqs)
     except Exception as e:
         print(f"Bookmark PDF render error: {e}")
         traceback.print_exc()
+        await notify_owner(f"/api/bookmark-pdf failed: {e}")
         return JSONResponse({"ok": False, "message": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
     return Response(
         content=pdf_bytes,
@@ -998,16 +1004,12 @@ def _b64_data_url(image_bytes: bytes) -> str:
         mime = "image/webp"
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
-async def _call_creative_fallback(prompt: str, img_bytes: bytes) -> Optional[dict]:
-    """Groq/OpenRouter fallback when Gemini is exhausted. Returns parsed JSON dict or None."""
+async def _call_creative_chain(prompt: str, img_bytes: bytes, chains: list) -> Optional[dict]:
+    """Try each (base_url, keys, model, extra_headers) chain, all keys per chain.
+    Returns parsed JSON dict or None."""
     content = [
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": _b64_data_url(img_bytes)}},
-    ]
-    chains = [
-        ("https://api.groq.com/openai/v1", GROQ_KEYS, GROQ_MODEL, {}),
-        ("https://openrouter.ai/api/v1", OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
-         {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}),
     ]
     for base_url, keys, model, extra_headers in chains:
         for k in keys:
@@ -1037,73 +1039,107 @@ async def _call_creative_fallback(prompt: str, img_bytes: bytes) -> Optional[dic
 
 async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
     """Returns {'ok':True,'items':[...]} or {'ok':False,'reason':str}.
-    Tries primary (strict source-only) prompt first, then a lenient
-    fallback prompt so a PDF can (almost) always be produced."""
-    if _exam_genai_client is None:
-        setup_gemini()
-    if _exam_genai_client is None:
-        return {"ok": False, "reason": "Gemini API key সেট নেই।"}
+    Order: Groq (all keys) -> Gemini (all keys) -> OpenRouter (all keys)."""
     prompt = PROMPT_KNOWLEDGE if ctype == "knowledge" else PROMPT_COMPREHENSION
     fallback_prompt = PROMPT_KNOWLEDGE_FALLBACK if ctype == "knowledge" else PROMPT_COMPREHENSION_FALLBACK
-
-    def _call(p: str):
-        img = Image.open(BytesIO(img_bytes))
-        resp = _exam_genai_client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=[p, img],
-            config=types.GenerateContentConfig(
-                temperature=0.6, top_p=0.95, top_k=40,
-                max_output_tokens=8192,
-                thinking_config=types.ThinkingConfig(thinking_budget=1024),
-            )
-        )
-        txt = (resp.text or "").strip()
-        for tag in ['```json', '```']:
-            if txt.startswith(tag):
-                txt = txt[len(tag):]
-        if txt.endswith('```'):
-            txt = txt[:-3]
-        return json.loads(txt.strip())
-
     last_reason = "তথ্য অপর্যাপ্ত।"
-    for p in (prompt, fallback_prompt):
-        try:
-            obj = await asyncio.wait_for(asyncio.to_thread(_call, p), timeout=25)
-            if isinstance(obj, dict) and obj.get("error"):
-                last_reason = str(obj.get("error"))[:300]
-                continue
-            items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
-            clean = [it for it in items if it.get("question") and it.get("answer")]
-            if len(clean) >= 2:
-                return {"ok": True, "items": clean}
-            if len(clean) >= 1:
-                last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
-        except json.JSONDecodeError:
-            last_reason = "AI সঠিক ফরম্যাটে উত্তর দেয়নি।"
-        except Exception as e:
-            print(f"creative gen error: {e}")
-            traceback.print_exc()
-            last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
 
-    # Gemini exhausted/failed both prompts — try Groq/OpenRouter fallback
-    print("[creative-pdf] Gemini failed, trying Groq/OpenRouter fallback...")
+    def _parse_items(obj):
+        items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
+        return [it for it in items if it.get("question") and it.get("answer")]
+
+    # 1) Groq (all keys)
     for p in (prompt, fallback_prompt):
         try:
-            obj = await _call_creative_fallback(p, img_bytes)
+            obj = await _call_creative_chain(p, img_bytes, [
+                ("https://api.groq.com/openai/v1", GROQ_KEYS, GROQ_MODEL, {}),
+            ])
             if obj is None:
                 continue
             if isinstance(obj, dict) and obj.get("error"):
                 last_reason = str(obj.get("error"))[:300]
                 continue
-            items = obj.get("items", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
-            clean = [it for it in items if it.get("question") and it.get("answer")]
+            clean = _parse_items(obj)
             if len(clean) >= 2:
-                print(f"[creative-pdf] fallback succeeded with {len(clean)} items")
+                print(f"[creative-pdf] Groq succeeded with {len(clean)} items")
                 return {"ok": True, "items": clean}
             if len(clean) >= 1:
                 last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
         except Exception as e:
-            print(f"[creative-pdf] fallback error: {e}")
+            print(f"[creative-pdf] Groq error: {e}")
+            continue
+
+    # 2) Gemini (all keys, round-robin)
+    print("[creative-pdf] Groq failed, trying Gemini...")
+    if _exam_genai_client is None:
+        setup_gemini()
+    if _exam_genai_client is not None:
+        def _call(p: str):
+            img = Image.open(BytesIO(img_bytes))
+            resp = _exam_genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[p, img],
+                config=types.GenerateContentConfig(
+                    temperature=0.6, top_p=0.95, top_k=40,
+                    max_output_tokens=8192,
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                )
+            )
+            txt = (resp.text or "").strip()
+            for tag in ['```json', '```']:
+                if txt.startswith(tag):
+                    txt = txt[len(tag):]
+            if txt.endswith('```'):
+                txt = txt[:-3]
+            return json.loads(txt.strip())
+
+        gemini_tries = max(1, len(GEMINI_KEYS))
+        for p in (prompt, fallback_prompt):
+            for attempt in range(gemini_tries):
+                try:
+                    obj = await asyncio.wait_for(asyncio.to_thread(_call, p), timeout=25)
+                    if isinstance(obj, dict) and obj.get("error"):
+                        last_reason = str(obj.get("error"))[:300]
+                        break
+                    clean = _parse_items(obj)
+                    if len(clean) >= 2:
+                        print(f"[creative-pdf] Gemini succeeded with {len(clean)} items")
+                        return {"ok": True, "items": clean}
+                    if len(clean) >= 1:
+                        last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
+                    break
+                except json.JSONDecodeError:
+                    last_reason = "AI সঠিক ফরম্যাটে উত্তর দেয়নি।"
+                    break
+                except Exception as e:
+                    print(f"[creative-pdf] Gemini error: {e}")
+                    last_reason = f"প্রশ্ন তৈরিতে সমস্যা: {str(e)[:80]}"
+                    if attempt < gemini_tries - 1:
+                        _rotate_exam_key()
+                        continue
+                    break
+
+    # 3) OpenRouter (all keys) — final fallback
+    print("[creative-pdf] Gemini failed, trying OpenRouter...")
+    for p in (prompt, fallback_prompt):
+        try:
+            obj = await _call_creative_chain(p, img_bytes, [
+                ("https://openrouter.ai/api/v1", OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
+                 {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}),
+            ])
+            if obj is None:
+                continue
+            if isinstance(obj, dict) and obj.get("error"):
+                last_reason = str(obj.get("error"))[:300]
+                continue
+            clean = _parse_items(obj)
+            if len(clean) >= 2:
+                print(f"[creative-pdf] OpenRouter succeeded with {len(clean)} items")
+                return {"ok": True, "items": clean}
+            if len(clean) >= 1:
+                last_reason = "শুধুমাত্র সীমিত প্রশ্ন পাওয়া গেছে।"
+        except Exception as e:
+            print(f"[creative-pdf] OpenRouter error: {e}")
             continue
 
     return {"ok": False, "reason": last_reason}
@@ -1138,6 +1174,7 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
         except Exception as e:
             print(f"[creative-pdf] PDF render error: {e}")
             traceback.print_exc()
+            await notify_owner(f"/api/creative-pdf ({ctype}) failed for cache_id={cache_id}: {e}")
             return JSONResponse({"ok": False, "reason": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
         fname = ("ATLAS_Gyanmulok_" if ctype == "knowledge" else "ATLAS_Onudhabonmulok_") + cache_id[:8] + ".pdf"
         print(f"[creative-pdf] success, pdf size={len(pdf_bytes)}")
@@ -1155,6 +1192,20 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
 # SECTION 11.5: PDF RENDERER (Playwright / Chromium)
 # ============================================================
 _PDF_RENDER_SEMAPHORE = asyncio.Semaphore(1)  # v4.5: ~200MB/PDF render + bot/DB baseline on 512MB Render — only 1 render at a time is safe; others queue and run right after
+
+async def notify_owner(text: str):
+    """Best-effort Telegram alert to admin. Never raises."""
+    if not BOT_TOKEN or not OWNER_ID:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": OWNER_ID, "text": f"🚨 ATLAS PDF ERROR\n\n{text[:3500]}"}
+            )
+    except Exception:
+        pass
+
 
 async def _render_pdf(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
     async with _PDF_RENDER_SEMAPHORE:
