@@ -339,6 +339,19 @@ STRICT_SOURCE_RULES = """
 4. একটি প্রশ্নের একটিই সঠিক উত্তর — একাধিক সঠিক যেন না হয়।
 5. Output: ONLY valid JSON, no extra text."""
 
+# Plain-text variant (no "Output: ONLY valid JSON" instruction) — used for
+# explanation-style calls (/atlas, handle_explain_from_pending) which must
+# reply in natural readable text, not JSON. Reusing the JSON-only rule there
+# was causing the model to sometimes emit raw/partial JSON instead of a
+# clean human-readable explanation.
+STRICT_SOURCE_RULES_PLAIN = """
+
+🔒 STRICT MANDATORY RULES (MUST FOLLOW 100%):
+1. প্রতিটি তথ্য শুধুমাত্র Input Source (Image/Text) থেকে আসবে। নিজের জ্ঞান/আন্দাজ থেকে ভুল কিছু বানানো সম্পূর্ণ নিষেধ।
+2. Source-এর প্রতিটি গুরুত্বপূর্ণ তথ্য কভার করো — Quality সবসময় Quantity-এর চেয়ে বেশি গুরুত্বপূর্ণ।
+3. হাবিজাবি/দুর্বল/অপ্রাসঙ্গিক তথ্য একদম নিষেধ।
+4. Output অবশ্যই সাধারণ পাঠযোগ্য টেক্সট (plain readable text) হবে — কোনো JSON/code/markdown format নয়।"""
+
 async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
     global _bot_genai_client
     if not GEMINI_KEYS:
@@ -584,12 +597,18 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
             break
     return None, False
 
-async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None) -> Tuple[Optional[str], str]:
+async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, expect_json: bool = True) -> Tuple[Optional[str], str]:
     """v4.3: Full fallback chain. Returns (text, provider_name) or (None, '').
     Order: Groq (PRIMARY) -> Gemini -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
     -> Cloudflare Workers AI -> NVIDIA Vision.
-    Every provider/key with all-key rotation; missing keys silently skipped."""
-    full_prompt = prompt_text + STRICT_SOURCE_RULES
+    Every provider/key with all-key rotation; missing keys silently skipped.
+    expect_json=True (default, for MCQ generation) appends the JSON-only output
+    rule. expect_json=False (for plain-text explanations like /atlas and
+    handle_explain_from_pending) uses a version WITHOUT the JSON instruction,
+    so the model replies in natural readable Bengali/English text instead of
+    JSON that would otherwise leak straight to the user unconverted."""
+    rules = STRICT_SOURCE_RULES if expect_json else STRICT_SOURCE_RULES_PLAIN
+    full_prompt = prompt_text + rules
     # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
     txt = await _call_groq(full_prompt, image_bytes)
     if txt:
@@ -2707,13 +2726,13 @@ async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"প্রশ্ন: {question}\n{opts_str}{hint}{facts_block}"
     )
 
-    response_text, _ = await ai_generate(prompt, None)
+    response_text, _ = await ai_generate(prompt, None, expect_json=False)
     prog_task.cancel()
     if not response_text:
         await wait_msg.edit_text("❌ AI ব্যস্ত, পরে চেষ্টা করুন।")
         return
 
-    explanation = response_text.strip()
+    explanation = _json_to_readable_text(response_text.strip())
     if len(explanation) > 4000:
         explanation = explanation[:4000] + "..."
 
@@ -3911,6 +3930,58 @@ def _chunk_text_for_telegram(text: str, limit: int = 3900) -> List[str]:
         chunks.append(remaining)
     return chunks
 
+def _json_to_readable_text(raw: str) -> str:
+    """Safety-net: if the AI ignores the plain-text instruction and replies
+    with JSON (a dict/list of key-value pairs) instead of natural text, this
+    detects it and converts it into clean, unicode-readable plain text —
+    e.g. {"question": "...", "answer": "..."} becomes readable labeled
+    lines, instead of the raw JSON (with \\uXXXX escapes, braces, quotes)
+    leaking straight to the user. If the text is already plain (not JSON),
+    it's returned unchanged."""
+    t = raw.strip()
+    if t.startswith("```"):
+        t = re.sub(r'^```(?:json)?\s*', '', t)
+        t = re.sub(r'\s*```$', '', t)
+        t = t.strip()
+    if not (t.startswith('{') or t.startswith('[')):
+        return raw  # already plain text, nothing to convert
+
+    def _render(obj, indent=0) -> List[str]:
+        lines = []
+        pad = "  " * indent
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                label = str(k).strip().replace('_', ' ').capitalize()
+                if isinstance(v, (dict, list)):
+                    lines.append(f"{pad}{label}:")
+                    lines.extend(_render(v, indent + 1))
+                else:
+                    lines.append(f"{pad}{label}: {v}")
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj, 1):
+                if isinstance(item, (dict, list)):
+                    lines.append(f"{pad}{i}.")
+                    lines.extend(_render(item, indent + 1))
+                else:
+                    lines.append(f"{pad}{i}. {item}")
+        else:
+            lines.append(f"{pad}{obj}")
+        return lines
+
+    try:
+        data = json.loads(t)
+    except json.JSONDecodeError:
+        try:
+            data = json.loads(_fix_json_str(t))
+        except Exception:
+            return raw  # couldn't parse — fall back to raw text as-is
+    try:
+        rendered = "\n".join(_render(data))
+        return rendered if rendered.strip() else raw
+    except Exception:
+        return raw
+
+
 async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """User pressed 📖 ব্যাখ্যা চাই on a freshly sent image: sends the image
     directly to AI with a detailed step-by-step explanation prompt (topic
@@ -3926,7 +3997,7 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
         await wait_msg.edit_text(t)
     prog_task = asyncio.create_task(live_progress_task(_edit_wait, "Explanation", total_eta=15))
     try:
-        response_text, provider = await ai_generate(EXPLAIN_IMAGE_PROMPT, image_bytes)
+        response_text, provider = await ai_generate(EXPLAIN_IMAGE_PROMPT, image_bytes, expect_json=False)
     except Exception as e:
         prog_task.cancel()
         log_error(f"handle_explain_from_pending error: {e}")
@@ -3940,7 +4011,7 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
         await wait_msg.delete()
     except Exception:
         pass
-    clean_text = response_text.strip()
+    clean_text = _json_to_readable_text(response_text.strip())
     for sym in ('**', '__', '```', '`'):
         clean_text = clean_text.replace(sym, '')
     clean_text = re.sub(r'(?m)^#{1,6}\s*', '', clean_text)  # strip markdown headings
