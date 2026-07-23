@@ -42,7 +42,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 from telegram.constants import ParseMode
-from telegram.error import TelegramError, RetryAfter, Forbidden
+from telegram.error import TelegramError, RetryAfter, Forbidden, BadRequest
 from telegram.helpers import escape_markdown
 
 # Supabase
@@ -3463,6 +3463,8 @@ async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # SECTION 14: MESSAGE HANDLERS
 # ============================================================
 
+TELEGRAM_MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB — Bot API getFile hard limit
+
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     user_id = user['user_id']
@@ -3472,10 +3474,41 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             if update.message.photo:
                 photo = update.message.photo[-1]
-                file = await context.bot.get_file(photo.file_id)
+                if photo.file_size and photo.file_size > TELEGRAM_MAX_FILE_SIZE:
+                    await update.message.reply_text(
+                        "❌ Image সাইজ 20MB-এর বেশি — Telegram এর নিজস্ব লিমিটের কারণে "
+                        "বট এই ফাইল ডাউনলোড করতে পারবে না। ছবিটা compress/resize করে আবার পাঠান।"
+                    )
+                    return
+                try:
+                    file = await context.bot.get_file(photo.file_id)
+                except BadRequest as bre:
+                    if "too big" in str(bre).lower():
+                        await update.message.reply_text(
+                            "❌ Image সাইজ 20MB-এর বেশি — Telegram API লিমিটের কারণে "
+                            "ডাউনলোড সম্ভব না। ছোট সাইজে আবার পাঠান।"
+                        )
+                        return
+                    raise
                 image_bytes = bytes(await file.download_as_bytearray())
             elif update.message.document and (update.message.document.mime_type or "").startswith("image"):
-                file = await context.bot.get_file(update.message.document.file_id)
+                doc = update.message.document
+                if doc.file_size and doc.file_size > TELEGRAM_MAX_FILE_SIZE:
+                    await update.message.reply_text(
+                        "❌ Image সাইজ 20MB-এর বেশি — Telegram এর নিজস্ব লিমিটের কারণে "
+                        "বট এই ফাইল ডাউনলোড করতে পারবে না। ছবিটা compress/resize করে আবার পাঠান।"
+                    )
+                    return
+                try:
+                    file = await context.bot.get_file(doc.file_id)
+                except BadRequest as bre:
+                    if "too big" in str(bre).lower():
+                        await update.message.reply_text(
+                            "❌ Image সাইজ 20MB-এর বেশি — Telegram API লিমিটের কারণে "
+                            "ডাউনলোড সম্ভব না। ছোট সাইজে আবার পাঠান।"
+                        )
+                        return
+                    raise
                 image_bytes = bytes(await file.download_as_bytearray())
             else:
                 await update.message.reply_text("❌ দয়া করে একটি Image পাঠান (PDF collection mode চালু আছে)।")
@@ -3501,12 +3534,42 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         instant_msg = await update.message.reply_text("⚡ Image পেয়েছি! প্রসেস হচ্ছে...")
         if update.message.photo:
             photo = update.message.photo[-1]
-            file = await context.bot.get_file(photo.file_id)
+            if photo.file_size and photo.file_size > TELEGRAM_MAX_FILE_SIZE:
+                await instant_msg.edit_text(
+                    "❌ Image সাইজ 20MB-এর বেশি — Telegram এর নিজস্ব লিমিটের কারণে "
+                    "বট এই ফাইল ডাউনলোড করতে পারবে না। ছবিটা compress/resize করে আবার পাঠান।"
+                )
+                return
+            try:
+                file = await context.bot.get_file(photo.file_id)
+            except BadRequest as bre:
+                if "too big" in str(bre).lower():
+                    await instant_msg.edit_text(
+                        "❌ Image সাইজ 20MB-এর বেশি — Telegram API লিমিটের কারণে "
+                        "ডাউনলোড সম্ভব না। ছোট সাইজে আবার পাঠান।"
+                    )
+                    return
+                raise
             image_bytes = bytes(await file.download_as_bytearray())
             file_id = photo.file_id
         elif update.message.document:
             document = update.message.document
-            file = await context.bot.get_file(document.file_id)
+            if document.file_size and document.file_size > TELEGRAM_MAX_FILE_SIZE:
+                await instant_msg.edit_text(
+                    "❌ File সাইজ 20MB-এর বেশি — Telegram এর নিজস্ব লিমিটের কারণে "
+                    "বট এই ফাইল ডাউনলোড করতে পারবে না। ছোট সাইজে আবার পাঠান।"
+                )
+                return
+            try:
+                file = await context.bot.get_file(document.file_id)
+            except BadRequest as bre:
+                if "too big" in str(bre).lower():
+                    await instant_msg.edit_text(
+                        "❌ File সাইজ 20MB-এর বেশি — Telegram API লিমিটের কারণে "
+                        "ডাউনলোড সম্ভব না। ছোট সাইজে আবার পাঠান।"
+                    )
+                    return
+                raise
             image_bytes = bytes(await file.download_as_bytearray())
             file_id = document.file_id
         else:
