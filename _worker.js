@@ -13,7 +13,7 @@ export default {
       if (!token) return new Response('Unauthorized', { status: 401 });
       const body = await request.text();
       try {
-        await fetch('https://atlasbot-pvp7.onrender.com/webhook', {
+        await fetch('https://atlasbot-q4f4.onrender.com/webhook', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Bot-Token': token },
           body,

@@ -230,7 +230,7 @@ function jsonResp(obj, status = 200) {
 
 // ── Forward Render-only API calls to the live bot, with primary->backup failover ──
 async function forwardToRender(request, url, env) {
-  const RENDER_PRIMARY = "https://atlasbot-pvp7.onrender.com";
+  const RENDER_PRIMARY = "https://atlasbot-q4f4.onrender.com";
   const RENDER_BACKUP  = "https://atlasbot-3tgq.onrender.com";
   const targets = [RENDER_PRIMARY, RENDER_BACKUP];
 
@@ -376,7 +376,7 @@ async function fetchExamData(cacheId, env) {
   // Layer 4: Render live bot (in-memory exam_store fallback — last resort)
   try {
     const RENDER_URLS = [
-      "https://atlasbot-pvp7.onrender.com",
+      "https://atlasbot-q4f4.onrender.com",
       "https://atlasbot-3tgq.onrender.com",
     ];
     for (const base of RENDER_URLS) {
