@@ -6595,6 +6595,18 @@ async def main() -> None:
         # না) — ফলব্যাক রুট setup_webhook_route()-এ /webhook/{token} হিসেবে
         # যোগ করা আছে, ঠিক CF Worker যেভাবে কল করত একই path pattern মেনে,
         # যাতে আলাদা কোনো নতুন handler না লাগে।
+        #
+        # 🩹 INCIDENT (2026-07-26): Telegram-এর webhook URL কোনোভাবে
+        # token ছাড়া (".../webhook") হয়ে গিয়েছিল, কিন্তু route চায়
+        # ".../webhook/{token}" — ফলে Telegram প্রতিটা update পাঠালে bot
+        # 401 Unauthorized দিচ্ছিল আর user কোনো response পাচ্ছিল না
+        # (bot নিজে চলছিল, কিন্তু Telegram-ই ভুল জায়গায় পাঠাচ্ছিল)।
+        # Manual fix: getWebhookInfo দিয়ে verify করে সরাসরি setWebhook
+        # কল করে সঠিক token-সহ URL বসানো হয়েছিল।
+        # Permanent fix: .github/workflows/watchdog-q4f4.yml এ প্রতি
+        # ১০ মিনিটে webhook URL exact-match চেক + mismatch হলে
+        # auto re-set + owner-কে Telegram alert — দেখো ওই ফাইলের
+        # "Webhook self-heal" ধাপ।
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
     else:
         webhook_url = f"{CF_WORKER_URL}/webhook/{BOT_TOKEN}"
