@@ -3602,8 +3602,9 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data="qaimg_c"),
         ])
         keyboard.append([InlineKeyboardButton("📖 ব্যাখ্যা চাই", callback_data="explimg")])
-        await update.message.reply_text(
-            text=f"""🌟 স্বাগতম {user['first_name']}..!
+        await update.message.reply_photo(
+            photo=image_bytes,
+            caption=f"""🌟 স্বাগতম {user['first_name']}..!
 
 📸 আপনার Image থেকে MCQ বানাতে MCQ টাইপ সিলেক্ট করুন:
 
