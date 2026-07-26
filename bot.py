@@ -1737,7 +1737,13 @@ def delete_bookmark(user_id: int, cache_id: str, question_index: int) -> bool:
         log_error(f"delete_bookmark error: {e}")
         return False
 
+_PROMPTS_CACHE = {"data": None, "ts": 0.0}
+_PROMPTS_CACHE_TTL = 300  # seconds
+
 def get_prompts_from_db() -> Dict:
+    now = time.time()
+    if _PROMPTS_CACHE["data"] is not None and (now - _PROMPTS_CACHE["ts"]) < _PROMPTS_CACHE_TTL:
+        return _PROMPTS_CACHE["data"]
     try:
         client = get_supabase()
         result = client.table('prompts').select('*').execute()
@@ -1750,11 +1756,14 @@ def get_prompts_from_db() -> Dict:
                 name = row.get('prompt_name') or PROMPT_MAP[pkey]['name']
                 text = row.get('prompt_text') or PROMPT_MAP[pkey]['text']
                 prompts[pkey] = {'name': name, 'text': text}
-            return prompts
-        return PROMPT_MAP
+        else:
+            prompts = PROMPT_MAP
+        _PROMPTS_CACHE["data"] = prompts
+        _PROMPTS_CACHE["ts"] = now
+        return prompts
     except Exception as e:
         log_error(f"get_prompts_from_db error: {e}")
-        return PROMPT_MAP
+        return _PROMPTS_CACHE["data"] if _PROMPTS_CACHE["data"] is not None else PROMPT_MAP
 
 def update_prompt_in_db(prompt_key: str, prompt_name: str, prompt_text: str) -> bool:
     try:
@@ -1764,6 +1773,7 @@ def update_prompt_in_db(prompt_key: str, prompt_name: str, prompt_text: str) -> 
             client.table('prompts').update({'prompt_name': prompt_name, 'prompt_text': prompt_text, 'updated_at': datetime.now(BD_TZ).isoformat()}).eq('prompt_key', prompt_key).execute()
         else:
             client.table('prompts').insert({'prompt_key': prompt_key, 'prompt_name': prompt_name, 'prompt_text': prompt_text, 'is_active': True, 'updated_at': datetime.now(BD_TZ).isoformat()}).execute()
+        _PROMPTS_CACHE["data"] = None
         log(f"📝 Prompt updated: {prompt_key}")
         return True
     except Exception as e:
@@ -3592,9 +3602,8 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data="qaimg_c"),
         ])
         keyboard.append([InlineKeyboardButton("📖 ব্যাখ্যা চাই", callback_data="explimg")])
-        await update.message.reply_photo(
-            photo=image_bytes,
-            caption=f"""🌟 স্বাগতম {user['first_name']}..!
+        await update.message.reply_text(
+            text=f"""🌟 স্বাগতম {user['first_name']}..!
 
 📸 আপনার Image থেকে MCQ বানাতে MCQ টাইপ সিলেক্ট করুন:
 
