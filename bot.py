@@ -2525,17 +2525,89 @@ async def _qbm_ram_aware_acquire():
         return
 
 
+async def _qbm_call3_verify_answers(image_bytes: bytes, mcqs: list) -> list:
+    """
+    CALL 3 -- CODE-LEVEL ANSWER-SOURCE VERIFICATION (hard enforcement, not just
+    prompt-level trust). Re-examines the SAME page image a second, independent
+    time -- specifically hunting for the answer source for every MCQ already
+    extracted -- and cross-checks each against Call 1/2's answer letter.
+    This exists because Call 1/2 do extraction+answer in one shot; a wrong
+    answer there would otherwise pass through unquestioned. This call's ONLY
+    job is answer-sourcing, so it gets full attention on marks/inline
+    answers/bottom-of-page keys instead of splitting focus with extraction.
+    On mismatch, the page-sourced answer WINS (Call 1/2 could have misread
+    which option was marked); if this call can't find a source either, the
+    original answer is kept as-is (no regression vs. before).
+    """
+    if not mcqs:
+        return mcqs
+    try:
+        q_summary = "\n".join(
+            f"{i+1}. {(m.get('question') or '')[:90]} | current answer: {m.get('answer','A')}"
+            for i, m in enumerate(mcqs)
+        )
+        prompt = f"""You are doing a SECOND, INDEPENDENT answer-verification pass on this exact page
+image. Below is a list of MCQs already extracted from it, each with the answer letter
+currently assigned:
+
+{q_summary}
+
+YOUR ONLY JOB: for EACH question above, look at the page again and find where its correct
+answer is actually shown -- a mark/circle/tick/underline/bold on an option, an inline answer
+right after the question, or an answer box/table on THIS page. Do NOT re-answer from your own
+knowledge -- only report what the page itself visibly shows.
+
+For each question number, output your finding:
+- If the page shows a clear answer source and it MATCHES the current answer -> "CONFIRMED"
+- If the page shows a clear answer source and it's DIFFERENT from the current answer -> output
+  the correct letter you found on the page (A/B/C/D)
+- If you cannot find any answer source on THIS page for that question (it may be on another
+  page, e.g. an answer key several pages later) -> "NO_SOURCE_ON_PAGE"
+
+Output ONLY a JSON object mapping question number (as string) to your finding, nothing else:
+{{"1":"CONFIRMED","2":"C","3":"NO_SOURCE_ON_PAGE"}}"""
+        txt = await _call_groq(prompt, image_bytes)
+        if not txt:
+            txt = await _call_gemini(prompt, image_bytes)
+        if not txt:
+            return mcqs
+        m = re.search(r'\{.*\}', txt, re.DOTALL)
+        if not m:
+            return mcqs
+        findings = json.loads(m.group())
+        out = []
+        for i, mc in enumerate(mcqs):
+            finding = findings.get(str(i + 1), "")
+            fu = str(finding).strip().upper()
+            if fu in ("A", "B", "C", "D") and fu != str(mc.get("answer", "A")).upper():
+                logger.warning(
+                    f"[QBM Call3] Answer correction Q{i+1}: {mc.get('answer')} -> {fu} "
+                    f"(page re-scan disagreed with Call 1/2)"
+                )
+                mc2 = dict(mc)
+                mc2["answer"] = fu
+                out.append(mc2)
+            else:
+                out.append(mc)
+        return out
+    except Exception as e:
+        log_error(f"[QBM Call3 verify] failed: {e}")
+        return mcqs
+
+
 async def qbm_extract_from_image(image_bytes: bytes) -> list:
     """
-    Public entry point: Call 1 (extract) -> Call 2 (miss-check), connected
-    2-call pipeline, Groq primary throughout. Returns MCQs in this bot's
-    standard {question, options[list], answer[int], explanation} format.
+    Public entry point: Call 1 (extract) -> Call 2 (miss-check) -> Call 3
+    (code-level answer-source re-verification), connected 3-call pipeline,
+    Groq primary throughout. Returns MCQs in this bot's standard
+    {question, options[list], answer[int], explanation} format.
     """
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _qbm_call1_extract(image_bytes)
         combined = await _qbm_call2_miss_check(image_bytes, call1)
-        result = _qbm_answer_letter_to_index(combined)
+        verified = await _qbm_call3_verify_answers(image_bytes, combined)
+        result = _qbm_answer_letter_to_index(verified)
         # 🔒 Same mnemonic-pairing ground-truth check used elsewhere — catches wrong/
         # incomplete word↔disease pairing even in extraction (not just generation) flow.
         result = [mc for mc in result if not _violates_lethal_gene_mnemonic(mc)]
