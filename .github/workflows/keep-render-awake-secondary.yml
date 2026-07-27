@@ -1,6 +1,6 @@
 name: Keep Render Awake (Secondary)
 
-# Fallback Render account (atlasbot-3tgq) ke o ghum theke bachiye rakhe,
+# Fallback Render account (atlasbot-pvp7) ke o ghum theke bachiye rakhe,
 # jate Render-only API routes (new-exam, solve-pdf, back-to-source,
 # bookmark, leaderboard) er failover always-ready thake.
 
@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Ping Secondary Render health endpoint
         run: |
-          URL="https://atlasbot-3tgq.onrender.com/health"
+          URL="https://atlasbot-pvp7.onrender.com/health"
           STATUS="000"
           for i in 1 2; do
             echo "Pinging $URL (attempt $i) ..."

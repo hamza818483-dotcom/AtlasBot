@@ -109,8 +109,9 @@ export default {
       const token = url.pathname.split('/webhook/')[1];
       if (!token) return new Response('Unauthorized', { status: 401 });
       const body = await request.text();
+      const renderUrl = (env.RENDER_URL || 'https://atlasbot-q4f4.onrender.com').replace(/\/$/, '');
       try {
-        await fetch('https://hamzahf2-atlasbot.hf.space/webhook', {
+        await fetch(`${renderUrl}/webhook`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Bot-Token': token },
           body,
@@ -230,8 +231,8 @@ function jsonResp(obj, status = 200) {
 
 // ── Forward Render-only API calls to the live bot, with primary->backup failover ──
 async function forwardToRender(request, url, env) {
-  const RENDER_PRIMARY = "https://atlasbot-pvp7.onrender.com";
-  const RENDER_BACKUP  = "https://atlasbot-3tgq.onrender.com";
+  const RENDER_PRIMARY = (env && env.RENDER_URL) || "https://atlasbot-q4f4.onrender.com";
+  const RENDER_BACKUP  = (env && env.RENDER_URL_2) || "https://atlasbot-3tgq.onrender.com";
   const targets = [RENDER_PRIMARY, RENDER_BACKUP];
 
   const bodyBuf = (request.method !== 'GET' && request.method !== 'HEAD')
@@ -376,8 +377,8 @@ async function fetchExamData(cacheId, env) {
   // Layer 4: Render live bot (in-memory exam_store fallback — last resort)
   try {
     const RENDER_URLS = [
-      "https://atlasbot-pvp7.onrender.com",
-      "https://atlasbot-3tgq.onrender.com",
+      (env && env.RENDER_URL) || "https://atlasbot-q4f4.onrender.com",
+      (env && env.RENDER_URL_2) || "https://atlasbot-3tgq.onrender.com",
     ];
     for (const base of RENDER_URLS) {
       try {

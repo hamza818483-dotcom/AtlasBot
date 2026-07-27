@@ -1,0 +1,77 @@
+name: Watchdog - AtlasBot Q4F4 Keepalive
+
+# atlasbot-q4f4.onrender.com ke ghumate na dewar jonno + down hole
+# owner ke Telegram e alert pathanor jonno.
+#
+# Required repo secrets:
+#   BOT_TOKEN   - Telegram bot token
+#   OWNER_ID    - tomar Telegram numeric user id (alert er jonno)
+
+on:
+  # schedule disabled — conflicts with watchdog-render-failover.yml
+  # (both were fighting over webhook target). Failover workflow handles
+  # both keepalive-alert and correct primary/backup webhook switching.
+  # schedule:
+  #   - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health and alert if down
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+        run: |
+          set -e
+          URL="https://atlasbot-q4f4.onrender.com"
+
+          echo "Checking $URL/health ..."
+          OK="false"
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "${URL}/health" || echo "000")
+            echo "  attempt $i: /health -> $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              OK="true"
+              break
+            fi
+            sleep 10
+          done
+
+          if [ "$OK" = "false" ]; then
+            echo "::warning::atlasbot-q4f4 is DOWN"
+            if [ -n "$BOT_TOKEN" ] && [ -n "$OWNER_ID" ]; then
+              MSG="🚨 AtlasBot (q4f4) DOWN%0A%0A${URL}/health responded with non-200 after 3 tries."
+              curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
+            fi
+          else
+            echo "atlasbot-q4f4 healthy."
+          fi
+
+          # Webhook self-heal: always verify webhook URL exactly matches
+          # expected (with token). If Telegram somehow has a wrong/stale
+          # webhook (missing token, old URL, etc), auto re-set it and
+          # alert the owner.
+          if [ -n "$BOT_TOKEN" ]; then
+            EXPECTED="${URL}/webhook/${BOT_TOKEN}"
+            CURRENT_WH=$(curl -s --max-time 15 \
+              "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
+            echo "Current webhook: $CURRENT_WH"
+            echo "Expected webhook: $EXPECTED"
+            if [ "$CURRENT_WH" != "$EXPECTED" ]; then
+              echo "::warning::Webhook mismatch — auto-fixing"
+              curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+                -H "Content-Type: application/json" \
+                -d "{\"url\":\"${EXPECTED}\",\"drop_pending_updates\":false,\"max_connections\":40}"
+              if [ -n "$OWNER_ID" ]; then
+                MSG="⚠️ Webhook mismatch auto-fixed!%0A%0AWas: ${CURRENT_WH}%0ANow: ${EXPECTED}"
+                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
+              fi
+            else
+              echo "Webhook correct — no action needed."
+            fi
+          fi

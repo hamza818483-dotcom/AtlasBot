@@ -109,7 +109,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
 SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
-HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-pvp7.onrender.com"))
+HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-q4f4.onrender.com"))
 CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 # v4.3: GitHub Pages exam link — CF/Render duitai fail korleo page static
 # host theke load hoy, bhitorer JS nijei Render->CF->Supabase try kore.
@@ -1737,7 +1737,13 @@ def delete_bookmark(user_id: int, cache_id: str, question_index: int) -> bool:
         log_error(f"delete_bookmark error: {e}")
         return False
 
+_PROMPTS_CACHE = {"data": None, "ts": 0.0}
+_PROMPTS_CACHE_TTL = 300  # seconds
+
 def get_prompts_from_db() -> Dict:
+    now = time.time()
+    if _PROMPTS_CACHE["data"] is not None and (now - _PROMPTS_CACHE["ts"]) < _PROMPTS_CACHE_TTL:
+        return _PROMPTS_CACHE["data"]
     try:
         client = get_supabase()
         result = client.table('prompts').select('*').execute()
@@ -1750,11 +1756,14 @@ def get_prompts_from_db() -> Dict:
                 name = row.get('prompt_name') or PROMPT_MAP[pkey]['name']
                 text = row.get('prompt_text') or PROMPT_MAP[pkey]['text']
                 prompts[pkey] = {'name': name, 'text': text}
-            return prompts
-        return PROMPT_MAP
+        else:
+            prompts = PROMPT_MAP
+        _PROMPTS_CACHE["data"] = prompts
+        _PROMPTS_CACHE["ts"] = now
+        return prompts
     except Exception as e:
         log_error(f"get_prompts_from_db error: {e}")
-        return PROMPT_MAP
+        return _PROMPTS_CACHE["data"] if _PROMPTS_CACHE["data"] is not None else PROMPT_MAP
 
 def update_prompt_in_db(prompt_key: str, prompt_name: str, prompt_text: str) -> bool:
     try:
@@ -1764,6 +1773,7 @@ def update_prompt_in_db(prompt_key: str, prompt_name: str, prompt_text: str) -> 
             client.table('prompts').update({'prompt_name': prompt_name, 'prompt_text': prompt_text, 'updated_at': datetime.now(BD_TZ).isoformat()}).eq('prompt_key', prompt_key).execute()
         else:
             client.table('prompts').insert({'prompt_key': prompt_key, 'prompt_name': prompt_name, 'prompt_text': prompt_text, 'is_active': True, 'updated_at': datetime.now(BD_TZ).isoformat()}).execute()
+        _PROMPTS_CACHE["data"] = None
         log(f"📝 Prompt updated: {prompt_key}")
         return True
     except Exception as e:
@@ -6657,6 +6667,18 @@ async def main() -> None:
         # না) — ফলব্যাক রুট setup_webhook_route()-এ /webhook/{token} হিসেবে
         # যোগ করা আছে, ঠিক CF Worker যেভাবে কল করত একই path pattern মেনে,
         # যাতে আলাদা কোনো নতুন handler না লাগে।
+        #
+        # 🩹 INCIDENT (2026-07-26): Telegram-এর webhook URL কোনোভাবে
+        # token ছাড়া (".../webhook") হয়ে গিয়েছিল, কিন্তু route চায়
+        # ".../webhook/{token}" — ফলে Telegram প্রতিটা update পাঠালে bot
+        # 401 Unauthorized দিচ্ছিল আর user কোনো response পাচ্ছিল না
+        # (bot নিজে চলছিল, কিন্তু Telegram-ই ভুল জায়গায় পাঠাচ্ছিল)।
+        # Manual fix: getWebhookInfo দিয়ে verify করে সরাসরি setWebhook
+        # কল করে সঠিক token-সহ URL বসানো হয়েছিল।
+        # Permanent fix: .github/workflows/watchdog-q4f4.yml এ প্রতি
+        # ১০ মিনিটে webhook URL exact-match চেক + mismatch হলে
+        # auto re-set + owner-কে Telegram alert — দেখো ওই ফাইলের
+        # "Webhook self-heal" ধাপ।
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
     else:
         webhook_url = f"{CF_WORKER_URL}/webhook/{BOT_TOKEN}"
