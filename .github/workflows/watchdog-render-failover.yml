@@ -1,7 +1,7 @@
 name: Watchdog - Render Primary/Backup Failover
 
-# Render Primary (atlasbot-pvp7) down/sleeping thakle Telegram webhook
-# auto-switch kore Render Backup (atlasbot-3tgq) e — ar Primary fire
+# Render Primary (atlasbot-q4f4) down/sleeping thakle Telegram webhook
+# auto-switch kore Render Backup (atlasbot-pvp7) e — ar Primary fire
 # fire korle abar Primary te ferot ane.
 #
 # Eta bot message handling (webhook) er jonno — Web Quiz API failover
@@ -10,8 +10,8 @@ name: Watchdog - Render Primary/Backup Failover
 #
 # Required repo secrets:
 #   BOT_TOKEN      - Telegram bot token
-#   RENDER_URL     - https://atlasbot-pvp7.onrender.com (primary)
-#   RENDER_URL_2   - https://atlasbot-3tgq.onrender.com (backup)
+#   RENDER_URL     - https://atlasbot-q4f4.onrender.com (primary)
+#   RENDER_URL_2   - https://atlasbot-pvp7.onrender.com (backup)
 #   OWNER_ID       - tomar Telegram numeric user id (alert er jonno)
 
 on:
