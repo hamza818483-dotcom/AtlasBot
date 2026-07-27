@@ -41,8 +41,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 GENAI_API_KEY = os.getenv("GEMINI_KEY", "")
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev").rstrip("/")
-HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-pvp7.onrender.com")).rstrip("/")
-BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("BASE_URL", "https://atlasbot-pvp7.onrender.com")).rstrip("/")
+HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-q4f4.onrender.com")).rstrip("/")
+BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("BASE_URL", "https://atlasbot-q4f4.onrender.com")).rstrip("/")
 
 # Fallback providers for Creative (জ্ঞানমূলক/অনুধাবনমূলক) generation when Gemini is exhausted
 GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEY", "").split(",") if k.strip()]

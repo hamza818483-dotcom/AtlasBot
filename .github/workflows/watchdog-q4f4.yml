@@ -8,8 +8,11 @@ name: Watchdog - AtlasBot Q4F4 Keepalive
 #   OWNER_ID    - tomar Telegram numeric user id (alert er jonno)
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'
+  # schedule disabled — conflicts with watchdog-render-failover.yml
+  # (both were fighting over webhook target). Failover workflow handles
+  # both keepalive-alert and correct primary/backup webhook switching.
+  # schedule:
+  #   - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
