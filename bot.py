@@ -109,7 +109,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
 SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
-HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-pvp7.onrender.com"))
+HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-q4f4.onrender.com"))
 CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 # v4.3: GitHub Pages exam link — CF/Render duitai fail korleo page static
 # host theke load hoy, bhitorer JS nijei Render->CF->Supabase try kore.
