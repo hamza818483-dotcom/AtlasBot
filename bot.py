@@ -111,6 +111,7 @@ SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
 HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-q4f4.onrender.com"))
 CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
+D1_TOKEN = os.environ.get("D1_TOKEN", "")
 # v4.3: GitHub Pages exam link — CF/Render duitai fail korleo page static
 # host theke load hoy, bhitorer JS nijei Render->CF->Supabase try kore.
 GH_PAGES_EXAM_URL = os.environ.get("GH_PAGES_EXAM_URL", "https://hamza818483-dotcom.github.io/AtlasBot/exam.html")
@@ -2310,6 +2311,18 @@ This rule overrides any general "Bengali language" default mentioned elsewhere i
 wherever a language default is implied, the SOURCE MCQ's own actual language always wins.
 
 ════════════════════════════════
+🖼️ FIGURE/DIAGRAM/IMAGE DETECTION (per MCQ)
+════════════════════════════════
+- যদি কোনো MCQ-এর প্রশ্ন বা option-এর সাথে সরাসরি সম্পর্কিত কোনো চিত্র/ডায়াগ্রাম/গ্রাফ/ছক/
+  ফটো/স্ট্রাকচার (কেবল টেক্সট না — visual image) পেজে থাকে, সেই MCQ object-এ একটি
+  "figure_bbox" field যোগ করবে: সেই চিত্রটির bounding box, পুরো পেজ ছবির শতাংশ (0-100,
+  float) হিসেবে normalize করা — {"x":left%, "y":top%, "w":width%, "h":height%}।
+- চিত্র না থাকলে "figure_bbox" field-টি একেবারে বাদ দেবে (null/empty না — field-ই থাকবে না)।
+- একাধিক MCQ যদি একই চিত্র শেয়ার করে (যেমন একটা diagram-ভিত্তিক ২-৩টা প্রশ্ন), প্রতিটাতেই
+  একই bounding box বসাবে — ডুপ্লিকেট নয়, প্রতিটির নিজস্ব context-এ চিত্রটি প্রাসঙ্গিক তাই।
+- Bounding box টা যতটা সম্ভব tight/accurate রাখবে (শুধু চিত্রের এলাকা, আশেপাশের টেক্সট বাদ)।
+
+════════════════════════════════
 📤 OUTPUT FORMAT
 ════════════════════════════════
 Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
@@ -2327,7 +2340,8 @@ If NO MCQ exists on this page → return exactly: []
   {"_source_terms": ["পেজে থাকা গুরুত্বপূর্ণ নাম/টার্ম/রোগ/শব্দ exact বানানে", "..."]}
   এখানে পেজে থাকা সব গুরুত্বপূর্ণ বিশেষ্য/টেকনিক্যাল টার্ম/রোগের নাম exact সোর্স বানানে লিস্ট করবে।
 
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","figure_bbox":{"x":0,"y":0,"w":0,"h":0}}]
+(figure_bbox is OPTIONAL — include it only when that MCQ has an actual image/diagram tied to it, as instructed above)"""
 
 
 def _has_mixed_digit_script(text: str) -> bool:
@@ -2605,19 +2619,95 @@ Output ONLY a JSON object mapping question number (as string) to your finding, n
         return mcqs
 
 
+async def _qbm_upload_figure_crops(image_bytes: bytes, mcqs: list) -> list:
+    """
+    Code-level step: for every MCQ that Call 1/2/3 flagged with a
+    'figure_bbox' (a real figure/diagram/photo on the page tied to that
+    MCQ), crop that region out of the ORIGINAL page image, upload the crop
+    to R2 via the Worker's /r2/image-put route, and replace the bbox with
+    a public image URL embedded as an <img> tag appended to that MCQ's
+    explanation. If upload/cropping fails for any MCQ (missing PIL, bad
+    bbox, network error, R2 not configured yet), that MCQ is left exactly
+    as-is -- this step is additive and never blocks extraction.
+    """
+    if not mcqs or not any(isinstance(m, dict) and m.get("figure_bbox") for m in mcqs):
+        return mcqs
+    try:
+        from PIL import Image as _PILImage
+        page_img = _PILImage.open(BytesIO(image_bytes)).convert("RGB")
+        pw, ph = page_img.size
+    except Exception as e:
+        log_error(f"[QBM figure] failed to open page image: {e}")
+        return mcqs
+
+    out = []
+    for idx, mc in enumerate(mcqs):
+        bbox = mc.get("figure_bbox") if isinstance(mc, dict) else None
+        if not bbox or not isinstance(bbox, dict):
+            out.append(mc)
+            continue
+        try:
+            x_pct = float(bbox.get("x", 0)); y_pct = float(bbox.get("y", 0))
+            w_pct = float(bbox.get("w", 0)); h_pct = float(bbox.get("h", 0))
+            if w_pct <= 0 or h_pct <= 0:
+                out.append(mc)
+                continue
+            left = max(0, int(pw * x_pct / 100))
+            top = max(0, int(ph * y_pct / 100))
+            right = min(pw, int(pw * (x_pct + w_pct) / 100))
+            bottom = min(ph, int(ph * (y_pct + h_pct) / 100))
+            if right <= left or bottom <= top:
+                out.append(mc)
+                continue
+            crop = page_img.crop((left, top, right, bottom))
+            buf = BytesIO()
+            crop.save(buf, format="PNG")
+            crop_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+            crop_id = f"{uuid.uuid4().hex}"
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    f"{CF_WORKER_URL}/r2/image-put",
+                    json={"token": D1_TOKEN, "id": crop_id, "image_base64": crop_b64, "ext": "png"},
+                    headers={"Content-Type": "application/json"},
+                )
+            data = resp.json() if resp.status_code == 200 else {}
+            if data.get("ok") and data.get("url"):
+                img_tag = f'<img src="{data["url"]}">'
+                mc2 = dict(mc)
+                mc2.pop("figure_bbox", None)
+                existing_exp = mc2.get("explanation") or ""
+                mc2["explanation"] = f"{existing_exp} {img_tag}".strip()
+                out.append(mc2)
+            else:
+                log_error(f"[QBM figure] upload failed for Q{idx+1}: {data.get('error', resp.text[:200])}")
+                mc2 = dict(mc)
+                mc2.pop("figure_bbox", None)
+                out.append(mc2)
+        except Exception as e:
+            log_error(f"[QBM figure] crop/upload error Q{idx+1}: {e}")
+            mc2 = dict(mc) if isinstance(mc, dict) else mc
+            if isinstance(mc2, dict):
+                mc2.pop("figure_bbox", None)
+            out.append(mc2)
+    return out
+
+
 async def qbm_extract_from_image(image_bytes: bytes) -> list:
     """
     Public entry point: Call 1 (extract) -> Call 2 (miss-check) -> Call 3
-    (code-level answer-source re-verification), connected 3-call pipeline,
-    Groq primary throughout. Returns MCQs in this bot's standard
-    {question, options[list], answer[int], explanation} format.
+    (code-level answer-source re-verification) -> figure crop+upload,
+    connected pipeline, Groq primary throughout. Returns MCQs in this
+    bot's standard {question, options[list], answer[int], explanation}
+    format.
     """
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _qbm_call1_extract(image_bytes)
         combined = await _qbm_call2_miss_check(image_bytes, call1)
         verified = await _qbm_call3_verify_answers(image_bytes, combined)
-        result = _qbm_answer_letter_to_index(verified)
+        with_figures = await _qbm_upload_figure_crops(image_bytes, verified)
+        result = _qbm_answer_letter_to_index(with_figures)
         # 🔒 Same mnemonic-pairing ground-truth check used elsewhere — catches wrong/
         # incomplete word↔disease pairing even in extraction (not just generation) flow.
         result = [mc for mc in result if not _violates_lethal_gene_mnemonic(mc)]

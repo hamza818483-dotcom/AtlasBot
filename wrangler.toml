@@ -7,6 +7,10 @@ binding = "DB"
 database_name = "atlasbot-db"
 database_id = "9b866cf1-d4e8-440c-a2f8-33f2b826e383"
 
+[[r2_buckets]]
+binding = "IMG_BUCKET"
+bucket_name = "atlasbot-qbm-images"
+
 [assets]
 directory = "./"
 binding = "ASSETS"

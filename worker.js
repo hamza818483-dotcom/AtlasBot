@@ -36,6 +36,13 @@ export default {
       return await handleTgImageProxy(fileId, env);
     }
 
+    if (request.method === 'POST' && url.pathname === '/r2/image-put') {
+      return await r2ImagePut(request, env);
+    }
+    if (request.method === 'GET' && url.pathname.startsWith('/img/')) {
+      return await r2ImageGet(url, env);
+    }
+
     // ============================================
     // -0.7. RENDER-ONLY ROUTES — forward to live Render bot.
     // These need the running Python process (in-memory exam_store,
@@ -539,3 +546,64 @@ async function handleTgImageProxy(fileId, env) {
 }
 
 
+// ============================================
+// R2 IMAGE STORE — for /qbm page-figure crops, served publicly via
+// <img src="..."> tags. Same pattern as QuizBot's atlas-proxy-pages worker.
+// ============================================
+const IMG_EXT_TO_CONTENT_TYPE = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  webp: "image/webp", gif: "image/gif",
+};
+
+async function r2ImagePut(request, env) {
+  try {
+    const body = await request.json();
+    const token = body.token || request.headers.get("X-D1-Token") || "";
+    if (env.D1_TOKEN && token !== env.D1_TOKEN) {
+      return jsonResp({ ok: false, error: "Unauthorized" }, 401);
+    }
+    const { id, image_base64, ext } = body;
+    if (!id || !image_base64) {
+      return jsonResp({ ok: false, error: "Missing id or image_base64" }, 400);
+    }
+    if (!env.IMG_BUCKET) {
+      return jsonResp({ ok: false, error: "R2 bucket (IMG_BUCKET) not bound" }, 500);
+    }
+    const safeExt = (ext || "png").toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+    const contentType = IMG_EXT_TO_CONTENT_TYPE[safeExt] || "application/octet-stream";
+    const binStr = atob(image_base64);
+    const bytes = new Uint8Array(binStr.length);
+    for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+    const key = `qbm-images/${id}.${safeExt}`;
+    await env.IMG_BUCKET.put(key, bytes, { httpMetadata: { contentType } });
+    const base = env.PUBLIC_IMG_BASE || new URL(request.url).origin;
+    return jsonResp({ ok: true, url: `${base}/img/${id}.${safeExt}` });
+  } catch (e) {
+    return jsonResp({ ok: false, error: e.message }, 500);
+  }
+}
+
+async function r2ImageGet(url, env) {
+  try {
+    if (!env.IMG_BUCKET) {
+      return new Response("R2 bucket (IMG_BUCKET) not bound", { status: 500 });
+    }
+    const fname = url.pathname.replace("/img/", "");
+    const dot = fname.lastIndexOf(".");
+    const id = dot === -1 ? fname : fname.slice(0, dot);
+    const ext = dot === -1 ? "png" : fname.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "");
+    const key = `qbm-images/${id}.${ext}`;
+    const obj = await env.IMG_BUCKET.get(key);
+    if (!obj) return new Response("Not found", { status: 404 });
+    const contentType = IMG_EXT_TO_CONTENT_TYPE[ext] || obj.httpMetadata?.contentType || "application/octet-stream";
+    return new Response(obj.body, {
+      headers: {
+        "Content-Type": contentType,
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch (e) {
+    return new Response(e.message, { status: 500 });
+  }
+}
