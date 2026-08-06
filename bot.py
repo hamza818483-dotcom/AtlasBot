@@ -3323,6 +3323,7 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     ok_count = 0
     fail_count = 0
+    all_mcqs_for_csv = []  # v4.1: collect every page's MCQs to build one final CSV
     for idx, page_no in enumerate(page_numbers, 1):
         try:
             await status.edit_text(f"⏳ Page {page_no} প্রসেসিং... ({idx}/{len(page_numbers)})")
@@ -3357,6 +3358,7 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 mcqs = mcqs[:per_page_count]
 
             mcqs = apply_tag_exp(clean_mcq_options(mcqs))
+            all_mcqs_for_csv.extend(mcqs)  # v4.1: accumulate for final CSV export
             src_hash = hashlib.md5(image_bytes).hexdigest() + "_prompt_2"
             quiz_id = await save_mcq(user_id=user_id, mcqs=mcqs, source_type='tf_pdf',
                                       prompt_type='prompt_2', chat_id=target_chat_id,
@@ -3391,6 +3393,47 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception:
         pass
+
+    # v4.1: final CSV export — same format AtlasBot's own /live command parses
+    # (question,option_a,option_b,option_c,option_d,answer,explanation;
+    # answer = 0/1/2/3 for A/B/C/D), so this file can be reused directly
+    # with /live or re-imported elsewhere in the bot.
+    if all_mcqs_for_csv:
+        try:
+            csv_buf = StringIO()
+            writer = csv.writer(csv_buf)
+            writer.writerow(["question", "option_a", "option_b", "option_c", "option_d", "answer", "explanation"])
+            for m in all_mcqs_for_csv:
+                opts = (m.get('options', []) + ["", "", "", ""])[:4]
+                ans = m.get('answer', 0)
+                try:
+                    ans = int(ans)
+                except (TypeError, ValueError):
+                    ans = 0
+                writer.writerow([
+                    m.get('question', ''), opts[0], opts[1], opts[2], opts[3],
+                    max(0, min(3, ans)), m.get('explanation', '')
+                ])
+            csv_bytes = csv_buf.getvalue().encode('utf-8-sig')
+            csv_file = BytesIO(csv_bytes)
+            csv_file.name = f"tf_{topic[:30]}.csv"
+            send_doc_kwargs = {
+                "chat_id": target_chat_id, "document": csv_file,
+                "filename": csv_file.name,
+                "caption": f"📄 {topic}\n📝 মোট MCQ: {len(all_mcqs_for_csv)} ({ok_count} page)"
+            }
+            if thread_id:
+                send_doc_kwargs["message_thread_id"] = thread_id
+            try:
+                await context.bot.send_document(**send_doc_kwargs)
+            except BadRequest as bre:
+                if thread_id and "thread" in str(bre).lower():
+                    send_doc_kwargs.pop("message_thread_id", None)
+                    await context.bot.send_document(**send_doc_kwargs)
+                else:
+                    raise
+        except Exception as e:
+            log_error(f"/tf CSV export error: {e}")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
