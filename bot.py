@@ -3294,15 +3294,20 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await status.edit_text("❌ PDF ডাউনলোড করতে সমস্যা হয়েছে।")
         return
 
+    # v4.1: RAM-safety fix — get page COUNT cheaply (pypdf, no rendering),
+    # then render only the requested pages ONE AT A TIME later in the loop.
+    # Rendering the whole PDF up front (convert_from_bytes with no page
+    # limit) loaded every page into memory simultaneously, which blew past
+    # the 512MB container limit on larger PDFs. Now peak memory is capped
+    # to roughly one rendered page at a time.
     try:
-        from pdf2image import convert_from_bytes
-        all_page_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+        from pypdf import PdfReader
+        total_pages = len(PdfReader(BytesIO(pdf_bytes)).pages)
     except Exception as e:
-        log_error(f"/tf PDF render error: {e}")
-        await status.edit_text(f"❌ PDF থেকে page বানাতে সমস্যা হয়েছে: {e}")
+        log_error(f"/tf PDF page-count error: {e}")
+        await status.edit_text(f"❌ PDF পড়তে সমস্যা হয়েছে: {e}")
         return
 
-    total_pages = len(all_page_images)
     if total_pages == 0:
         await status.edit_text("❌ PDF-এ কোনো page পাওয়া যায়নি।")
         return
@@ -3314,6 +3319,8 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await status.edit_text(f"✅ {total_pages} page-এর PDF। {len(page_numbers)} page প্রসেস হবে...\n🎯 Topic: {topic}")
 
+    from pdf2image import convert_from_bytes
+
     ok_count = 0
     fail_count = 0
     for idx, page_no in enumerate(page_numbers, 1):
@@ -3322,9 +3329,23 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
         try:
+            # Render ONLY this single page, then discard it before moving on
+            # — keeps peak memory to ~one page's worth of pixels regardless
+            # of total PDF size.
+            rendered = await asyncio.to_thread(
+                convert_from_bytes, pdf_bytes, dpi=150,
+                first_page=page_no, last_page=page_no
+            )
+            if not rendered:
+                fail_count += 1
+                log_error(f"/tf page {page_no} render returned empty")
+                continue
+            page_img = rendered[0]
+
             img_buf = BytesIO()
-            all_page_images[page_no - 1].convert("RGB").save(img_buf, format="JPEG", quality=90)
+            page_img.convert("RGB").save(img_buf, format="JPEG", quality=90)
             image_bytes = img_buf.getvalue()
+            del rendered, page_img, img_buf
 
             mcqs, error = await generate_mcq_from_image(image_bytes, 'prompt_2')
             if error or not mcqs:
