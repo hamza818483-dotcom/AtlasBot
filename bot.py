@@ -3394,25 +3394,28 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
-    # v4.1: final CSV export — same format AtlasBot's own /live command parses
-    # (question,option_a,option_b,option_c,option_d,answer,explanation;
-    # answer = 0/1/2/3 for A/B/C/D), so this file can be reused directly
-    # with /live or re-imported elsewhere in the bot.
+    # v4.1: final CSV export — QuizBot's exact CSV format
+    # (questions,option1,option2,option3,option4,answer,explanation;
+    # answer = 1/2/3/4 for A/B/C/D).
     if all_mcqs_for_csv:
         try:
             csv_buf = StringIO()
             writer = csv.writer(csv_buf)
-            writer.writerow(["question", "option_a", "option_b", "option_c", "option_d", "answer", "explanation"])
+            writer.writerow(["questions", "option1", "option2", "option3", "option4", "answer", "explanation"])
+            ans_map = {0: "1", 1: "2", 2: "3", 3: "4", "A": "1", "B": "2", "C": "3", "D": "4"}
             for m in all_mcqs_for_csv:
                 opts = (m.get('options', []) + ["", "", "", ""])[:4]
                 ans = m.get('answer', 0)
-                try:
-                    ans = int(ans)
-                except (TypeError, ValueError):
-                    ans = 0
+                if isinstance(ans, str):
+                    ans_val = ans_map.get(ans.strip().upper(), "1")
+                else:
+                    try:
+                        ans_val = ans_map.get(int(ans), "1")
+                    except (TypeError, ValueError):
+                        ans_val = "1"
                 writer.writerow([
                     m.get('question', ''), opts[0], opts[1], opts[2], opts[3],
-                    max(0, min(3, ans)), m.get('explanation', '')
+                    ans_val, m.get('explanation', '')
                 ])
             csv_bytes = csv_buf.getvalue().encode('utf-8-sig')
             csv_file = BytesIO(csv_bytes)
