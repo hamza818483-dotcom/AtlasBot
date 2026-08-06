@@ -3188,6 +3188,190 @@ async def cmd_pdfc_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data.pop('pdfc_imgs', None)
     await update.message.reply_text("❌ Image collection বাতিল।")
 
+# ============================================================
+# SECTION: /tf — PDF pagewise True/False MCQ (prompt_2 forced)
+# Usage: /tf -p 1-5 -c @channel -m "Topic Name" [10]
+#        /tf -p 2 -c -100xxx -t 447 -m "Group Topic" [10]
+# ============================================================
+def _parse_tf_params(text: str) -> dict:
+    result = {"page_range": None, "channel_id": None, "topic": None,
+              "thread_id": None, "mcq_count": None}
+    m = re.search(r'-p\s+([\d,\-]+)', text)
+    if m:
+        result["page_range"] = m.group(1)
+    m = re.search(r'-c\s+(@\S+|-100\d+)', text)
+    if m:
+        result["channel_id"] = m.group(1)
+    m = (re.search(r'-m\s+"([^"]+)"', text) or re.search(r"-m\s+'([^']+)'", text)
+         or re.search(r'-m\s+(\S+)', text))
+    if m:
+        result["topic"] = m.group(1)
+    m = re.search(r'-t\s+"?(\d+)"?', text)
+    if m:
+        result["thread_id"] = int(m.group(1))
+    m_bracket = re.search(r'\[(\d+)\]', text)
+    if m_bracket:
+        result["mcq_count"] = int(m_bracket.group(1))
+    return result
+
+def _expand_page_range(page_range: Optional[str], total_pages: int) -> List[int]:
+    """'1-5' / '2' / '1,3,5' / '1-3,7' → sorted 1-indexed page numbers, clamped."""
+    if not page_range:
+        return list(range(1, total_pages + 1))
+    pages = set()
+    for part in page_range.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            a, b = part.split('-', 1)
+            try:
+                a, b = int(a), int(b)
+            except ValueError:
+                continue
+            lo, hi = min(a, b), max(a, b)
+            for p in range(lo, hi + 1):
+                if 1 <= p <= total_pages:
+                    pages.add(p)
+        else:
+            try:
+                p = int(part)
+                if 1 <= p <= total_pages:
+                    pages.add(p)
+            except ValueError:
+                continue
+    return sorted(pages) if pages else list(range(1, total_pages + 1))
+
+async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/tf — reply to a PDF to generate True/False (সত্য-মিথ্যা) style MCQs
+    page-by-page, optionally posting each page's set to a channel/group/thread."""
+    user = get_user_info(update)
+    user_id = user['user_id']
+    msg = update.message
+    reply = msg.reply_to_message
+
+    if not reply or not (reply.document and (reply.document.mime_type or '').startswith('application/pdf')):
+        await msg.reply_text(
+            "❌ PDF ফাইলে reply করে /tf দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/tf -p 1-5 -c @channel -m \"Topic Name\" [10]</code>\n"
+            "<code>/tf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 -c = channel/group id (না দিলে এই চ্যাটেই পাঠাবে)\n"
+            "📌 -m = topic name\n"
+            "📌 -t = group topic/thread id (শুধু -c এ group id দিলে)\n"
+            "📌 [N] = প্রতি পেইজে কতগুলো MCQ (ঐচ্ছিক)",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    allowed, usage, limit, is_perm = check_access(user_id)
+    if not allowed:
+        if is_perm:
+            await msg.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
+        else:
+            await msg.reply_text(PREMIUM_MSG)
+        return
+
+    text = msg.text or ""
+    params = _parse_tf_params(text)
+    topic = params["topic"] or "✅ সত্য-মিথ্যার প্রশ্ন"
+    target_chat_id = params["channel_id"] or msg.chat_id
+    thread_id = params["thread_id"]
+    per_page_count = params["mcq_count"]
+
+    document = reply.document
+    if document.file_size and document.file_size > TELEGRAM_MAX_FILE_SIZE:
+        await msg.reply_text("❌ PDF সাইজ 20MB-এর বেশি — ডাউনলোড সম্ভব না।")
+        return
+
+    status = await msg.reply_text("⏳ PDF ডাউনলোড হচ্ছে...")
+    try:
+        file = await context.bot.get_file(document.file_id)
+        pdf_bytes = bytes(await file.download_as_bytearray())
+    except Exception as e:
+        log_error(f"/tf PDF download error: {e}")
+        await status.edit_text("❌ PDF ডাউনলোড করতে সমস্যা হয়েছে।")
+        return
+
+    try:
+        from pdf2image import convert_from_bytes
+        all_page_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+    except Exception as e:
+        log_error(f"/tf PDF render error: {e}")
+        await status.edit_text(f"❌ PDF থেকে page বানাতে সমস্যা হয়েছে: {e}")
+        return
+
+    total_pages = len(all_page_images)
+    if total_pages == 0:
+        await status.edit_text("❌ PDF-এ কোনো page পাওয়া যায়নি।")
+        return
+
+    page_numbers = _expand_page_range(params["page_range"], total_pages)
+    if not page_numbers:
+        await status.edit_text("❌ দেওয়া page range অনুযায়ী কোনো valid page পাওয়া যায়নি।")
+        return
+
+    await status.edit_text(f"✅ {total_pages} page-এর PDF। {len(page_numbers)} page প্রসেস হবে...\n🎯 Topic: {topic}")
+
+    ok_count = 0
+    fail_count = 0
+    for idx, page_no in enumerate(page_numbers, 1):
+        try:
+            await status.edit_text(f"⏳ Page {page_no} প্রসেসিং... ({idx}/{len(page_numbers)})")
+        except Exception:
+            pass
+        try:
+            img_buf = BytesIO()
+            all_page_images[page_no - 1].convert("RGB").save(img_buf, format="JPEG", quality=90)
+            image_bytes = img_buf.getvalue()
+
+            mcqs, error = await generate_mcq_from_image(image_bytes, 'prompt_2')
+            if error or not mcqs:
+                fail_count += 1
+                log_error(f"/tf page {page_no} failed: {error}")
+                continue
+
+            if per_page_count and per_page_count > 0:
+                mcqs = mcqs[:per_page_count]
+
+            mcqs = apply_tag_exp(clean_mcq_options(mcqs))
+            src_hash = hashlib.md5(image_bytes).hexdigest() + "_prompt_2"
+            quiz_id = await save_mcq(user_id=user_id, mcqs=mcqs, source_type='tf_pdf',
+                                      prompt_type='prompt_2', chat_id=target_chat_id,
+                                      message_id=None, source_hash=src_hash)
+            increment_usage(user_id)
+
+            caption = (f"✅ {topic}\n"
+                       f"📌 Page: {page_no}\n"
+                       f"📝 মোট MCQ: {len(mcqs)}")
+            keyboard = mcq_set_keyboard(quiz_id, user_id)
+            send_kwargs = {"chat_id": target_chat_id, "photo": image_bytes,
+                            "caption": caption, "reply_markup": InlineKeyboardMarkup(keyboard)}
+            if thread_id:
+                send_kwargs["message_thread_id"] = thread_id
+            try:
+                await context.bot.send_photo(**send_kwargs)
+            except BadRequest as bre:
+                if thread_id and "thread" in str(bre).lower():
+                    send_kwargs.pop("message_thread_id", None)
+                    await context.bot.send_photo(**send_kwargs)
+                else:
+                    raise
+            ok_count += 1
+        except Exception as e:
+            fail_count += 1
+            log_error(f"/tf page {page_no} error: {e}")
+
+    try:
+        await status.edit_text(
+            f"🏁 সম্পন্ন! ✅ {ok_count} page সফল"
+            + (f", ❌ {fail_count} page ব্যর্থ" if fail_count else "")
+        )
+    except Exception:
+        pass
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     user_id = user['user_id']
@@ -6411,6 +6595,7 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("random", cmd_random))
     application.add_handler(CommandHandler("class", cmd_class))
     application.add_handler(CommandHandler("pdfc", cmd_pdfc))
+    application.add_handler(CommandHandler("tf", cmd_tf))
     application.add_handler(CommandHandler("done", cmd_pdfc_done))
     application.add_handler(CommandHandler("cancel", cmd_pdfc_cancel))
     application.add_handler(CommandHandler("atlas", cmd_atlas))
