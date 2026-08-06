@@ -3320,13 +3320,39 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await status.edit_text(f"✅ {total_pages} page-এর PDF। {len(page_numbers)} page প্রসেস হবে...\n🎯 Topic: {topic}")
 
     from pdf2image import convert_from_bytes
+    import time as _time
 
     ok_count = 0
     fail_count = 0
-    all_mcqs_for_csv = []  # v4.1: collect every page's MCQs to build one final CSV
+    all_mcqs_for_csv = []  # collect every page's MCQs to build one final CSV
+    page_stats = []  # (page_no, mcq_count_or_None, seconds_taken) — live dashboard rows
+    overall_start = _time.monotonic()
+
+    def _fmt_secs(s: float) -> str:
+        return f"{s:.1f}s" if s < 60 else f"{int(s // 60)}m {s % 60:.0f}s"
+
+    def _build_dashboard() -> str:
+        elapsed = _time.monotonic() - overall_start
+        lines = [f"⏳ Processing... ({len(page_stats)}/{len(page_numbers)} page)",
+                  f"⏱️ Elapsed: {_fmt_secs(elapsed)}", "",
+                  "📄 Page | MCQ | Time"]
+        for p_no, m_count, secs in page_stats[-15:]:  # keep message short — last 15 rows
+            status_icon = "✅" if m_count is not None else "❌"
+            mcq_str = str(m_count) if m_count is not None else "fail"
+            lines.append(f"{status_icon} {p_no} | {mcq_str} | {_fmt_secs(secs)}")
+        if len(page_stats) > 15:
+            lines.insert(3, f"... ({len(page_stats) - 15} আগের row লুকানো)")
+        return "\n".join(lines)
+
+    _last_update = [0.0]
+
     for idx, page_no in enumerate(page_numbers, 1):
+        page_start = _time.monotonic()
         try:
-            await status.edit_text(f"⏳ Page {page_no} প্রসেসিং... ({idx}/{len(page_numbers)})")
+            now = _time.monotonic()
+            if now - _last_update[0] >= 1.2 or idx == 1:
+                await status.edit_text(_build_dashboard())
+                _last_update[0] = now
         except Exception:
             pass
         try:
@@ -3339,6 +3365,7 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             if not rendered:
                 fail_count += 1
+                page_stats.append((page_no, None, _time.monotonic() - page_start))
                 log_error(f"/tf page {page_no} render returned empty")
                 continue
             page_img = rendered[0]
@@ -3351,6 +3378,7 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             mcqs, error = await generate_mcq_from_image(image_bytes, 'prompt_2')
             if error or not mcqs:
                 fail_count += 1
+                page_stats.append((page_no, None, _time.monotonic() - page_start))
                 log_error(f"/tf page {page_no} failed: {error}")
                 continue
 
@@ -3358,38 +3386,22 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 mcqs = mcqs[:per_page_count]
 
             mcqs = apply_tag_exp(clean_mcq_options(mcqs))
-            all_mcqs_for_csv.extend(mcqs)  # v4.1: accumulate for final CSV export
-            src_hash = hashlib.md5(image_bytes).hexdigest() + "_prompt_2"
-            quiz_id = await save_mcq(user_id=user_id, mcqs=mcqs, source_type='tf_pdf',
-                                      prompt_type='prompt_2', chat_id=target_chat_id,
-                                      message_id=None, source_hash=src_hash)
+            all_mcqs_for_csv.extend(mcqs)
             increment_usage(user_id)
-
-            caption = (f"✅ {topic}\n"
-                       f"📌 Page: {page_no}\n"
-                       f"📝 মোট MCQ: {len(mcqs)}")
-            keyboard = mcq_set_keyboard(quiz_id, user_id)
-            send_kwargs = {"chat_id": target_chat_id, "photo": image_bytes,
-                            "caption": caption, "reply_markup": InlineKeyboardMarkup(keyboard)}
-            if thread_id:
-                send_kwargs["message_thread_id"] = thread_id
-            try:
-                await context.bot.send_photo(**send_kwargs)
-            except BadRequest as bre:
-                if thread_id and "thread" in str(bre).lower():
-                    send_kwargs.pop("message_thread_id", None)
-                    await context.bot.send_photo(**send_kwargs)
-                else:
-                    raise
             ok_count += 1
+            page_stats.append((page_no, len(mcqs), _time.monotonic() - page_start))
         except Exception as e:
             fail_count += 1
+            page_stats.append((page_no, None, _time.monotonic() - page_start))
             log_error(f"/tf page {page_no} error: {e}")
 
+    total_elapsed = _time.monotonic() - overall_start
     try:
         await status.edit_text(
             f"🏁 সম্পন্ন! ✅ {ok_count} page সফল"
             + (f", ❌ {fail_count} page ব্যর্থ" if fail_count else "")
+            + f"\n⏱️ মোট সময়: {_fmt_secs(total_elapsed)}"
+            + f"\n📝 মোট MCQ: {len(all_mcqs_for_csv)}"
         )
     except Exception:
         pass
