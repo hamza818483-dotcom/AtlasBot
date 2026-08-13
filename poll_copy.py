@@ -455,8 +455,17 @@ async def handle_dm_poll_links(update: "Update", context: "ContextTypes.DEFAULT_
         return False
     from bot import is_admin, is_permitted, get_user_info
     user = get_user_info(update)
-    admin = is_admin(user['user_id'])
-    permitted = is_permitted(user['user_id'])
+    try:
+        admin = is_admin(user['user_id'])
+    except Exception as e:
+        logger.error(f"[pollcopy] is_admin check failed for {user['user_id']}: {e}")
+        admin = False
+    try:
+        permitted = is_permitted(user['user_id'])
+    except Exception as e:
+        logger.error(f"[pollcopy] is_permitted check failed for {user['user_id']}: {e}")
+        permitted = False
+    logger.info(f"[pollcopy] DM link-check uid={user['user_id']} admin={admin} permitted={permitted}")
     if not (admin or permitted):
         return False
     text = (update.message.text or "").strip()
