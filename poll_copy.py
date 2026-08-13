@@ -35,6 +35,12 @@ API_ID      = int(os.environ.get("API_ID", "33312774"))
 API_HASH    = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
 SESSION_STR = os.environ.get("SESSION_STRING", "")
 print(f"[pollcopy] SESSION_STRING loaded: len={len(SESSION_STR)}", flush=True)
+_PROCESS_START_TIME = time.time()
+
+# একই SESSION_STRING দিয়ে একইসাথে একাধিক Telethon client connect করলে
+# Telegram auth conflict (AuthKeyDuplicated/disconnect) হয় — তাই globally
+# একবারে একটাই pollcopy job চলবে, বাকিরা queue-তে wait করবে।
+_POLLCOPY_LOCK = asyncio.Lock()
 
 
 
@@ -424,9 +430,12 @@ async def run_poll_copy(update, context, links: list, mode: str):
     total = end_id - start_id + 1
 
     if not SESSION_STR:
+        import time as _t
+        _boot_age = _t.time() - _PROCESS_START_TIME
         await update.message.reply_text(
-            "⚠️ SESSION_STRING env var সেট নেই বা খালি।\n"
-            "🔧 Render → Environment → SESSION_STRING চেক করো।"
+            f"⚠️ SESSION_STRING env var সেট নেই বা খালি (len={len(SESSION_STR)})।\n"
+            f"🕐 এই process {_boot_age:.0f}s আগে শুরু হয়েছে (restart হয়েছে কিনা বোঝার জন্য)।\n"
+            f"🔧 Render → Environment → SESSION_STRING চেক করো।"
         )
         return
 
@@ -463,11 +472,15 @@ async def run_poll_copy(update, context, links: list, mode: str):
             except Exception:
                 pass
 
-    try:
-        mcqs = await extract_polls_telethon(ch1, start_id, end_id, topic_id=topic_id, progress_cb=progress)
-    except Exception as e:
-        import traceback
-        err_type = type(e).__name__
+    if _POLLCOPY_LOCK.locked():
+        await update.message.reply_text("⏳ আরেকটা extraction চলছে — queue এ আছো, শেষ হলেই তোমারটা শুরু হবে।")
+
+    async with _POLLCOPY_LOCK:
+        try:
+            mcqs = await extract_polls_telethon(ch1, start_id, end_id, topic_id=topic_id, progress_cb=progress)
+        except Exception as e:
+            import traceback
+            err_type = type(e).__name__
         logger.error(f"[pollcopy] Telethon error: {err_type}: {e}\n{traceback.format_exc()}")
         await status.edit_text(
             f"⚠️ Error: {err_type}\n"
