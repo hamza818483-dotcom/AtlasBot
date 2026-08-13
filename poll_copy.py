@@ -405,10 +405,10 @@ async def run_poll_copy(update, context, links: list, mode: str):
     ch2, end_id, topic2 = parse_tg_link(links[1])
 
     if not ch1 or not start_id or not end_id:
-        await update.message.reply_text("❌ Link parse হয়নি। সঠিক Telegram link দাও।")
+        await update.message.reply_text("❌ Link parse হয়নি। সঠিক Telegram link দাও।\n🔁 আবার সঠিক link দুটো পাঠিয়ে চেষ্টা করো।")
         return
     if ch1 != ch2:
-        await update.message.reply_text("❌ দুটো link একই channel/group এর হতে হবে!")
+        await update.message.reply_text("❌ দুটো link একই channel/group এর হতে হবে!\n🔁 আবার link দুটো ঠিক করে পাঠাও।")
         return
 
     topic_id = topic1 or topic2
@@ -418,7 +418,7 @@ async def run_poll_copy(update, context, links: list, mode: str):
     total = end_id - start_id + 1
 
     if not SESSION_STR:
-        await update.message.reply_text("❌ SESSION_STRING সেট করা নেই। Environment secrets এ add করো।")
+        await update.message.reply_text("⚠️ সাময়িক সমস্যা হয়েছে (session)।\n🔁 কিছুক্ষণ পর আবার link দুটো পাঠিয়ে চেষ্টা করো।")
         return
 
     def _progress_bar(pct: int, width: int = 10) -> str:
@@ -458,11 +458,11 @@ async def run_poll_copy(update, context, links: list, mode: str):
         mcqs = await extract_polls_telethon(ch1, start_id, end_id, topic_id=topic_id, progress_cb=progress)
     except Exception as e:
         logger.error(f"[pollcopy] Telethon error: {e}")
-        await status.edit_text(f"❌ Error: {e}")
+        await status.edit_text(f"⚠️ সাময়িক সমস্যা হয়েছে।\n🔁 আবার link দুটো পাঠিয়ে চেষ্টা করো।")
         return
 
     if not mcqs:
-        msg = f"{_progress_bar(100)}  100%\n😕 কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)"
+        msg = f"{_progress_bar(100)}  100%\n😕 কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)\n🔁 সঠিক range দিয়ে আবার link পাঠাও।"
         await status.edit_text(msg)
         return
 
@@ -476,7 +476,7 @@ async def run_poll_copy(update, context, links: list, mode: str):
             await _send_polls_direct(update.effective_chat.id, context, mcqs, back_link=links[1])
         except Exception as e:
             logger.error(f"[pollcopy] _send_polls_direct crashed: {e}")
-            await update.message.reply_text(f"❌ Poll পাঠাতে সমস্যা হয়েছে: {e}")
+            await update.message.reply_text(f"⚠️ Poll পাঠাতে সমস্যা হয়েছে।\n🔁 আবার link দুটো পাঠিয়ে চেষ্টা করো।")
         return
 
     # Admin: CSV + inline "Poll Practice" button.
