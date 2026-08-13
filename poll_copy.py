@@ -313,14 +313,16 @@ def _pcpoll_cache_put(mcqs: list) -> str:
     return key
 
 
-async def _send_polls_direct(chat_id: int, context, mcqs: list) -> int:
+async def _send_polls_direct(chat_id: int, context, mcqs: list, back_link: str = None) -> int:
     """Sends each mcq as a fresh live quiz poll, no pre-message, no
-    countdown, no extra text -- just the polls, one after another."""
-    from telegram import Poll
+    countdown, no extra text -- just the polls, one after another.
+    If back_link is given, a single inline button is attached to the
+    LAST poll only, so it doesn't clutter every message."""
+    from telegram import Poll, InlineKeyboardMarkup, InlineKeyboardButton
     from telegram.error import TelegramError, RetryAfter
     sent = 0
     failed = 0
-    for mcq in mcqs:
+    for idx, mcq in enumerate(mcqs):
         options = mcq["options"]
         correct_id = mcq["correct_idx"]
         if correct_id >= len(options) or correct_id < 0:
@@ -335,6 +337,7 @@ async def _send_polls_direct(chat_id: int, context, mcqs: list) -> int:
         explanation = mcq["explanation"] or None
         if explanation:
             explanation = explanation[:200]
+        is_last = (idx == len(mcqs) - 1)
         try:
             await context.bot.send_poll(
                 chat_id=chat_id,
@@ -370,6 +373,12 @@ async def _send_polls_direct(chat_id: int, context, mcqs: list) -> int:
             )
         except Exception:
             pass
+    if back_link:
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("পোলের গ্রুপে ফিরতে ক্লিক করুন", url=back_link)]])
+            await context.bot.send_message(chat_id=chat_id, text="\u2063", reply_markup=kb)
+        except Exception as e:
+            logger.warning(f"[pollcopy] back-link button failed: {e}")
     return sent
 
 
@@ -464,7 +473,7 @@ async def run_poll_copy(update, context, links: list, mode: str):
                 f"{_progress_bar(100)}  100%\n"
                 f"✅ {len(mcqs)}টি poll পাওয়া গেছে — পাঠানো হচ্ছে..."
             )
-            await _send_polls_direct(update.effective_chat.id, context, mcqs)
+            await _send_polls_direct(update.effective_chat.id, context, mcqs, back_link=links[1])
         except Exception as e:
             logger.error(f"[pollcopy] _send_polls_direct crashed: {e}")
             await update.message.reply_text(f"❌ Poll পাঠাতে সমস্যা হয়েছে: {e}")
