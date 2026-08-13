@@ -445,13 +445,19 @@ async def _run_poll_copy_inner(update, context, links: list, mode: str):
 
     if not SESSION_STR:
         import time as _t
+        import socket
         _boot_age = _t.time() - _PROCESS_START_TIME
         _session_like = [k for k in os.environ.keys() if "SESSION" in k.upper()]
+        _hostname = socket.gethostname()
+        _pid = os.getpid()
+        _all_keys = sorted(os.environ.keys())
         await update.message.reply_text(
             f"⚠️ SESSION_STRING env var সেট নেই বা খালি (len={len(SESSION_STR)})।\n"
             f"🕐 এই process {_boot_age:.0f}s আগে শুরু হয়েছে।\n"
+            f"🖥️ Host: {_hostname} | PID: {_pid}\n"
             f"🔍 'SESSION' word থাকা env var keys: {_session_like if _session_like else 'কোনোটাই নাই'}\n"
-            f"🔧 Render → Environment → SESSION_STRING চেক করো।"
+            f"📋 মোট env var সংখ্যা: {len(_all_keys)}\n"
+            f"📋 সব keys: {', '.join(_all_keys)}"
         )
         return
 
