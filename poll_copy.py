@@ -25,6 +25,8 @@ from telegram.error import TelegramError, RetryAfter
 
 logger = logging.getLogger("atlas.poll_copy")
 
+
+
 API_ID      = int(os.environ.get("API_ID", "33312774"))
 API_HASH    = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
 SESSION_STR = os.environ.get("SESSION_STRING", "")
@@ -267,42 +269,11 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, topic_id=N
     return polls
 
 
-async def handle_pollcopy_command(update, context):
-    """
-    /pollcopy
-    https://t.me/c/.../101
-    https://t.me/c/.../250
-
-    Extracts every quiz poll in that range (topic-filtered if a topic link
-    is given) and reposts each as a BRAND NEW live quiz poll in this chat --
-    users can solve them fresh, independent of the original polls' state.
-    """
-    from bot import is_admin, get_user_info  # local import avoids circular import at module load
-
+async def run_poll_copy(update, context, links: list):
+    """Core logic shared by /pollcopy command and the DM-2-links shortcut.
+    links must be exactly 2 t.me URLs (order doesn't matter, smaller msg_id
+    is treated as range start automatically)."""
     chat_id = update.effective_chat.id
-    user = get_user_info(update)
-    if not is_admin(user['user_id']):
-        await update.message.reply_text("❌ এই কমান্ড শুধু admin ব্যবহার করতে পারবে।")
-        return
-
-    text = update.message.text or ""
-    body = re.sub(r"^/pollcopy\s*", "", text, flags=re.IGNORECASE).strip()
-    lines = [l.strip() for l in body.splitlines() if l.strip()]
-    links = [l for l in lines if "t.me/" in l]
-
-    if len(links) < 2:
-        await update.message.reply_text(
-            "❌ দুটো link দাও!\n\n"
-            "📌 Format:\n"
-            "/pollcopy\n"
-            "https://t.me/c/.../101\n"
-            "https://t.me/c/.../250\n\n"
-            "• প্রথম link = range start\n"
-            "• দ্বিতীয় link = range end\n"
-            "• Poll গুলো নতুন করে এই চ্যাটে পাঠানো হবে, user আবার solve করতে পারবে।"
-        )
-        return
-
     ch1, start_id, topic1 = parse_tg_link(links[0])
     ch2, end_id, topic2 = parse_tg_link(links[1])
 
@@ -378,3 +349,65 @@ async def handle_pollcopy_command(update, context):
         await asyncio.sleep(POLL_REPOST_DELAY)
 
     await update.message.reply_text(f"✅ সম্পন্ন! {sent}/{len(mcqs)}টি poll নতুন করে পাঠানো হয়েছে।")
+
+
+async def handle_dm_poll_links(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> bool:
+    """DM-only: if the admin sends exactly 2 t.me links (no command, any
+    order, newline/space separated) it's treated as a poll-copy request --
+    extract quiz polls in that range and repost them as brand-new live
+    polls the admin can immediately re-solve. Returns True if handled (so
+    the caller can stop the handler chain), False otherwise so normal text
+    flows continue untouched."""
+    if update.effective_chat.type != "private":
+        return False
+    from bot import is_admin, get_user_info
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        return False
+    text = (update.message.text or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    links = [l.strip() for l in re.split(r'[\s\n]+', text) if "t.me/" in l]
+    if len(links) != 2:
+        return False
+    await run_poll_copy(update, context, links)
+    return True
+
+
+async def handle_pollcopy_command(update, context):
+    """
+    /pollcopy
+    https://t.me/c/.../101
+    https://t.me/c/.../250
+
+    Extracts every quiz poll in that range (topic-filtered if a topic link
+    is given) and reposts each as a BRAND NEW live quiz poll in this chat --
+    users can solve them fresh, independent of the original polls' state.
+    Kept as a fallback entry point alongside the DM-2-links shortcut.
+    """
+    from bot import is_admin, get_user_info  # local import avoids circular import at module load
+
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু admin ব্যবহার করতে পারবে।")
+        return
+
+    text = update.message.text or ""
+    body = re.sub(r"^/pollcopy\s*", "", text, flags=re.IGNORECASE).strip()
+    lines = [l.strip() for l in body.splitlines() if l.strip()]
+    links = [l for l in lines if "t.me/" in l]
+
+    if len(links) < 2:
+        await update.message.reply_text(
+            "❌ দুটো link দাও!\n\n"
+            "📌 Format:\n"
+            "/pollcopy\n"
+            "https://t.me/c/.../101\n"
+            "https://t.me/c/.../250\n\n"
+            "• প্রথম link = range start\n"
+            "• দ্বিতীয় link = range end\n"
+            "• Poll গুলো নতুন করে এই চ্যাটে পাঠানো হবে, user আবার solve করতে পারবে।"
+        )
+        return
+
+    await run_poll_copy(update, context, links[:2])

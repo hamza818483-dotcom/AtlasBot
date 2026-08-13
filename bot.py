@@ -6674,8 +6674,6 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("random", cmd_random))
     application.add_handler(CommandHandler("class", cmd_class))
     application.add_handler(CommandHandler("pdfc", cmd_pdfc))
-    from poll_copy import handle_pollcopy_command
-    application.add_handler(CommandHandler("pollcopy", handle_pollcopy_command))
     application.add_handler(CommandHandler("tf", cmd_tf))
     application.add_handler(CommandHandler("done", cmd_pdfc_done))
     application.add_handler(CommandHandler("cancel", cmd_pdfc_cancel))
@@ -6692,6 +6690,12 @@ async def register_handlers() -> None:
             await handle_menu_pending(update, context)
 
     application.add_handler(MessageHandler(filters.Document.FileExtension("csv"), _menu_csv_router))
+    async def _dm_poll_links_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        from poll_copy import handle_dm_poll_links
+        handled = await handle_dm_poll_links(update, context)
+        if handled:
+            raise ApplicationHandlerStop
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _dm_poll_links_router), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pending_input), group=0)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt_edit_text), group=1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text), group=2)
