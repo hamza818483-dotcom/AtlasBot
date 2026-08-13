@@ -4126,6 +4126,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await handle_creative_pdf(query, data.replace("crpdf_c_", ""), "comprehension")
         elif data.startswith("poll_"):
             await handle_poll_solve(query, data.replace("poll_", ""), user)
+        elif data.startswith("pcpoll_"):
+            from poll_copy import handle_pcpoll_button
+            await handle_pcpoll_button(query, data.replace("pcpoll_", ""), context)
         elif data.startswith("quiz_"):
             await handle_quiz_start(query, data.replace("quiz_", ""), user, chat_id)
         elif data.startswith("startquiz_"):

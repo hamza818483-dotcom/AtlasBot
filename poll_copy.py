@@ -2,10 +2,13 @@
 # ATLAS BOT — Poll Copy (poll_copy.py)
 # DM te just 2 ta t.me link dile (admin/permitted user):
 # Telethon দিয়ে source channel/group (thread/topic সহ) থেকে
-# first_link → second_link range এর সব quiz poll extract করে,
-# তারপর QuizBot-এর মতো শুধু একটা CSV file পাঠায় (কোনো live poll
-# repost করে না)। Real correct answer bot নিজে vote দিয়ে
-# Telegram থেকে confirm করে বের করে (guaranteed, retry সহ)।
+# first_link → second_link range এর সব quiz poll extract করে।
+#   - Admin       → CSV file + "📊 Poll Practice" button (tap
+#                    korle direct poll ashe, kono extra text na)
+#   - Permitted   → shorashori poll pathay, kono CSV/button/
+#                    extra step chara
+# Real correct answer bot নিজে vote দিয়ে Telegram থেকে confirm
+# করে বের করে (guaranteed, retry সহ)।
 #
 # Extraction logic (parse_tg_link, extract_polls_telethon,
 # rate limiter, CSV builder) QuizBot repo-র poll_extract.py
@@ -21,6 +24,8 @@ import asyncio
 import logging
 import time
 from io import StringIO, BytesIO
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger("atlas.poll_copy")
 
@@ -289,8 +294,82 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, topic_id=N
     return polls
 
 
-async def run_poll_copy(update, context, links: list):
-    """Core logic shared by /pollcopy command and the DM-2-links shortcut.
+# In-memory cache: pcpoll_<id> -> list of mcq dicts, so the admin's "📊 Poll
+# Practice" button can send polls without re-extracting/re-voting. Cleared
+# entries older than 1h are dropped lazily on each new insert to avoid
+# unbounded growth if a button never gets clicked.
+_pcpoll_cache: dict = {}
+_PCPOLL_CACHE_TTL = 3600
+
+
+def _pcpoll_cache_put(mcqs: list) -> str:
+    now = time.monotonic()
+    # lazy cleanup
+    for k in [k for k, (_, ts) in _pcpoll_cache.items() if now - ts > _PCPOLL_CACHE_TTL]:
+        _pcpoll_cache.pop(k, None)
+    import uuid as _uuid
+    key = _uuid.uuid4().hex[:12]
+    _pcpoll_cache[key] = (mcqs, now)
+    return key
+
+
+async def _send_polls_direct(chat_id: int, context, mcqs: list) -> int:
+    """Sends each mcq as a fresh live quiz poll, no pre-message, no
+    countdown, no extra text -- just the polls, one after another."""
+    from telegram import Poll
+    from telegram.error import TelegramError, RetryAfter
+    sent = 0
+    for mcq in mcqs:
+        options = mcq["options"]
+        correct_id = mcq["correct_idx"]
+        if correct_id >= len(options) or correct_id < 0:
+            correct_id = 0
+        opts = options if len(options) >= 2 else options + ["N/A"]
+        try:
+            await context.bot.send_poll(
+                chat_id=chat_id,
+                question=mcq["question"] or "প্রশ্ন",
+                options=opts,
+                type=Poll.QUIZ,
+                correct_option_id=correct_id,
+                explanation=mcq["explanation"] or None,
+                is_anonymous=True,
+            )
+            sent += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await context.bot.send_poll(
+                    chat_id=chat_id, question=mcq["question"] or "প্রশ্ন",
+                    options=opts, type=Poll.QUIZ, correct_option_id=correct_id,
+                    explanation=mcq["explanation"] or None, is_anonymous=True,
+                )
+                sent += 1
+            except Exception as e2:
+                logger.warning(f"[pollcopy] retry-after send failed: {e2}")
+        except TelegramError as e:
+            logger.warning(f"[pollcopy] send_poll failed: {e}")
+        await asyncio.sleep(0.6)
+    return sent
+
+
+async def handle_pcpoll_button(query, cache_key: str, context):
+    """Admin tapped the '📊 Poll Practice' button under the CSV -- send the
+    already-extracted polls directly into this chat. No extra text before
+    them; a single line after confirms completion."""
+    entry = _pcpoll_cache.get(cache_key)
+    if not entry:
+        await query.message.reply_text("❌ এই poll set আর available নেই (মেয়াদ শেষ)। আবার link পাঠাও।")
+        return
+    mcqs, _ = entry
+    chat_id = query.message.chat_id
+    await _send_polls_direct(chat_id, context, mcqs)
+
+
+async def run_poll_copy(update, context, links: list, mode: str):
+    """Core extraction logic shared by both paths. mode='csv' (admin: CSV
+    file + 'Poll Practice' button) or mode='poll' (permitted user: polls
+    sent directly, no CSV, no extra messages/steps).
     links must be exactly 2 t.me URLs (order doesn't matter, smaller msg_id
     is treated as range start automatically)."""
     ch1, start_id, topic1 = parse_tg_link(links[0])
@@ -313,48 +392,72 @@ async def run_poll_copy(update, context, links: list):
         await update.message.reply_text("❌ SESSION_STRING সেট করা নেই। Environment secrets এ add করো।")
         return
 
-    status = await update.message.reply_text(f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...")
+    if mode == "csv":
+        status = await update.message.reply_text(f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...")
 
-    async def progress(checked, found, elapsed):
-        try:
-            await status.edit_text(f"⏳ চেক: {checked}/{total} — Poll পেয়েছি: {found}")
-        except Exception:
-            pass
+        async def progress(checked, found, elapsed):
+            try:
+                await status.edit_text(f"⏳ চেক: {checked}/{total} — Poll পেয়েছি: {found}")
+            except Exception:
+                pass
+    else:
+        status = None
+        progress = None
 
     try:
         mcqs = await extract_polls_telethon(ch1, start_id, end_id, topic_id=topic_id, progress_cb=progress)
     except Exception as e:
         logger.error(f"[pollcopy] Telethon error: {e}")
-        await status.edit_text(f"❌ Error: {e}")
+        if status:
+            await status.edit_text(f"❌ Error: {e}")
+        else:
+            await update.message.reply_text(f"❌ Error: {e}")
         return
 
     if not mcqs:
-        await status.edit_text(f"😕 এই range এ কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)")
+        msg = f"😕 এই range এ কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)"
+        if status:
+            await status.edit_text(msg)
+        else:
+            await update.message.reply_text(msg)
         return
 
-    await status.edit_text(f"✅ {len(mcqs)}টি poll পাওয়া গেছে। CSV তৈরি হচ্ছে...")
+    if mode == "poll":
+        # Permitted user: no extra text, no button -- polls straight away.
+        await _send_polls_direct(update.effective_chat.id, context, mcqs)
+        return
 
+    # Admin: CSV + inline "Poll Practice" button.
+    await status.edit_text(f"✅ {len(mcqs)}টি poll পাওয়া গেছে। CSV তৈরি হচ্ছে...")
     csv_bytes = build_csv(mcqs)
     filename = f"polls_{start_id}_{end_id}.csv"
+    cache_key = _pcpoll_cache_put(mcqs)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Poll Practice", callback_data=f"pcpoll_{cache_key}")]])
     await update.message.reply_document(
         document=BytesIO(csv_bytes),
         filename=filename,
-        caption=f"✅ {len(mcqs)}টি poll extract হয়েছে (CSV)।"
+        caption=f"✅ {len(mcqs)}টি poll extract হয়েছে (CSV)।",
+        reply_markup=kb,
     )
 
 
 async def handle_dm_poll_links(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> bool:
     """DM-only: if an admin OR permitted user sends exactly 2 t.me links (no
     command, any order, newline/space separated) it's treated as a
-    poll-copy request -- extract quiz polls in that range and send back a
-    CSV file (QuizBot-style), no live poll reposting. Returns True if
-    handled (so the caller can stop the handler chain), False otherwise so
-    normal text flows continue untouched."""
+    poll-copy request.
+    - Admin  -> CSV file + a '📊 Poll Practice' inline button (tap to send
+      the polls directly, no extra text).
+    - Permitted user (non-admin) -> polls are sent directly right away, no
+      CSV, no button, no extra questions/steps.
+    Returns True if handled (so the caller can stop the handler chain),
+    False otherwise so normal text flows continue untouched."""
     if update.effective_chat.type != "private":
         return False
     from bot import is_admin, is_permitted, get_user_info
     user = get_user_info(update)
-    if not (is_admin(user['user_id']) or is_permitted(user['user_id'])):
+    admin = is_admin(user['user_id'])
+    permitted = is_permitted(user['user_id'])
+    if not (admin or permitted):
         return False
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
@@ -362,7 +465,8 @@ async def handle_dm_poll_links(update: "Update", context: "ContextTypes.DEFAULT_
     links = [l.strip() for l in re.split(r'[\s\n]+', text) if "t.me/" in l]
     if len(links) != 2:
         return False
-    await run_poll_copy(update, context, links)
+    mode = "csv" if admin else "poll"
+    await run_poll_copy(update, context, links, mode=mode)
     return True
 
 
@@ -380,7 +484,9 @@ async def handle_pollcopy_command(update, context):
     from bot import is_admin, is_permitted, get_user_info  # local import avoids circular import at module load
 
     user = get_user_info(update)
-    if not (is_admin(user['user_id']) or is_permitted(user['user_id'])):
+    admin = is_admin(user['user_id'])
+    permitted = is_permitted(user['user_id'])
+    if not (admin or permitted):
         await update.message.reply_text("❌ এই কমান্ড শুধু admin/permitted user ব্যবহার করতে পারবে।")
         return
 
@@ -395,11 +501,9 @@ async def handle_pollcopy_command(update, context):
             "📌 Format:\n"
             "/pollcopy\n"
             "https://t.me/c/.../101\n"
-            "https://t.me/c/.../250\n\n"
-            "• প্রথম link = range start\n"
-            "• দ্বিতীয় link = range end\n"
-            "• সব poll একটা CSV file হিসেবে পাঠানো হবে।"
+            "https://t.me/c/.../250"
         )
         return
 
-    await run_poll_copy(update, context, links[:2])
+    mode = "csv" if admin else "poll"
+    await run_poll_copy(update, context, links[:2], mode=mode)
