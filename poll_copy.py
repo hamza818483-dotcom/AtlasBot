@@ -319,20 +319,30 @@ async def _send_polls_direct(chat_id: int, context, mcqs: list) -> int:
     from telegram import Poll
     from telegram.error import TelegramError, RetryAfter
     sent = 0
+    failed = 0
     for mcq in mcqs:
         options = mcq["options"]
         correct_id = mcq["correct_idx"]
         if correct_id >= len(options) or correct_id < 0:
             correct_id = 0
         opts = options if len(options) >= 2 else options + ["N/A"]
+        # Telegram hard limits: question <=300 chars, each option <=100 chars,
+        # explanation <=200 chars. Violating these makes send_poll raise
+        # BadRequest, which was previously only logged and silently dropped
+        # the poll with no trace to the user. Truncate defensively instead.
+        question = (mcq["question"] or "প্রশ্ন")[:300]
+        opts = [o[:100] for o in opts][:10]
+        explanation = mcq["explanation"] or None
+        if explanation:
+            explanation = explanation[:200]
         try:
             await context.bot.send_poll(
                 chat_id=chat_id,
-                question=mcq["question"] or "প্রশ্ন",
+                question=question,
                 options=opts,
                 type=Poll.QUIZ,
                 correct_option_id=correct_id,
-                explanation=mcq["explanation"] or None,
+                explanation=explanation,
                 is_anonymous=True,
             )
             sent += 1
@@ -340,16 +350,26 @@ async def _send_polls_direct(chat_id: int, context, mcqs: list) -> int:
             await asyncio.sleep(e.retry_after + 1)
             try:
                 await context.bot.send_poll(
-                    chat_id=chat_id, question=mcq["question"] or "প্রশ্ন",
+                    chat_id=chat_id, question=question,
                     options=opts, type=Poll.QUIZ, correct_option_id=correct_id,
-                    explanation=mcq["explanation"] or None, is_anonymous=True,
+                    explanation=explanation, is_anonymous=True,
                 )
                 sent += 1
             except Exception as e2:
-                logger.warning(f"[pollcopy] retry-after send failed: {e2}")
+                failed += 1
+                logger.error(f"[pollcopy] retry-after send failed: {e2}")
         except TelegramError as e:
-            logger.warning(f"[pollcopy] send_poll failed: {e}")
+            failed += 1
+            logger.error(f"[pollcopy] send_poll failed (q='{question[:50]}...'): {e}")
         await asyncio.sleep(0.6)
+    if failed:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ {sent}টি poll পাঠানো হয়েছে, {failed}টি পাঠাতে ব্যর্থ হয়েছে।"
+            )
+        except Exception:
+            pass
     return sent
 
 
