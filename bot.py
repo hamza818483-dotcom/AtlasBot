@@ -6695,7 +6695,13 @@ async def register_handlers() -> None:
     application.add_handler(MessageHandler(filters.Document.FileExtension("csv"), _menu_csv_router))
     async def _dm_poll_links_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         from poll_copy import handle_dm_poll_links
-        handled = await handle_dm_poll_links(update, context)
+        try:
+            handled = await handle_dm_poll_links(update, context)
+        except ApplicationHandlerStop:
+            raise
+        except Exception as e:
+            log_error(f"[pollcopy] router crashed: {e}")
+            handled = False
         if handled:
             raise ApplicationHandlerStop
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _dm_poll_links_router), group=-1)

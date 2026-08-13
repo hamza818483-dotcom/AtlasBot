@@ -444,7 +444,11 @@ async def run_poll_copy(update, context, links: list, mode: str):
 
     if mode == "poll":
         # Permitted user: no extra text, no button -- polls straight away.
-        await _send_polls_direct(update.effective_chat.id, context, mcqs)
+        try:
+            await _send_polls_direct(update.effective_chat.id, context, mcqs)
+        except Exception as e:
+            logger.error(f"[pollcopy] _send_polls_direct crashed: {e}")
+            await update.message.reply_text(f"❌ Poll পাঠাতে সমস্যা হয়েছে: {e}")
         return
 
     # Admin: CSV + inline "Poll Practice" button.
