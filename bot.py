@@ -6674,6 +6674,8 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("random", cmd_random))
     application.add_handler(CommandHandler("class", cmd_class))
     application.add_handler(CommandHandler("pdfc", cmd_pdfc))
+    from poll_copy import handle_pollcopy_command
+    application.add_handler(CommandHandler("pollcopy", handle_pollcopy_command))
     application.add_handler(CommandHandler("tf", cmd_tf))
     application.add_handler(CommandHandler("done", cmd_pdfc_done))
     application.add_handler(CommandHandler("cancel", cmd_pdfc_cancel))
