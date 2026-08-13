@@ -421,30 +421,33 @@ async def run_poll_copy(update, context, links: list, mode: str):
             except Exception:
                 pass
     else:
-        status = None
-        progress = None
+        # Permitted user (poll mode): also show progress so they know
+        # the bot is working, just without the CSV/button step after.
+        status = await update.message.reply_text(f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...")
+
+        async def progress(checked, found, elapsed):
+            try:
+                pct = int(checked / total * 100) if total else 0
+                await status.edit_text(f"⏳ চেক: {checked}/{total} ({pct}%) — Poll পেয়েছি: {found}")
+            except Exception:
+                pass
 
     try:
         mcqs = await extract_polls_telethon(ch1, start_id, end_id, topic_id=topic_id, progress_cb=progress)
     except Exception as e:
         logger.error(f"[pollcopy] Telethon error: {e}")
-        if status:
-            await status.edit_text(f"❌ Error: {e}")
-        else:
-            await update.message.reply_text(f"❌ Error: {e}")
+        await status.edit_text(f"❌ Error: {e}")
         return
 
     if not mcqs:
         msg = f"😕 এই range এ কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)"
-        if status:
-            await status.edit_text(msg)
-        else:
-            await update.message.reply_text(msg)
+        await status.edit_text(msg)
         return
 
     if mode == "poll":
-        # Permitted user: no extra text, no button -- polls straight away.
+        # Permitted user: show final scan result, then send polls.
         try:
+            await status.edit_text(f"✅ {len(mcqs)}টি poll পাওয়া গেছে। পাঠানো হচ্ছে...")
             await _send_polls_direct(update.effective_chat.id, context, mcqs)
         except Exception as e:
             logger.error(f"[pollcopy] _send_polls_direct crashed: {e}")
