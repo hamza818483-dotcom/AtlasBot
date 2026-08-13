@@ -34,6 +34,7 @@ logger = logging.getLogger("atlas.poll_copy")
 API_ID      = int(os.environ.get("API_ID", "33312774"))
 API_HASH    = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
 SESSION_STR = os.environ.get("SESSION_STRING", "")
+print(f"[pollcopy] SESSION_STRING loaded: len={len(SESSION_STR)}", flush=True)
 
 
 
