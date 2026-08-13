@@ -4811,6 +4811,11 @@ async def send_quiz_poll(chat_id: int) -> None:
         poll_id = msg.poll.id
         quiz['current_poll_id'] = poll_id
         _poll_chat_map[poll_id] = chat_id
+        if len(_poll_chat_map) > 5000:
+            # unbounded dict growth guard (prevents slow OOM under heavy load) —
+            # oldest entries evicted first (dict preserves insertion order)
+            for _k in list(_poll_chat_map.keys())[:1000]:
+                _poll_chat_map.pop(_k, None)
         old_task = _timer_tasks.pop(chat_id, None)
         if old_task and not old_task.done():
             old_task.cancel()
