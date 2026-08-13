@@ -1926,7 +1926,7 @@ def mcq_set_keyboard(quiz_id: str, user_id: int = 0) -> List[List[InlineKeyboard
         challenger_param = f"&challenger={challenge['sender_id']}"
     return [
         [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
-        [InlineKeyboardButton("🌐 Website Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}{challenger_param}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+        [InlineKeyboardButton("🌐 Website Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}{challenger_param}")],
         [share_button(quiz_id, user_id)],
     ]
 
@@ -3533,7 +3533,7 @@ async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text = f"📦 MCQ Set #{i+1}\n📝 {count} টি প্রশ্ন\n📋 Type: {prompt_name}\n🔄 Source: {mcq_data.get('source_type','text')}\n📅 {created_str}"
             keyboard = [
                 [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{quiz_id}")],
-                [InlineKeyboardButton("🌐 Website Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{quiz_id}")],
+                [InlineKeyboardButton("🌐 Website Exam", url=f"{GH_PAGES_EXAM_URL}?id={quiz_id}&uid={user_id}")],
                 [InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{quiz_id}"), share_button(quiz_id, user_id)],
             ]
             image_file_id = mcq_data.get('image_file_id')
@@ -4604,7 +4604,7 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
         pass
     kb = [
         [InlineKeyboardButton("📊 Poll Solve", callback_data=f"poll_{new_quiz_id}"), InlineKeyboardButton("📝 Quiz Solve", callback_data=f"quiz_{new_quiz_id}")],
-        [InlineKeyboardButton("🌐 Website Exam", url=f"{GH_PAGES_EXAM_URL}?id={new_quiz_id}&uid={user.id}"), InlineKeyboardButton("💎 Premium PDF", callback_data=f"prempdf_{new_quiz_id}")],
+        [InlineKeyboardButton("🌐 Website Exam", url=f"{GH_PAGES_EXAM_URL}?id={new_quiz_id}&uid={user.id}")],
     ]
     await query.message.reply_text(
         f"✅ **পেইজে থাকা {len(new_mcqs)}টি MCQ পাওয়া গেছে!**",

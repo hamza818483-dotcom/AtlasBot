@@ -1,27 +1,26 @@
 # ============================================================
 # ATLAS BOT — Poll Copy (poll_copy.py)
-# /pollcopy <link1>\n<link2>
+# DM te just 2 ta t.me link dile (admin/permitted user):
 # Telethon দিয়ে source channel/group (thread/topic সহ) থেকে
 # first_link → second_link range এর সব quiz poll extract করে,
-# তারপর সেগুলো BRAND NEW live quiz poll হিসেবে এই চ্যাটে পাঠায় —
-# user আবার নতুন করে solve করতে পারবে (পুরনো poll-এর copy/forward
-# না, প্রতিটা একদম fresh poll object, নতুন vote count/state)।
+# তারপর QuizBot-এর মতো শুধু একটা CSV file পাঠায় (কোনো live poll
+# repost করে না)। Real correct answer bot নিজে vote দিয়ে
+# Telegram থেকে confirm করে বের করে (guaranteed, retry সহ)।
 #
 # Extraction logic (parse_tg_link, extract_polls_telethon,
-# rate limiter) QuizBot repo-র poll_extract.py থেকে reused —
-# same SESSION_STRING/API_ID/API_HASH ব্যবহার করে, কারণ userbot
-# session ইতিমধ্যে সেখানে সেট করা আছে ও bot+account দুটোই ওই
-# channel/group-এ admin।
+# rate limiter, CSV builder) QuizBot repo-র poll_extract.py
+# থেকে reused — same SESSION_STRING/API_ID/API_HASH ব্যবহার করে,
+# কারণ userbot session ইতিমধ্যে সেখানে সেট করা আছে ও bot+account
+# দুটোই ওই channel/group-এ admin।
 # ============================================================
 
 import os
 import re
+import csv
 import asyncio
 import logging
 import time
-
-from telegram import Poll
-from telegram.error import TelegramError, RetryAfter
+from io import StringIO, BytesIO
 
 logger = logging.getLogger("atlas.poll_copy")
 
@@ -31,11 +30,7 @@ API_ID      = int(os.environ.get("API_ID", "33312774"))
 API_HASH    = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
 SESSION_STR = os.environ.get("SESSION_STRING", "")
 
-# How long to wait between posting each live poll into the destination
-# chat -- Telegram Bot API itself rate-limits sendPoll in a busy group,
-# and this also keeps the feed readable instead of a wall of polls
-# landing in under a second.
-POLL_REPOST_DELAY = 1.2
+
 
 
 # ── Link parser (identical contract to QuizBot's poll_extract.py) ──
@@ -198,8 +193,33 @@ async def _process_single_poll(client, channel, message):
         "question": q_text[:290],  # Telegram poll question hard cap is 300 chars
         "options": [o[:100] for o in options],  # option hard cap is 100 chars
         "correct_idx": correct_idx,
+        "answer": correct_idx + 1,  # 1-based, matches QuizBot's CSV "answer" column
         "explanation": (explanation or "")[:195],  # explanation hard cap is 200 chars
     }, found
+
+
+def build_csv(polls: list) -> bytes:
+    """Same shape as QuizBot's poll_extract.py build_csv --
+    Columns: questions,option1..option5,answer,explanation,type,section
+    utf-8-sig so Bengali text opens correctly in Excel."""
+    output = StringIO()
+    writer = csv.writer(output, quoting=csv.QUOTE_ALL)
+    writer.writerow([
+        "questions",
+        "option1", "option2", "option3", "option4", "option5",
+        "answer", "explanation", "type", "section"
+    ])
+    for p in polls:
+        padded = (p["options"] + ["", "", "", "", ""])[:5]
+        writer.writerow([
+            p["question"],
+            padded[0], padded[1], padded[2], padded[3], padded[4],
+            p["answer"],
+            p["explanation"],
+            1,
+            1,
+        ])
+    return output.getvalue().encode("utf-8-sig")
 
 
 async def extract_polls_telethon(channel, start_id: int, end_id: int, topic_id=None, progress_cb=None) -> list:
@@ -273,7 +293,6 @@ async def run_poll_copy(update, context, links: list):
     """Core logic shared by /pollcopy command and the DM-2-links shortcut.
     links must be exactly 2 t.me URLs (order doesn't matter, smaller msg_id
     is treated as range start automatically)."""
-    chat_id = update.effective_chat.id
     ch1, start_id, topic1 = parse_tg_link(links[0])
     ch2, end_id, topic2 = parse_tg_link(links[1])
 
@@ -313,51 +332,24 @@ async def run_poll_copy(update, context, links: list):
         await status.edit_text(f"😕 এই range এ কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)")
         return
 
-    await status.edit_text(f"✅ {len(mcqs)}টি poll পাওয়া গেছে। নতুন করে পাঠানো হচ্ছে...")
+    await status.edit_text(f"✅ {len(mcqs)}টি poll পাওয়া গেছে। CSV তৈরি হচ্ছে...")
 
-    sent = 0
-    for mcq in mcqs:
-        options = mcq["options"]
-        correct_id = mcq["correct_idx"]
-        if correct_id >= len(options) or correct_id < 0:
-            correct_id = 0
-        try:
-            await context.bot.send_poll(
-                chat_id=chat_id,
-                question=mcq["question"] or "প্রশ্ন",
-                options=options if len(options) >= 2 else options + ["N/A"],
-                type=Poll.QUIZ,
-                correct_option_id=correct_id,
-                explanation=mcq["explanation"] or None,
-                is_anonymous=True,
-            )
-            sent += 1
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-            try:
-                await context.bot.send_poll(
-                    chat_id=chat_id, question=mcq["question"] or "প্রশ্ন",
-                    options=options if len(options) >= 2 else options + ["N/A"],
-                    type=Poll.QUIZ, correct_option_id=correct_id,
-                    explanation=mcq["explanation"] or None, is_anonymous=True,
-                )
-                sent += 1
-            except Exception as e2:
-                logger.warning(f"[pollcopy] retry-after send failed: {e2}")
-        except TelegramError as e:
-            logger.warning(f"[pollcopy] send_poll failed: {e}")
-        await asyncio.sleep(POLL_REPOST_DELAY)
-
-    await update.message.reply_text(f"✅ সম্পন্ন! {sent}/{len(mcqs)}টি poll নতুন করে পাঠানো হয়েছে।")
+    csv_bytes = build_csv(mcqs)
+    filename = f"polls_{start_id}_{end_id}.csv"
+    await update.message.reply_document(
+        document=BytesIO(csv_bytes),
+        filename=filename,
+        caption=f"✅ {len(mcqs)}টি poll extract হয়েছে (CSV)।"
+    )
 
 
 async def handle_dm_poll_links(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> bool:
     """DM-only: if an admin OR permitted user sends exactly 2 t.me links (no
     command, any order, newline/space separated) it's treated as a
-    poll-copy request -- extract quiz polls in that range and repost them
-    as brand-new live polls the user can immediately re-solve. Returns True
-    if handled (so the caller can stop the handler chain), False otherwise
-    so normal text flows continue untouched."""
+    poll-copy request -- extract quiz polls in that range and send back a
+    CSV file (QuizBot-style), no live poll reposting. Returns True if
+    handled (so the caller can stop the handler chain), False otherwise so
+    normal text flows continue untouched."""
     if update.effective_chat.type != "private":
         return False
     from bot import is_admin, is_permitted, get_user_info
@@ -381,9 +373,9 @@ async def handle_pollcopy_command(update, context):
     https://t.me/c/.../250
 
     Extracts every quiz poll in that range (topic-filtered if a topic link
-    is given) and reposts each as a BRAND NEW live quiz poll in this chat --
-    users can solve them fresh, independent of the original polls' state.
-    Kept as a fallback entry point alongside the DM-2-links shortcut.
+    is given) and sends back a CSV file (QuizBot-style) — no live poll
+    reposting. Kept as a fallback entry point alongside the DM-2-links
+    shortcut.
     """
     from bot import is_admin, is_permitted, get_user_info  # local import avoids circular import at module load
 
@@ -406,7 +398,7 @@ async def handle_pollcopy_command(update, context):
             "https://t.me/c/.../250\n\n"
             "• প্রথম link = range start\n"
             "• দ্বিতীয় link = range end\n"
-            "• Poll গুলো নতুন করে এই চ্যাটে পাঠানো হবে, user আবার solve করতে পারবে।"
+            "• সব poll একটা CSV file হিসেবে পাঠানো হবে।"
         )
         return
 
