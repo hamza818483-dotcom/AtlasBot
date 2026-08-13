@@ -352,17 +352,17 @@ async def run_poll_copy(update, context, links: list):
 
 
 async def handle_dm_poll_links(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> bool:
-    """DM-only: if the admin sends exactly 2 t.me links (no command, any
-    order, newline/space separated) it's treated as a poll-copy request --
-    extract quiz polls in that range and repost them as brand-new live
-    polls the admin can immediately re-solve. Returns True if handled (so
-    the caller can stop the handler chain), False otherwise so normal text
-    flows continue untouched."""
+    """DM-only: if an admin OR permitted user sends exactly 2 t.me links (no
+    command, any order, newline/space separated) it's treated as a
+    poll-copy request -- extract quiz polls in that range and repost them
+    as brand-new live polls the user can immediately re-solve. Returns True
+    if handled (so the caller can stop the handler chain), False otherwise
+    so normal text flows continue untouched."""
     if update.effective_chat.type != "private":
         return False
-    from bot import is_admin, get_user_info
+    from bot import is_admin, is_permitted, get_user_info
     user = get_user_info(update)
-    if not is_admin(user['user_id']):
+    if not (is_admin(user['user_id']) or is_permitted(user['user_id'])):
         return False
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
@@ -385,11 +385,11 @@ async def handle_pollcopy_command(update, context):
     users can solve them fresh, independent of the original polls' state.
     Kept as a fallback entry point alongside the DM-2-links shortcut.
     """
-    from bot import is_admin, get_user_info  # local import avoids circular import at module load
+    from bot import is_admin, is_permitted, get_user_info  # local import avoids circular import at module load
 
     user = get_user_info(update)
-    if not is_admin(user['user_id']):
-        await update.message.reply_text("❌ এই কমান্ড শুধু admin ব্যবহার করতে পারবে।")
+    if not (is_admin(user['user_id']) or is_permitted(user['user_id'])):
+        await update.message.reply_text("❌ এই কমান্ড শুধু admin/permitted user ব্যবহার করতে পারবে।")
         return
 
     text = update.message.text or ""
