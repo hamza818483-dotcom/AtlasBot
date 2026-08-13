@@ -238,7 +238,12 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, topic_id=N
 
     polls = []
     client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
-    await client.start()
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15)
+    except asyncio.TimeoutError:
+        raise RuntimeError("Telethon client.connect() 15s এ timeout — Render network/Telegram DC issue")
+    if not await client.is_user_authorized():
+        raise RuntimeError("SESSION_STRING invalid/expired — is_user_authorized()=False। নতুন session string বানাও।")
     try:
         entity = await client.get_entity(channel)
         checked = 0
@@ -418,7 +423,10 @@ async def run_poll_copy(update, context, links: list, mode: str):
     total = end_id - start_id + 1
 
     if not SESSION_STR:
-        await update.message.reply_text("⚠️ সাময়িক সমস্যা হয়েছে (session)।\n🔁 কিছুক্ষণ পর আবার link দুটো পাঠিয়ে চেষ্টা করো।")
+        await update.message.reply_text(
+            "⚠️ SESSION_STRING env var সেট নেই বা খালি।\n"
+            "🔧 Render → Environment → SESSION_STRING চেক করো।"
+        )
         return
 
     def _progress_bar(pct: int, width: int = 10) -> str:
@@ -457,8 +465,14 @@ async def run_poll_copy(update, context, links: list, mode: str):
     try:
         mcqs = await extract_polls_telethon(ch1, start_id, end_id, topic_id=topic_id, progress_cb=progress)
     except Exception as e:
-        logger.error(f"[pollcopy] Telethon error: {e}")
-        await status.edit_text(f"⚠️ সাময়িক সমস্যা হয়েছে।\n🔁 আবার link দুটো পাঠিয়ে চেষ্টা করো।")
+        import traceback
+        err_type = type(e).__name__
+        logger.error(f"[pollcopy] Telethon error: {err_type}: {e}\n{traceback.format_exc()}")
+        await status.edit_text(
+            f"⚠️ Error: {err_type}\n"
+            f"📝 {str(e)[:300]}\n"
+            f"🔁 আবার link দুটো পাঠিয়ে চেষ্টা করো।"
+        )
         return
 
     if not mcqs:
