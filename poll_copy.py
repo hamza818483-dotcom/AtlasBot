@@ -412,23 +412,36 @@ async def run_poll_copy(update, context, links: list, mode: str):
         await update.message.reply_text("❌ SESSION_STRING সেট করা নেই। Environment secrets এ add করো।")
         return
 
+    def _progress_bar(pct: int, width: int = 10) -> str:
+        filled = round(width * pct / 100)
+        return "▓" * filled + "░" * (width - filled)
+
     if mode == "csv":
-        status = await update.message.reply_text(f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...")
+        status = await update.message.reply_text(f"🔍 স্ক্যান শুরু হচ্ছে...\n{start_id} → {end_id} · {total} messages")
 
         async def progress(checked, found, elapsed):
             try:
-                await status.edit_text(f"⏳ চেক: {checked}/{total} — Poll পেয়েছি: {found}")
+                pct = int(checked / total * 100) if total else 0
+                await status.edit_text(
+                    f"🔍 স্ক্যান করা হচ্ছে\n"
+                    f"{_progress_bar(pct)}  {pct}%\n"
+                    f"চেক হয়েছে: {checked}/{total}  ·  Poll পাওয়া গেছে: {found}"
+                )
             except Exception:
                 pass
     else:
         # Permitted user (poll mode): also show progress so they know
         # the bot is working, just without the CSV/button step after.
-        status = await update.message.reply_text(f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...")
+        status = await update.message.reply_text(f"🔍 স্ক্যান শুরু হচ্ছে...\n{start_id} → {end_id} · {total} messages")
 
         async def progress(checked, found, elapsed):
             try:
                 pct = int(checked / total * 100) if total else 0
-                await status.edit_text(f"⏳ চেক: {checked}/{total} ({pct}%) — Poll পেয়েছি: {found}")
+                await status.edit_text(
+                    f"🔍 স্ক্যান করা হচ্ছে\n"
+                    f"{_progress_bar(pct)}  {pct}%\n"
+                    f"চেক হয়েছে: {checked}/{total}  ·  Poll পাওয়া গেছে: {found}"
+                )
             except Exception:
                 pass
 
@@ -440,14 +453,17 @@ async def run_poll_copy(update, context, links: list, mode: str):
         return
 
     if not mcqs:
-        msg = f"😕 এই range এ কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)"
+        msg = f"{_progress_bar(100)}  100%\n😕 কোনো quiz poll পাওয়া যায়নি।\n({total} messages চেক হয়েছে)"
         await status.edit_text(msg)
         return
 
     if mode == "poll":
         # Permitted user: show final scan result, then send polls.
         try:
-            await status.edit_text(f"✅ {len(mcqs)}টি poll পাওয়া গেছে। পাঠানো হচ্ছে...")
+            await status.edit_text(
+                f"{_progress_bar(100)}  100%\n"
+                f"✅ {len(mcqs)}টি poll পাওয়া গেছে — পাঠানো হচ্ছে..."
+            )
             await _send_polls_direct(update.effective_chat.id, context, mcqs)
         except Exception as e:
             logger.error(f"[pollcopy] _send_polls_direct crashed: {e}")
@@ -455,7 +471,10 @@ async def run_poll_copy(update, context, links: list, mode: str):
         return
 
     # Admin: CSV + inline "Poll Practice" button.
-    await status.edit_text(f"✅ {len(mcqs)}টি poll পাওয়া গেছে। CSV তৈরি হচ্ছে...")
+    await status.edit_text(
+        f"{_progress_bar(100)}  100%\n"
+        f"✅ {len(mcqs)}টি poll পাওয়া গেছে — CSV তৈরি হচ্ছে..."
+    )
     csv_bytes = build_csv(mcqs)
     filename = f"polls_{start_id}_{end_id}.csv"
     cache_key = _pcpoll_cache_put(mcqs)
