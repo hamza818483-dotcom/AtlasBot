@@ -413,6 +413,25 @@ async def run_poll_copy(update, context, links: list, mode: str):
     sent directly, no CSV, no extra messages/steps).
     links must be exactly 2 t.me URLs (order doesn't matter, smaller msg_id
     is treated as range start automatically)."""
+    try:
+        await _run_poll_copy_inner(update, context, links, mode)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"[pollcopy] unhandled error: {type(e).__name__}: {e}\n{tb}")
+        try:
+            await update.message.reply_text(
+                f"⚠️ Unexpected error: {type(e).__name__}\n"
+                f"📝 {str(e)[:400]}\n\n"
+                f"```\n{tb[-800:]}\n```"
+            )
+        except Exception:
+            await update.message.reply_text(
+                f"⚠️ Unexpected error: {type(e).__name__}: {str(e)[:300]}"
+            )
+
+
+async def _run_poll_copy_inner(update, context, links: list, mode: str):
     ch1, start_id, topic1 = parse_tg_link(links[0])
     ch2, end_id, topic2 = parse_tg_link(links[1])
 

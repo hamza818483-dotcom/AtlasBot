@@ -6700,7 +6700,15 @@ async def register_handlers() -> None:
         except ApplicationHandlerStop:
             raise
         except Exception as e:
-            log_error(f"[pollcopy] router crashed: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            log_error(f"[pollcopy] router crashed: {e}\n{tb}")
+            try:
+                await update.message.reply_text(
+                    f"⚠️ Router error: {type(e).__name__}\n📝 {str(e)[:400]}"
+                )
+            except Exception:
+                pass
             handled = False
         if handled:
             raise ApplicationHandlerStop
