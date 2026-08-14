@@ -4759,14 +4759,12 @@ async def handle_poll_solve(query, quiz_id: str, user) -> None:
         return
     mcqs = apply_tag_exp(clean_mcq_options(mcq_data['mcqs']))
     total = len(mcqs)
-    settings = get_all_settings()
-    timer = int(settings.get('timer_seconds', DEFAULT_TIMER))
     image_file_id = mcq_data.get('image_file_id')
     if image_file_id:
         async def _send_pre_image():
             await query.message.chat.send_photo(
                 photo=image_file_id,
-                caption=f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n⏱️ Per Question: {timer} sec\n📋 Type: {get_prompt_display_name(mcq_data.get('prompt_type','prompt_1'))}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}",
+                caption=f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n📋 Type: {get_prompt_display_name(mcq_data.get('prompt_type','prompt_1'))}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}",
                 parse_mode=ParseMode.MARKDOWN
             )
         try:
@@ -4774,8 +4772,8 @@ async def handle_poll_solve(query, quiz_id: str, user) -> None:
         except Exception as e:
             log_error(f"Failed to send pre-poll image: {e}")
     else:
-        await query.message.reply_text(f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n⏱️ Per Question: {timer} sec\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}", parse_mode=ParseMode.MARKDOWN)
-    await query.message.reply_text(f"📊 {total} টি Poll পাঠানো শুরু হচ্ছে... ⏱️ প্রতিটিতে {timer} সেকেন্ড।")
+        await query.message.reply_text(f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}", parse_mode=ParseMode.MARKDOWN)
+    await query.message.reply_text(f"📊 {total} টি Poll পাঠানো শুরু হচ্ছে...")
     await send_countdown(query.message.chat_id)
     for i, mcq in enumerate(mcqs):
         try:
