@@ -2604,9 +2604,10 @@ Output ONLY a JSON object mapping question number (as string) to your finding, n
             finding = findings.get(str(i + 1), "")
             fu = str(finding).strip().upper()
             if fu in ("A", "B", "C", "D") and fu != str(mc.get("answer", "A")).upper():
-                logger.warning(
+                log(
                     f"[QBM Call3] Answer correction Q{i+1}: {mc.get('answer')} -> {fu} "
-                    f"(page re-scan disagreed with Call 1/2)"
+                    f"(page re-scan disagreed with Call 1/2)",
+                    level="WARNING"
                 )
                 mc2 = dict(mc)
                 mc2["answer"] = fu
