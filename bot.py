@@ -2962,7 +2962,7 @@ def _progress_bar(pct: int) -> str:
     filled = int(round(PROGRESS_BAR_LEN * pct / 100))
     return "▰" * filled + "▱" * (PROGRESS_BAR_LEN - filled)
 
-async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8, verb: str = "থেকে MCQ তৈরি হচ্ছে") -> None:
+async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8, verb: str = "থেকে MCQ তৈরি হচ্ছে", type_label: str = "") -> None:
     """Edits a message every ~1.5s with live ETA countdown and % — a
     time-based estimate (actual generation happens in one AI call, so
     there's no real per-item progress to track). Does NOT show a fake
@@ -2970,31 +2970,35 @@ async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8, ver
     elapsed time, not the real result, so it always showed ~20-22
     regardless of actual output.
 
-    Once elapsed time passes total_eta (AI call taking longer than the
-    estimate), switches to an animated spinner instead of freezing at a
-    stuck percentage/ETA — a frozen number reads as "hung" to the user
-    even though work is still happening in the background."""
+    type_label (e.g. "🩺 Medical Standard"), if given, is shown so the
+    user can see which MCQ type they selected while it's generating.
+
+    % keeps climbing smoothly past total_eta instead of freezing/switching
+    to a spinner-only view — a frozen or vanished % reads as "hung" to the
+    user even though work is still happening in the background. It
+    approaches 99% asymptotically and never quite reaches/sticks at a
+    fixed number, so it always looks like it's still moving."""
     start = time.time()
-    spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    i = 0
     try:
         while True:
             elapsed = time.time() - start
             if elapsed < total_eta:
                 pct = int(elapsed / total_eta * 100)
                 eta_left = max(1, int(total_eta - elapsed))
-                text = (
-                    f"🔄 {source_label} {verb}...\n"
-                    f"⏱️ আনুমানিক সময়: {eta_left} সেকেন্ড\n"
-                    f"📊 Progress: {_progress_bar(pct)} {pct}%"
-                )
+                eta_line = f"⏱️ আনুমানিক সময়: {eta_left} সেকেন্ড\n"
             else:
-                frame = spinner_frames[i % len(spinner_frames)]
-                i += 1
-                text = (
-                    f"{frame} {source_label} {verb}...\n"
-                    f"⏳ আরেকটু সময় লাগছে, কাজ চলছে..."
-                )
+                # past estimate -- keep % creeping toward 99 (never frozen,
+                # never fully stuck) using a decaying approach curve
+                overtime = elapsed - total_eta
+                pct = min(99, 90 + int(9 * (1 - pow(2.71828, -overtime / 15))))
+                eta_line = "⏳ আরেকটু সময় লাগছে, কাজ চলছে...\n"
+            type_line = f"🏷️ টাইপ: {type_label}\n" if type_label else ""
+            text = (
+                f"🔄 {source_label} {verb}...\n"
+                f"{type_line}"
+                f"{eta_line}"
+                f"📊 Progress: {_progress_bar(pct)} {pct}%"
+            )
             try:
                 await edit_fn(text)
             except Exception:
@@ -4387,7 +4391,8 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
         return
     async def _edit_cap(t):
         await query.message.edit_caption(caption=t)
-    prog_task = asyncio.create_task(live_progress_task(_edit_cap, "Image", total_eta=8))
+    type_label = get_prompt_display_name(prompt_type)
+    prog_task = asyncio.create_task(live_progress_task(_edit_cap, "Image", total_eta=8, type_label=type_label))
     try:
         mcqs, error = await generate_mcq_from_image(image_bytes, prompt_type)
         prog_task.cancel()
