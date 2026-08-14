@@ -4522,16 +4522,39 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
     async def _edit_wait(t):
         await wait_msg.edit_text(t)
     prog_task = asyncio.create_task(live_progress_task(_edit_wait, "📖", total_eta=15, verb="ব্যাখ্যা তৈরি হচ্ছে"))
+    _t0 = time.time()
     try:
-        response_text, provider = await ai_generate(EXPLAIN_IMAGE_PROMPT, image_bytes, expect_json=False)
+        response_text, provider = await asyncio.wait_for(
+            ai_generate(EXPLAIN_IMAGE_PROMPT, image_bytes, expect_json=False),
+            timeout=90
+        )
+    except asyncio.TimeoutError:
+        prog_task.cancel()
+        elapsed = time.time() - _t0
+        log_error(f"handle_explain_from_pending: ai_generate timed out after {elapsed:.0f}s (all providers exhausted/hanging)")
+        await wait_msg.edit_text(
+            f"⚠️ Timeout: {elapsed:.0f}s এর মধ্যে কোনো AI provider সাড়া দেয়নি।\n"
+            f"🔁 আবার চেষ্টা করুন।"
+        )
+        return
     except Exception as e:
         prog_task.cancel()
-        log_error(f"handle_explain_from_pending error: {e}")
-        await wait_msg.edit_text("❌ ব্যাখ্যা তৈরি করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        elapsed = time.time() - _t0
+        import traceback
+        tb = traceback.format_exc()
+        log_error(f"handle_explain_from_pending error after {elapsed:.0f}s: {type(e).__name__}: {e}\n{tb}")
+        try:
+            await wait_msg.edit_text(
+                f"⚠️ Error: {type(e).__name__} ({elapsed:.0f}s পর)\n"
+                f"📝 {str(e)[:300]}"
+            )
+        except Exception:
+            pass
         return
     prog_task.cancel()
     if not response_text or not response_text.strip():
-        await wait_msg.edit_text("❌ ব্যাখ্যা তৈরি করা যায়নি। সব AI Provider ব্যস্ত, কিছুক্ষণ পর আবার চেষ্টা করুন।")
+        elapsed = time.time() - _t0
+        await wait_msg.edit_text(f"❌ ব্যাখ্যা তৈরি করা যায়নি। সব AI Provider ব্যস্ত ({elapsed:.0f}s চেষ্টার পর), কিছুক্ষণ পর আবার চেষ্টা করুন।")
         return
     try:
         await wait_msg.delete()
