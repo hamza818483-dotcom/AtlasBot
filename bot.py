@@ -6399,6 +6399,27 @@ async def daily_reset_scheduler() -> None:
 # SECTION: /ping — Owner Bot Status Dashboard
 # ============================================================
 
+async def cmd_whcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: Telegram-কে সরাসরি জিজ্ঞেস করে বর্তমানে কোন URL-এ
+    webhook active আছে — এটা দিয়েই নিশ্চিত হওয়া যায় main নাকি backup
+    service আসলে traffic পাচ্ছে (guess না করে)।"""
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু Owner ব্যবহার করতে পারবেন।")
+        return
+    try:
+        wh = await application.bot.get_webhook_info()
+        await update.message.reply_text(
+            f"🔗 Active Webhook URL:\n{wh.url or '(কোনোটাই সেট নেই)'}\n\n"
+            f"📊 Pending updates: {wh.pending_update_count}\n"
+            f"❌ Last error: {wh.last_error_message or 'নেই'}\n"
+            f"🕐 Last error time: {wh.last_error_date or 'নেই'}\n"
+            f"🔌 Max connections: {wh.max_connections}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {type(e).__name__}: {str(e)[:300]}")
+
+
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
@@ -6677,6 +6698,7 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("timer", cmd_timer))
     application.add_handler(CommandHandler("live", cmd_live))
     application.add_handler(CommandHandler("ping", cmd_ping))
+    application.add_handler(CommandHandler("whcheck", cmd_whcheck))
     application.add_handler(CommandHandler("progress", cmd_progress))
     application.add_handler(CommandHandler("revision", cmd_revision))
     application.add_handler(CommandHandler("report", cmd_report))
