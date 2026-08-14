@@ -4052,12 +4052,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 📸 আপনার Image থেকে MCQ বানাতে MCQ টাইপ সিলেক্ট করুন:
 
+━━━━━━━━━━━━━━━━━━━━
 🩺 Medical Standard — সাধারণ মেডিকেল MCQ
 ✅ সত্য-মিথ্যার প্রশ্ন — True/False ফরম্যাট
 🔥 কঠিন প্রশ্ন — অ্যাডভান্সড লেভেল
 🎲 Mixed — সবগুলো মিলিয়ে
-
+━━━━━━━━━━━━━━━━━━━━
 🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক — সৃজনশীল PDF
+━━━━━━━━━━━━━━━━━━━━
 📖 ব্যাখ্যা চাই — টপিক/MCQ বিস্তারিত ব্যাখ্যা""",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
