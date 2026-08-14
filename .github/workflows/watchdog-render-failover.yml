@@ -1,8 +1,16 @@
 name: Watchdog - Render Primary/Backup Failover
 
-# Render Primary (atlasbot-q4f4) down/sleeping thakle Telegram webhook
-# auto-switch kore Render Backup (atlasbot-pvp7) e — ar Primary fire
-# fire korle abar Primary te ferot ane.
+# Render Primary (secret RENDER_URL — atlasbot-pvp7, jekhane
+# SESSION_STRING/API_ID/API_HASH shothikbhabe set kora ache) down/sleeping
+# thakle Telegram webhook auto-switch kore Render Backup (secret
+# RENDER_URL_2 — atlasbot-q4f4) e — ar Primary fire fire korle abar
+# Primary te ferot ane.
+#
+# ⚠️ 2026-08-14: RENDER_URL o RENDER_URL_2 secret-er value swap kora
+# hoyeche, karon "q4f4" service-e SESSION_STRING set chilo na — oita
+# health-check pass korto bole watchdog bar bar wrong service-e webhook
+# switch kore dicchilo. Ekhon RENDER_URL = pvp7 (shothik, SESSION_STRING
+# soho), RENDER_URL_2 = q4f4 (backup, SESSION_STRING chara).
 #
 # Eta bot message handling (webhook) er jonno — Web Quiz API failover
 # (worker.js e already ache) er theke alada, kintu duitai mile pura
@@ -10,8 +18,8 @@ name: Watchdog - Render Primary/Backup Failover
 #
 # Required repo secrets:
 #   BOT_TOKEN      - Telegram bot token
-#   RENDER_URL     - https://atlasbot-q4f4.onrender.com (primary)
-#   RENDER_URL_2   - https://atlasbot-pvp7.onrender.com (backup)
+#   RENDER_URL     - https://atlasbot-pvp7.onrender.com (primary, SESSION_STRING soho)
+#   RENDER_URL_2   - https://atlasbot-q4f4.onrender.com (backup)
 #   OWNER_ID       - tomar Telegram numeric user id (alert er jonno)
 
 on:

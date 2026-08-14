@@ -1,8 +1,9 @@
 name: Keep Render Awake (Secondary)
 
-# Fallback Render account (atlasbot-pvp7) ke o ghum theke bachiye rakhe,
-# jate Render-only API routes (new-exam, solve-pdf, back-to-source,
-# bookmark, leaderboard) er failover always-ready thake.
+# atlasbot-pvp7 ke ghum theke bachiye rakhe — eta-i main service
+# (SESSION_STRING/API_ID/API_HASH soho), q4f4 backup, jate Render-only
+# API routes (new-exam, solve-pdf, back-to-source, bookmark, leaderboard)
+# er failover always-ready thake.
 
 on:
   schedule:
