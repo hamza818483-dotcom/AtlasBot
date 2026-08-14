@@ -4053,15 +4053,19 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 📸 আপনার Image থেকে MCQ বানাতে MCQ টাইপ সিলেক্ট করুন:
 
 ━━━━━━━━━━━━━━━━━━━━
-🩺 Medical Standard — সাধারণ মেডিকেল MCQ
-✅ সত্য-মিথ্যার প্রশ্ন — True/False ফরম্যাট
-🔥 কঠিন প্রশ্ন — অ্যাডভান্সড লেভেল
-🎲 Mixed — সবগুলো মিলিয়ে
+<b>🩺 Medical Standard</b> — সাধারণ মেডিকেল MCQ
+
+<b>✅ সত্য-মিথ্যার প্রশ্ন</b> — True/False ফরম্যাট
+
+<b>🔥 কঠিন প্রশ্ন</b> — অ্যাডভান্সড লেভেল
+
+<b>🎲 Mixed</b> — সবগুলো মিলিয়ে
 ━━━━━━━━━━━━━━━━━━━━
-🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক — সৃজনশীল PDF
+<b>🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক</b> — সৃজনশীল PDF
 ━━━━━━━━━━━━━━━━━━━━
-📖 ব্যাখ্যা চাই — টপিক/MCQ বিস্তারিত ব্যাখ্যা""",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+<b>📖 ব্যাখ্যা চাই</b> — টপিক/MCQ বিস্তারিত ব্যাখ্যা""",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
         )
     except Exception as e:
         log_error(f"Image handler error: {e}")
