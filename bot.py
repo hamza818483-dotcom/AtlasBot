@@ -4517,7 +4517,7 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
     )
     async def _edit_wait(t):
         await wait_msg.edit_text(t)
-    prog_task = asyncio.create_task(live_progress_task(_edit_wait, "Explanation", total_eta=15))
+    prog_task = asyncio.create_task(live_progress_task(_edit_wait, "📖", total_eta=15, verb="ব্যাখ্যা তৈরি হচ্ছে"))
     try:
         response_text, provider = await ai_generate(EXPLAIN_IMAGE_PROMPT, image_bytes, expect_json=False)
     except Exception as e:
