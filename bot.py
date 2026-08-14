@@ -368,19 +368,28 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
                 if image_bytes:
                     contents.append(Image.open(BytesIO(image_bytes)))
                 loop = asyncio.get_event_loop()
-                resp = await loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        temperature=0.7, top_p=0.95, top_k=40,
-                        max_output_tokens=8192,
-                        thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                    )
-                ))
+                resp = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            temperature=0.7, top_p=0.95, top_k=40,
+                            max_output_tokens=8192,
+                            thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                        )
+                    )),
+                    timeout=20
+                )
                 if resp and resp.text:
                     _track_attempt("gemini", klabel, ok=True)
                     return resp.text
                 _track_attempt("gemini", klabel, ok=False)
+                break
+            except asyncio.TimeoutError:
+                if retry == 0:
+                    await asyncio.sleep(0.5)
+                    continue
+                _track_attempt("gemini", klabel, ok=False, exhausted=False)
                 break
             except Exception as e:
                 es = str(e).lower()
@@ -572,7 +581,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     max_retries = 2
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=20) as client:
                 r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
                 if r.status_code == 200:
                     data = r.json()
@@ -585,12 +594,12 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                     _track_attempt(provider, key_label, ok=False, exhausted=True)
                     return None, True
                 if r.status_code in (500, 502, 503) and attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     continue
                 _track_attempt(provider, key_label, ok=False)
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             if attempt < max_retries - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
             _track_attempt(provider, key_label, ok=False)
         except Exception as e:
