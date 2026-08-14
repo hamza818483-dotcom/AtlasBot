@@ -16,7 +16,7 @@ jobs:
     steps:
       - name: Ping Render health endpoint (backup)
         run: |
-          URL="https://atlasbot-q4f4.onrender.com/health"
+          URL="https://atlasbot-pvp7.onrender.com/health"
           echo "Pinging $URL (backup) ..."
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$URL" || echo "000")
           echo "Response status: $STATUS"

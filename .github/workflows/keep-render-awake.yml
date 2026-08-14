@@ -1,12 +1,18 @@
 name: Keep Render Awake (Primary) — Layer 1 (:00 offset)
 
 # Render-er free tier 15 minute nishkriyota-r por sleep hoye jay.
-# Ei workflow proti 5 minute e (:00, :05, :10...) Render Primary-er
+# Ei workflow proti 5 minute e (:00, :05, :10...) Render Primary
+# (atlasbot-pvp7, SESSION_STRING soho — actual active webhook)-er
 # /health endpoint ping kore.
 #
 # v4.3: 3 staggered keep-alive layers (:00 ei file, :02 -2.yml,
-# :04 -secondary.yml) — proti 2 minute-e ekta ping jay, tai 15-min
+# :04 -secondary.yml) — proti ~2 minute-e ekta ping jay, tai 15-min
 # sleep window kokhonoi miss hobe na ekta-o layer delay/queue hole o.
+#
+# ⚠️ 2026-08-14: age 2/3 layer bhul kore backup (q4f4) ke ping korchilo,
+# tai actual primary (pvp7) proti ~5 min-e maat 1 bar ping paccho —
+# eijonyo hibernate hoye jachchilo majhe majhe. Ekhon 3 layer-i pvp7-ke
+# ping kore.
 #
 # Render Primary genuinely down thakle watchdog-render-failover.yml
 # (proti 5 min) automatically webhook Backup Render-e switch kore dey —
@@ -32,7 +38,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
         run: |
-          URL="https://atlasbot-q4f4.onrender.com/health"
+          URL="https://atlasbot-pvp7.onrender.com/health"
           STATUS="000"
           for i in 1 2; do
             echo "Pinging $URL (attempt $i) ..."
