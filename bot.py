@@ -2938,19 +2938,24 @@ def _progress_bar(pct: int) -> str:
     return "▰" * filled + "▱" * (PROGRESS_BAR_LEN - filled)
 
 async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8, verb: str = "থেকে MCQ তৈরি হচ্ছে") -> None:
-    """Edits a message every ~1.5s with live ETA countdown, % and progress bar."""
+    """Edits a message every ~1.5s with live ETA countdown and % — a
+    time-based estimate (actual generation happens in one AI call, so
+    there's no real per-item progress to track). Caps at 99% (never fake
+    '100%'/finished) since actual completion is signaled separately when
+    the AI call returns. Does NOT show a fake 'made X MCQ' count anymore —
+    that number was purely derived from elapsed time (pct/100 * hardcoded
+    22), not the real result, so it always showed ~20-22 regardless of
+    actual output."""
     start = time.time()
     try:
         while True:
             elapsed = time.time() - start
-            pct = min(94, int(elapsed / total_eta * 100))
+            pct = min(99, int(elapsed / total_eta * 100))
             eta_left = max(1, int(total_eta - elapsed))
-            made = max(1, int(pct / 100 * 22))
             text = (
                 f"🔄 {source_label} {verb}...\n"
                 f"⏱️ আনুমানিক সময়: {eta_left} সেকেন্ড\n"
-                f"📊 Progress: {_progress_bar(pct)} {pct}%\n"
-                f"✅ তৈরি হয়েছে: {made} টি MCQ"
+                f"📊 Progress: {_progress_bar(pct)} {pct}%"
             )
             try:
                 await edit_fn(text)
