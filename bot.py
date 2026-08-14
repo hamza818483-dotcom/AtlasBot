@@ -527,11 +527,19 @@ def _track_attempt(provider: str, key_label: str, ok: bool, exhausted: bool = Fa
         return
     _reset_provider_stats_if_new_day()
     p = _provider_stats.setdefault(provider, {})
-    k = p.setdefault(key_label or provider, {"ok": 0, "fail": 0, "exhausted": False, "last": ""})
+    k = p.setdefault(key_label or provider, {"ok": 0, "fail": 0, "exhausted": False, "last": "", "consec_fail": 0, "cooldown_until": 0.0})
     if ok:
         k["ok"] += 1
+        k["consec_fail"] = 0
+        k["cooldown_until"] = 0.0
     else:
         k["fail"] += 1
+        k["consec_fail"] = k.get("consec_fail", 0) + 1
+        # non-quota fail (timeout/network/5xx) repeated 3x in a row -> put
+        # this key/model on a short cooldown so rotation skips straight to
+        # a healthier key instead of retrying a known-currently-bad one
+        if not exhausted and k["consec_fail"] >= 3:
+            k["cooldown_until"] = time.time() + 120  # 2 min cooldown
     if exhausted:
         k["exhausted"] = True
     k["last"] = datetime.now(BD_TZ).strftime('%H:%M')
@@ -546,15 +554,23 @@ def _key_prefix(k: str) -> str:
 
 def _is_key_exhausted_today(provider: str, key_label: str) -> bool:
     """Checks _provider_stats (resets daily at BD midnight) to see if this
-    exact provider+key was already marked quota-exhausted today, so rotators
-    can skip straight past a known-dead key instead of wasting a round-trip
-    re-confirming it's still exhausted."""
+    exact provider+key was already marked quota-exhausted today (skip
+    permanently for today), OR is on a short cooldown after repeated
+    non-quota failures (timeout/network/5xx) — so rotation prefers a
+    healthy key/model instead of hammering a currently-bad one."""
     _reset_provider_stats_if_new_day()
     p = _provider_stats.get(provider)
     if not p:
         return False
     k = p.get(key_label)
-    return bool(k and k.get("exhausted"))
+    if not k:
+        return False
+    if k.get("exhausted"):
+        return True
+    cooldown_until = k.get("cooldown_until", 0.0)
+    if cooldown_until and time.time() < cooldown_until:
+        return True
+    return False
 
 async def _call_openai_compat(base_url: str, api_key: str, model: str,
                               prompt_text: str, image_bytes: Optional[bytes],
