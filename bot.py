@@ -2940,23 +2940,36 @@ def _progress_bar(pct: int) -> str:
 async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8, verb: str = "থেকে MCQ তৈরি হচ্ছে") -> None:
     """Edits a message every ~1.5s with live ETA countdown and % — a
     time-based estimate (actual generation happens in one AI call, so
-    there's no real per-item progress to track). Caps at 99% (never fake
-    '100%'/finished) since actual completion is signaled separately when
-    the AI call returns. Does NOT show a fake 'made X MCQ' count anymore —
-    that number was purely derived from elapsed time (pct/100 * hardcoded
-    22), not the real result, so it always showed ~20-22 regardless of
-    actual output."""
+    there's no real per-item progress to track). Does NOT show a fake
+    'made X MCQ' count — that number used to be purely derived from
+    elapsed time, not the real result, so it always showed ~20-22
+    regardless of actual output.
+
+    Once elapsed time passes total_eta (AI call taking longer than the
+    estimate), switches to an animated spinner instead of freezing at a
+    stuck percentage/ETA — a frozen number reads as "hung" to the user
+    even though work is still happening in the background."""
     start = time.time()
+    spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    i = 0
     try:
         while True:
             elapsed = time.time() - start
-            pct = min(99, int(elapsed / total_eta * 100))
-            eta_left = max(1, int(total_eta - elapsed))
-            text = (
-                f"🔄 {source_label} {verb}...\n"
-                f"⏱️ আনুমানিক সময়: {eta_left} সেকেন্ড\n"
-                f"📊 Progress: {_progress_bar(pct)} {pct}%"
-            )
+            if elapsed < total_eta:
+                pct = int(elapsed / total_eta * 100)
+                eta_left = max(1, int(total_eta - elapsed))
+                text = (
+                    f"🔄 {source_label} {verb}...\n"
+                    f"⏱️ আনুমানিক সময়: {eta_left} সেকেন্ড\n"
+                    f"📊 Progress: {_progress_bar(pct)} {pct}%"
+                )
+            else:
+                frame = spinner_frames[i % len(spinner_frames)]
+                i += 1
+                text = (
+                    f"{frame} {source_label} {verb}...\n"
+                    f"⏳ আরেকটু সময় লাগছে, কাজ চলছে..."
+                )
             try:
                 await edit_fn(text)
             except Exception:
