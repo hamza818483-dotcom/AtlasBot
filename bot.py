@@ -635,15 +635,22 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     JSON that would otherwise leak straight to the user unconverted."""
     rules = STRICT_SOURCE_RULES if expect_json else STRICT_SOURCE_RULES_PLAIN
     full_prompt = prompt_text + rules
+    _t_groq = time.time()
     # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
     txt = await _call_groq(full_prompt, image_bytes)
     if txt:
+        log(f"⏱️ [ai_generate] groq succeeded in {time.time()-_t_groq:.1f}s")
         return txt, "groq"
+    log(f"⏱️ [ai_generate] groq exhausted after {time.time()-_t_groq:.1f}s, trying gemini")
+    _t_gem = time.time()
     # 2) Gemini (fallback, all keys with rotation) -- tracked inside _call_gemini
     txt = await _call_gemini(full_prompt, image_bytes)
     if txt:
+        log(f"⏱️ [ai_generate] gemini succeeded in {time.time()-_t_gem:.1f}s")
         return txt, "gemini"
+    log(f"⏱️ [ai_generate] gemini exhausted after {time.time()-_t_gem:.1f}s, trying openrouter family")
     or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
+    _t_or = time.time()
     # 3) OpenRouter family: Qwen VL 72B / Nemotron / Gemma -- smooth model x key
     # rotation (same pattern as Groq): on failure, tries the next key for the
     # current model; once that model's keys are all exhausted, rotates to the
@@ -651,7 +658,9 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     # model that's currently rate-limited doesn't get retried first every time.
     txt, provider = await _call_openrouter_family(full_prompt, image_bytes, or_headers)
     if txt:
+        log(f"⏱️ [ai_generate] openrouter ({provider}) succeeded in {time.time()-_t_or:.1f}s")
         return txt, provider
+    log(f"⏱️ [ai_generate] openrouter family exhausted after {time.time()-_t_or:.1f}s, trying cloudflare")
     # 4) Cloudflare Workers AI — uses CF account directly, no per-request key
     # rotation since it's one shared account token.
     if CF_ACCOUNT_ID and CF_AI_TOKEN:
@@ -2766,7 +2775,9 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
         prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK + SELF_VERIFY_THOUGHT_LOCK
 
+        _t0 = time.time()
         response_text, provider = await ai_generate(prompt_text, image_bytes)
+        log(f"⏱️ [genmcq] ai_generate call took {time.time()-_t0:.1f}s (provider={provider or 'NONE'})")
         if not response_text:
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
