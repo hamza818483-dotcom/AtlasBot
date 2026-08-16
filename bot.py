@@ -4992,12 +4992,34 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
     mcqs, error = await generate_mcq_from_image(image_bytes, 'qbm_extract')
     prog_task.cancel()
     if error or not mcqs:
-        await wait_msg.edit_text(
-            "📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি।\n\n"
-            "💡 এই অপশনটি শুধু পেইজে already ছাপানো MCQ খুঁজে বের করে — "
-            "নতুন MCQ বানায় না। এই পেইজে যদি সত্যিই কোনো MCQ ছাপা না থাকে, "
-            "তাহলে অন্য কোনো টাইপ সিলেক্ট করে নতুন MCQ বানিয়ে নিতে পারেন।"
-        )
+        # v5.13: surface WHY both providers failed (no-keys / all-quota-exhausted /
+        # timeout / bad-response) instead of always showing the generic "no MCQ found"
+        # message — the generic message is wrong/misleading when the real cause is a
+        # provider-level failure, not an actually-empty page.
+        diag = []
+        if not GEMINI_KEYS:
+            diag.append("Gemini: কোনো API key কনফিগার করা নেই (GEMINI_KEY env var খালি)")
+        elif all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS))):
+            diag.append("Gemini: সবগুলো key আজকের কোটা শেষ")
+        if not GROQ_KEYS:
+            diag.append("Groq: কোনো API key কনফিগার করা নেই (GROQ_KEY env var খালি)")
+        elif all(_is_key_exhausted_today("groq", f"groq#{i+1}:{GROQ_MODELS[0].split('/')[-1][:18]}") for i in range(len(GROQ_KEYS))):
+            diag.append("Groq: সবগুলো key আজকের কোটা শেষ")
+
+        if diag:
+            await wait_msg.edit_text(
+                "⚠️ **MCQ extract করা যায়নি — technical কারণ:**\n"
+                + "\n".join(f"• {d}" for d in diag)
+                + "\n\n🔧 এটা page-এ MCQ না থাকার সমস্যা না — provider/key সমস্যা। "
+                "Render/HF-এর env vars (GEMINI_KEY, GROQ_KEY) চেক করুন।"
+            )
+        else:
+            await wait_msg.edit_text(
+                "📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি, "
+                "অথবা AI provider সাময়িকভাবে সাড়া দেয়নি (timeout/error)।\n\n"
+                "💡 আবার চেষ্টা করুন — যদি বারবার এমন হয়, page-টি জুম করে/আলাদা করে "
+                "আবার পাঠিয়ে দেখুন, অথবা অন্য কোনো টাইপ সিলেক্ট করে নতুন MCQ বানিয়ে নিতে পারেন।"
+            )
         return
 
     new_mcqs = apply_tag_exp(clean_mcq_options(_normalize_qbm_answers(mcqs)))
