@@ -362,6 +362,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
     tries = max(1, len(GEMINI_KEYS))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
+        _t0 = time.time()
         try:
             contents = [prompt_text]
             if image_bytes:
@@ -379,16 +380,23 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
                 )),
                 timeout=15
             )
+            _dt = time.time() - _t0
             if resp and resp.text:
                 _track_attempt("gemini", klabel, ok=True)
+                log(f"⏱️ [gemini:{klabel}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
                 return resp.text
             _track_attempt("gemini", klabel, ok=False)
+            log_error(f"[gemini:{klabel}] empty response after {_dt:.1f}s")
         except asyncio.TimeoutError:
+            _dt = time.time() - _t0
             _track_attempt("gemini", klabel, ok=False, exhausted=False)
+            log_error(f"[gemini:{klabel}] TimeoutError after {_dt:.1f}s (limit 15s)")
         except Exception as e:
+            _dt = time.time() - _t0
             es = str(e).lower()
             exhausted = any(s in es for s in ("quota", "429", "resource_exhausted"))
             _track_attempt("gemini", klabel, ok=False, exhausted=exhausted)
+            log_error(f"[gemini:{klabel}] {type(e).__name__} after {_dt:.1f}s: {e}")
         rotate_gemini_key()
     return None
 
@@ -595,30 +603,40 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     # fast and let the outer key/model rotation try the next one instead of
     # burning time retrying the same bad key
     for attempt in range(max_retries):
+        _t0 = time.time()
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+                _dt = time.time() - _t0
                 if r.status_code == 200:
                     data = r.json()
                     txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     if txt:
                         _track_attempt(provider, key_label, ok=True)
+                        log(f"⏱️ [{provider}:{key_label}] OK in {_dt:.1f}s ({len(txt)} chars)")
                         return txt, False
+                    log_error(f"[{provider}:{key_label}] 200 but empty content after {_dt:.1f}s")
                     return None, False
                 if r.status_code == 429:
                     _track_attempt(provider, key_label, ok=False, exhausted=True)
+                    log_error(f"[{provider}:{key_label}] 429 rate-limited/exhausted after {_dt:.1f}s")
                     return None, True
                 if r.status_code in (500, 502, 503) and attempt < max_retries - 1:
                     await asyncio.sleep(0.5)
                     continue
                 _track_attempt(provider, key_label, ok=False)
+                log_error(f"[{provider}:{key_label}] HTTP {r.status_code} after {_dt:.1f}s: {r.text[:200]}")
         except (httpx.TimeoutException, httpx.ConnectError) as e:
+            _dt = time.time() - _t0
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5)
                 continue
             _track_attempt(provider, key_label, ok=False)
+            log_error(f"[{provider}:{key_label}] {type(e).__name__} after {_dt:.1f}s: {e}")
         except Exception as e:
+            _dt = time.time() - _t0
             _track_attempt(provider, key_label, ok=False)
+            log_error(f"[{provider}:{key_label}] {type(e).__name__} after {_dt:.1f}s: {e}")
             break
     return None, False
 
@@ -637,17 +655,23 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     _t_groq = time.time()
     # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
     txt = await _call_groq(full_prompt, image_bytes)
+    _dt_groq = time.time() - _t_groq
     if txt:
-        log(f"⏱️ [ai_generate] groq succeeded in {time.time()-_t_groq:.1f}s")
+        log(f"⏱️ [ai_generate] groq succeeded in {_dt_groq:.1f}s")
+        if _dt_groq > 8:
+            log_error(f"[ai_generate] groq SLOW SUCCESS: {_dt_groq:.1f}s (target <8s)")
         return txt, "groq"
-    log(f"⏱️ [ai_generate] groq exhausted after {time.time()-_t_groq:.1f}s, trying gemini")
+    log_error(f"[ai_generate] groq exhausted after {_dt_groq:.1f}s, trying gemini")
     _t_gem = time.time()
     # 2) Gemini (fallback, all keys with rotation) -- tracked inside _call_gemini
     txt = await _call_gemini(full_prompt, image_bytes)
+    _dt_gem = time.time() - _t_gem
     if txt:
-        log(f"⏱️ [ai_generate] gemini succeeded in {time.time()-_t_gem:.1f}s")
+        log(f"⏱️ [ai_generate] gemini succeeded in {_dt_gem:.1f}s")
+        if _dt_gem > 8:
+            log_error(f"[ai_generate] gemini SLOW SUCCESS: {_dt_gem:.1f}s (target <8s)")
         return txt, "gemini"
-    log(f"⏱️ [ai_generate] gemini exhausted after {time.time()-_t_gem:.1f}s, trying openrouter family")
+    log_error(f"[ai_generate] gemini exhausted after {_dt_gem:.1f}s, trying openrouter family")
     or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
     _t_or = time.time()
     # 3) OpenRouter family: Qwen VL 72B / Nemotron / Gemma -- smooth model x key
@@ -659,7 +683,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     if txt:
         log(f"⏱️ [ai_generate] openrouter ({provider}) succeeded in {time.time()-_t_or:.1f}s")
         return txt, provider
-    log(f"⏱️ [ai_generate] openrouter family exhausted after {time.time()-_t_or:.1f}s, trying cloudflare")
+    log_error(f"[ai_generate] openrouter family exhausted after {time.time()-_t_or:.1f}s, trying cloudflare")
     # 4) Cloudflare Workers AI — uses CF account directly, no per-request key
     # rotation since it's one shared account token.
     if CF_ACCOUNT_ID and CF_AI_TOKEN:
