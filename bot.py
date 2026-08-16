@@ -7450,52 +7450,63 @@ async def register_handlers() -> None:
     log("✅ All handlers registered")
 
 async def set_bot_commands() -> None:
-    """User menu = user commands only. Owner gets full set via owner-scope."""
-    try:
-        user_commands = [
-            BotCommand("menu", "📋 Main Menu"),
-            BotCommand("start", "🤖 বট শুরু / স্বাগতম"),
-            BotCommand("all", "📚 আমার সব MCQ সেট দেখুন"),
-            BotCommand("bmexam", "🔖 Bookmark MCQ দিয়ে Exam"),
-            BotCommand("gpa", "🎯 MBBS GPA Score হিসাব"),
-            BotCommand("timer", "🍅 Pomodoro Study Timer"),
-            BotCommand("revision", "🔁 আগের MCQ ঝালাই"),
-            BotCommand("random", "🎲 Random MCQ Practice"),
-            BotCommand("atlas", "📊 Poll-এ reply করে অপশন ব্যাখ্যা"),
-            BotCommand("progress", "📊 নিজের অগ্রগতি দেখুন"),
-            BotCommand("report", "📈 বিগত দিনের Report"),
-            BotCommand("class", "🎓 এটলাসের ফ্রী ক্লাস"),
-            BotCommand("bm", "🔖 Bookmark PDF ডাউনলোড"),
-            BotCommand("pdfc", "📸 একাধিক Image → PDF"),
-            BotCommand("help", "❓ সাহায্য"),
+    """User menu = user commands only. Owner gets full set via owner-scope.
+    v5.27: added retry — a transient failure here previously left the "/"
+    menu empty/stale for the rest of the process lifetime since this only
+    ever ran once at startup with no retry on failure."""
+    user_commands = [
+        BotCommand("menu", "📋 Main Menu"),
+        BotCommand("start", "🤖 বট শুরু / স্বাগতম"),
+        BotCommand("all", "📚 আমার সব MCQ সেট দেখুন"),
+        BotCommand("bmexam", "🔖 Bookmark MCQ দিয়ে Exam"),
+        BotCommand("gpa", "🎯 MBBS GPA Score হিসাব"),
+        BotCommand("timer", "🍅 Pomodoro Study Timer"),
+        BotCommand("revision", "🔁 আগের MCQ ঝালাই"),
+        BotCommand("random", "🎲 Random MCQ Practice"),
+        BotCommand("atlas", "📊 Poll-এ reply করে অপশন ব্যাখ্যা"),
+        BotCommand("progress", "📊 নিজের অগ্রগতি দেখুন"),
+        BotCommand("report", "📈 বিগত দিনের Report"),
+        BotCommand("class", "🎓 এটলাসের ফ্রী ক্লাস"),
+        BotCommand("bm", "🔖 Bookmark PDF ডাউনলোড"),
+        BotCommand("pdfc", "📸 একাধিক Image → PDF"),
+        BotCommand("help", "❓ সাহায্য"),
+    ]
+    for attempt in range(3):
+        try:
+            await application.bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+            break
+        except Exception as e:
+            log_error(f"set_my_commands (default scope) attempt {attempt+1}/3 failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+    # Owner gets everything (user + admin)
+    if OWNER_ID:
+        from telegram import BotCommandScopeChat
+        owner_commands = user_commands + [
+            BotCommand("info", "👥 ইউজার রিপোর্ট"),
+            BotCommand("keys", "🔑 AI Keys/Quota analytics"),
+            BotCommand("permit", "✅ ইউজার পারমিট"),
+            BotCommand("limit", "⚙️ লিমিট সেট"),
+            BotCommand("free", "🔢 ফ্রি লিমিট"),
+            BotCommand("daily", "🔢 পারমিটেড লিমিট"),
+            BotCommand("setneg", "➖ নেগেটিভ মার্ক"),
+            BotCommand("settimer", "⏱️ কুইজ টাইমার"),
+            BotCommand("tag", "🏷️ কুইজ ট্যাগ"),
+            BotCommand("exp", "📝 Exp suffix"),
+            BotCommand("prompt", "📋 প্রম্পট ম্যানেজ"),
+            BotCommand("send", "📨 ব্রডকাস্ট"),
+            BotCommand("log", "📋 এরর লগ"),
+            BotCommand("error", "🚨 Latest error"),
         ]
-        await application.bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
-        # Owner gets everything (user + admin)
-        if OWNER_ID:
-            from telegram import BotCommandScopeChat
-            owner_commands = user_commands + [
-                BotCommand("info", "👥 ইউজার রিপোর্ট"),
-                BotCommand("keys", "🔑 AI Keys/Quota analytics"),
-                BotCommand("permit", "✅ ইউজার পারমিট"),
-                BotCommand("limit", "⚙️ লিমিট সেট"),
-                BotCommand("free", "🔢 ফ্রি লিমিট"),
-                BotCommand("daily", "🔢 পারমিটেড লিমিট"),
-                BotCommand("setneg", "➖ নেগেটিভ মার্ক"),
-                BotCommand("settimer", "⏱️ কুইজ টাইমার"),
-                BotCommand("tag", "🏷️ কুইজ ট্যাগ"),
-                BotCommand("exp", "📝 Exp suffix"),
-                BotCommand("prompt", "📋 প্রম্পট ম্যানেজ"),
-                BotCommand("send", "📨 ব্রডকাস্ট"),
-                BotCommand("log", "📋 এরর লগ"),
-                BotCommand("error", "🚨 Latest error"),
-            ]
+        for attempt in range(3):
             try:
                 await application.bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=OWNER_ID))
+                break
             except Exception as e:
-                log_error(f"Owner command scope set failed: {e}")
-        log("✅ Bot commands set (user menu + owner full)")
-    except Exception as e:
-        log_error(f"Failed to set commands: {e}")
+                log_error(f"set_my_commands (owner scope) attempt {attempt+1}/3 failed: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+    log("✅ Bot commands set (user menu + owner full)")
 
 async def setup_bot() -> None:
     global application, BOT_USERNAME
