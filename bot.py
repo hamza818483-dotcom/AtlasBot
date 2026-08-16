@@ -451,6 +451,10 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     # v5.5: downscale once here (not per-key) — Groq's TPM limit is tight
     # enough that a full-resolution image alone can exceed it (HTTP 413)
     groq_image_bytes = _downscale_image_for_tpm(image_bytes) if image_bytes else image_bytes
+    # v5.6: TPM 8000 is tight even after image downscale if prompt is long —
+    # cap prompt text too so image+prompt together stay under budget.
+    if len(prompt_text) > 6000:
+        prompt_text = prompt_text[:6000]
     _budget_start = time.time()
     GROQ_TIME_BUDGET = 16.0
     for m_attempt in range(n_models):
@@ -535,7 +539,7 @@ def _b64_data_url(image_bytes: bytes) -> str:
         mime = "image/webp"
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
-def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 1280, jpeg_quality: int = 82) -> bytes:
+def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 960, jpeg_quality: int = 70) -> bytes:
     """v5.5: Groq's TPM limit (8000 for qwen3.6-27b) counts image tokens
     proportional to resolution — a full-resolution phone photo (e.g.
     3000x4000) can alone exceed the whole per-minute budget, causing 413
@@ -696,6 +700,46 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
             break
     return None, False
 
+CF_WORKERS_AI_RUN_BASE = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run" if CF_ACCOUNT_ID else ""
+
+async def _call_cf_workers_ai(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
+    """v5.6: llama-3.2-11b-vision-instruct rejects the OpenAI-compat
+    /v1/chat/completions image_url content-block format on Cloudflare's
+    side (HTTP 400 'no user-supplied nor system-supplied messages') — this
+    model's vision input isn't reliably supported through that shared
+    endpoint. Switched to CF's native /ai/run/{model} endpoint instead,
+    which takes `image` as a raw byte array and `prompt` as plain text —
+    the documented working format for this model."""
+    if not (CF_ACCOUNT_ID and CF_AI_TOKEN and CF_WORKERS_AI_RUN_BASE):
+        return None
+    text = prompt_text.strip() or "Describe this image."
+    headers = {"Authorization": f"Bearer {CF_AI_TOKEN}", "Content-Type": "application/json"}
+    payload: Dict[str, Any] = {"prompt": text, "max_tokens": 4096}
+    if image_bytes:
+        payload["image"] = list(image_bytes)
+    url = f"{CF_WORKERS_AI_RUN_BASE}/{CF_WORKERS_AI_MODEL}"
+    _t0 = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=25) as client:
+            r = await client.post(url, json=payload, headers=headers)
+            _dt = time.time() - _t0
+            if r.status_code == 200:
+                data = r.json()
+                txt = (data.get("result") or {}).get("response", "")
+                if txt:
+                    _track_attempt("cf-workers-ai", "cf#1", ok=True)
+                    log(f"⏱️ [cf-workers-ai:cf#1] OK in {_dt:.1f}s ({len(txt)} chars)")
+                    return txt
+                log_error(f"[cf-workers-ai:cf#1] 200 but empty response after {_dt:.1f}s: {str(data)[:200]}")
+                return None
+            _track_attempt("cf-workers-ai", "cf#1", ok=False)
+            log_error(f"[cf-workers-ai:cf#1] HTTP {r.status_code} after {_dt:.1f}s: {r.text[:200]}")
+    except Exception as e:
+        _dt = time.time() - _t0
+        _track_attempt("cf-workers-ai", "cf#1", ok=False)
+        log_error(f"[cf-workers-ai:cf#1] {type(e).__name__} after {_dt:.1f}s: {e}")
+    return None
+
 async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, expect_json: bool = True) -> Tuple[Optional[str], str]:
     """v4.3: Full fallback chain. Returns (text, provider_name) or (None, '').
     Order: Groq (PRIMARY) -> Gemini -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
@@ -743,9 +787,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     # 4) Cloudflare Workers AI — uses CF account directly, no per-request key
     # rotation since it's one shared account token.
     if CF_ACCOUNT_ID and CF_AI_TOKEN:
-        txt, _ = await _call_openai_compat(CF_WORKERS_AI_BASE, CF_AI_TOKEN, CF_WORKERS_AI_MODEL,
-                                           full_prompt, image_bytes, provider="cf-workers-ai",
-                                           key_label="cf#1")
+        txt = await _call_cf_workers_ai(full_prompt, image_bytes)
         if txt:
             return txt, "cf-workers-ai"
     # 5) NVIDIA Vision (final fallback) -- all keys rotated
