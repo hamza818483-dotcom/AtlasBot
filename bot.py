@@ -3046,7 +3046,14 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
                     valid_mcqs = retry_mcqs
                     provider = rp
         if len(valid_mcqs) == 0:
-            return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
+            # v5.10: when the AI understood the image but found no usable
+            # content (e.g. a menu/dashboard screenshot with no actual
+            # study text), it often explains why in plain text instead of
+            # JSON — surface that reason instead of a generic message.
+            reason_hint = ""
+            if response_text and len(response_text.strip()) < 500 and '{' not in response_text and '[' not in response_text:
+                reason_hint = f"\n\nℹ️ {response_text.strip()[:300]}"
+            return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।" + reason_hint
         valid_mcqs = valid_mcqs[:MAX_MCQ]
         valid_mcqs = shuffle_mcq_answers(valid_mcqs)
         log(f"✅ Generated {len(valid_mcqs)} MCQs from image (prompt: {prompt_type}, provider: {provider})")
@@ -3091,7 +3098,10 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
                     valid_mcqs = retry_mcqs
                     provider = rp
         if len(valid_mcqs) == 0:
-            return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
+            reason_hint = ""
+            if response_text and len(response_text.strip()) < 500 and '{' not in response_text and '[' not in response_text:
+                reason_hint = f"\n\nℹ️ {response_text.strip()[:300]}"
+            return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।" + reason_hint
         valid_mcqs = valid_mcqs[:MAX_MCQ]
         valid_mcqs = shuffle_mcq_answers(valid_mcqs)
         log(f"✅ Generated {len(valid_mcqs)} MCQs from text (prompt: {prompt_type}, provider: {provider})")
