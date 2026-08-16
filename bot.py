@@ -2749,12 +2749,85 @@ async def _qbm_call1_extract(image_bytes: bytes) -> list:
 
 async def _qbm_call2_miss_check(image_bytes: bytes, call1_mcqs: list) -> list:
     """
-    CALL 2 -- connected audit of Call 1's specific output (not a fresh
-    re-extraction): checks if any existing MCQ was missed (especially the
-    last MCQ on the page), adds only the missed ones, then re-dedupes the
-    combined list once more.
+    CALL 2 -- MERGED miss-check + answer-source verification, single call
+    (v5.11, matches QuizBot's current design: "no separate Call 3"). Job:
+    1) MISS-CHECK: confirm Call 1 caught every MCQ on the page (especially
+       the last one), add any missed ones in the same strict format.
+    2) ANSWER-SOURCE VERIFY: for every MCQ (Call 1's + any newly-found),
+       re-examine the page independently for where its correct answer is
+       actually shown (mark/circle/tick/underline/bold, inline answer, or
+       an answer box/table on this page) and correct the answer letter if
+       the page disagrees with what Call 1 assigned.
+    Gemini primary -> Groq fallback.
     """
     if not call1_mcqs:
+        return call1_mcqs
+    try:
+        q_summary = "\n".join(
+            f"{i+1}. {(m.get('question') or '')[:100]} | current answer: {m.get('answer','A')}"
+            for i, m in enumerate(call1_mcqs)
+        )
+        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
+{q_summary if q_summary else "(none found)"}
+
+TASK -- do BOTH steps below in this single pass, connected to Call 1 (do not redo full
+extraction from scratch):
+
+STEP A -- MISS-CHECK:
+1) Look at the page again and check if ANY existing MCQ was MISSED by the list above
+   (especially the LAST MCQ on the page -- most commonly missed).
+2) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
+   source position order, A/B/C/D slots by position -- never relabeled/sorted).
+2b) LANGUAGE (strict, zero-tolerance): each missed MCQ's question/options/explanation MUST be
+   in that MCQ's own actual source language on the page -- never translated, never defaulted
+   to a different language, never blended unless the source itself mixes languages.
+3) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
+   text to its question (self-contained), same as Call 1's rule.
+
+STEP B -- ANSWER-SOURCE VERIFICATION (for BOTH the MCQs listed above AND any you found missed
+in Step A): look at the page again and find where each question's correct answer is actually
+shown -- a mark/circle/tick/underline/bold on an option, an inline answer right after the
+question, or an answer box/table on THIS page. Do NOT re-answer from your own knowledge --
+only report what the page itself visibly shows. If the page's answer source disagrees with
+the "current answer" listed above, use the page's answer instead. If you cannot find any
+answer source on this page for a question, keep its current answer as-is.
+
+Output ONLY a JSON array containing:
+- every MISSED MCQ found in Step A (new entries, full schema)
+- for every EXISTING MCQ from the list above whose answer changed in Step B, an entry with
+  just its 1-based number from the list and the corrected answer: {{"fix_index": N, "answer": "X"}}
+- if nothing was missed and no answers changed, output exactly: []
+
+Schema for missed MCQs:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]
+Schema for answer fixes:
+[{{"fix_index":3,"answer":"C"}}]
+Mix both types freely in the same array."""
+        txt = await _call_gemini(prompt, image_bytes)
+        if not txt:
+            txt = await _call_groq(prompt, image_bytes)
+        raw = _qbm_parse_json(txt) if txt else []
+
+        missed = [item for item in raw if isinstance(item, dict) and "question" in item]
+        fixes = {item["fix_index"]: item.get("answer") for item in raw
+                 if isinstance(item, dict) and "fix_index" in item and "answer" in item}
+
+        fixed_call1 = []
+        for i, mc in enumerate(call1_mcqs):
+            finding = fixes.get(i + 1)
+            fu = str(finding).strip().upper() if finding else ""
+            if fu in ("A", "B", "C", "D") and fu != str(mc.get("answer", "A")).upper():
+                log(f"[QBM Call2] Answer correction Q{i+1}: {mc.get('answer')} -> {fu} (page re-scan disagreed with Call 1)")
+                mc2 = dict(mc)
+                mc2["answer"] = fu
+                fixed_call1.append(mc2)
+            else:
+                fixed_call1.append(mc)
+
+        combined = fixed_call1 + missed
+        return _qbm_dedup_list(combined)
+    except Exception as e:
+        log_error(f"[QBM Call2] failed: {e}")
         return call1_mcqs
     try:
         q_summary = "\n".join(
@@ -2829,77 +2902,6 @@ async def _qbm_ram_aware_acquire():
             await asyncio.sleep(0.5)
     except ImportError:
         return
-
-
-async def _qbm_call3_verify_answers(image_bytes: bytes, mcqs: list) -> list:
-    """
-    CALL 3 -- CODE-LEVEL ANSWER-SOURCE VERIFICATION (hard enforcement, not just
-    prompt-level trust). Re-examines the SAME page image a second, independent
-    time -- specifically hunting for the answer source for every MCQ already
-    extracted -- and cross-checks each against Call 1/2's answer letter.
-    This exists because Call 1/2 do extraction+answer in one shot; a wrong
-    answer there would otherwise pass through unquestioned. This call's ONLY
-    job is answer-sourcing, so it gets full attention on marks/inline
-    answers/bottom-of-page keys instead of splitting focus with extraction.
-    On mismatch, the page-sourced answer WINS (Call 1/2 could have misread
-    which option was marked); if this call can't find a source either, the
-    original answer is kept as-is (no regression vs. before).
-    """
-    if not mcqs:
-        return mcqs
-    try:
-        q_summary = "\n".join(
-            f"{i+1}. {(m.get('question') or '')[:90]} | current answer: {m.get('answer','A')}"
-            for i, m in enumerate(mcqs)
-        )
-        prompt = f"""You are doing a SECOND, INDEPENDENT answer-verification pass on this exact page
-image. Below is a list of MCQs already extracted from it, each with the answer letter
-currently assigned:
-
-{q_summary}
-
-YOUR ONLY JOB: for EACH question above, look at the page again and find where its correct
-answer is actually shown -- a mark/circle/tick/underline/bold on an option, an inline answer
-right after the question, or an answer box/table on THIS page. Do NOT re-answer from your own
-knowledge -- only report what the page itself visibly shows.
-
-For each question number, output your finding:
-- If the page shows a clear answer source and it MATCHES the current answer -> "CONFIRMED"
-- If the page shows a clear answer source and it's DIFFERENT from the current answer -> output
-  the correct letter you found on the page (A/B/C/D)
-- If you cannot find any answer source on THIS page for that question (it may be on another
-  page, e.g. an answer key several pages later) -> "NO_SOURCE_ON_PAGE"
-
-Output ONLY a JSON object mapping question number (as string) to your finding, nothing else:
-{{"1":"CONFIRMED","2":"C","3":"NO_SOURCE_ON_PAGE"}}"""
-        txt = await _call_groq(prompt, image_bytes)
-        if not txt:
-            txt = await _call_gemini(prompt, image_bytes)
-        if not txt:
-            return mcqs
-        m = re.search(r'\{.*\}', txt, re.DOTALL)
-        if not m:
-            return mcqs
-        findings = json.loads(m.group())
-        out = []
-        for i, mc in enumerate(mcqs):
-            finding = findings.get(str(i + 1), "")
-            fu = str(finding).strip().upper()
-            if fu in ("A", "B", "C", "D") and fu != str(mc.get("answer", "A")).upper():
-                log(
-                    f"[QBM Call3] Answer correction Q{i+1}: {mc.get('answer')} -> {fu} "
-                    f"(page re-scan disagreed with Call 1/2)",
-                    level="WARNING"
-                )
-                mc2 = dict(mc)
-                mc2["answer"] = fu
-                out.append(mc2)
-            else:
-                out.append(mc)
-        return out
-    except Exception as e:
-        log_error(f"[QBM Call3 verify] failed: {e}")
-        return mcqs
 
 
 async def _qbm_upload_figure_crops(image_bytes: bytes, mcqs: list) -> list:
@@ -2978,19 +2980,18 @@ async def _qbm_upload_figure_crops(image_bytes: bytes, mcqs: list) -> list:
 
 async def qbm_extract_from_image(image_bytes: bytes) -> list:
     """
-    Public entry point: Call 1 (extract) -> Call 2 (miss-check) -> Call 3
-    (code-level answer-source re-verification) -> figure crop+upload,
-    connected pipeline. v5.11: Call1/Call2 now Gemini-primary -> Groq
-    fallback, matching QuizBot's proven order (Gemini gives better raw
-    extraction quality; Groq is fallback for its higher daily budget).
-    Returns MCQs in this bot's standard {question, options[list],
-    answer[int], explanation} format.
+    Public entry point: Call 1 (extract) -> Call 2 (merged miss-check +
+    answer-source verification, no separate Call 3) -> figure crop+upload,
+    connected pipeline. v5.11: matches QuizBot's exact current design —
+    Gemini-primary -> Groq fallback for both calls, and verification
+    folded into Call 2 instead of a separate Call 3 (QuizBot's own code
+    comment: "no separate Call 3"). Returns MCQs in this bot's standard
+    {question, options[list], answer[int], explanation} format.
     """
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _qbm_call1_extract(image_bytes)
-        combined = await _qbm_call2_miss_check(image_bytes, call1)
-        verified = await _qbm_call3_verify_answers(image_bytes, combined)
+        verified = await _qbm_call2_miss_check(image_bytes, call1)
         with_figures = await _qbm_upload_figure_crops(image_bytes, verified)
         result = _qbm_answer_letter_to_index(with_figures)
         # 🔒 Same mnemonic-pairing ground-truth check used elsewhere — catches wrong/
