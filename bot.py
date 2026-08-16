@@ -362,47 +362,33 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
     tries = max(1, len(GEMINI_KEYS))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
-        for retry in range(2):
-            try:
-                contents = [prompt_text]
-                if image_bytes:
-                    contents.append(Image.open(BytesIO(image_bytes)))
-                loop = asyncio.get_event_loop()
-                resp = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            temperature=0.7, top_p=0.95, top_k=40,
-                            max_output_tokens=8192,
-                            thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                        )
-                    )),
-                    timeout=20
-                )
-                if resp and resp.text:
-                    _track_attempt("gemini", klabel, ok=True)
-                    return resp.text
-                _track_attempt("gemini", klabel, ok=False)
-                break
-            except asyncio.TimeoutError:
-                if retry == 0:
-                    await asyncio.sleep(0.5)
-                    continue
-                _track_attempt("gemini", klabel, ok=False, exhausted=False)
-                break
-            except Exception as e:
-                es = str(e).lower()
-                exhausted = any(s in es for s in ("quota", "429", "resource_exhausted"))
-                if exhausted:
-                    _track_attempt("gemini", klabel, ok=False, exhausted=True)
-                    break
-                if "500" in es or "503" in es or "timeout" in es or "unavailable" in es:
-                    if retry == 0:
-                        await asyncio.sleep(1)
-                        continue
-                _track_attempt("gemini", klabel, ok=False, exhausted=False)
-                break
+        try:
+            contents = [prompt_text]
+            if image_bytes:
+                contents.append(Image.open(BytesIO(image_bytes)))
+            loop = asyncio.get_event_loop()
+            resp = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=0.7, top_p=0.95, top_k=40,
+                        max_output_tokens=4096,
+                        thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                    )
+                )),
+                timeout=15
+            )
+            if resp and resp.text:
+                _track_attempt("gemini", klabel, ok=True)
+                return resp.text
+            _track_attempt("gemini", klabel, ok=False)
+        except asyncio.TimeoutError:
+            _track_attempt("gemini", klabel, ok=False, exhausted=False)
+        except Exception as e:
+            es = str(e).lower()
+            exhausted = any(s in es for s in ("quota", "429", "resource_exhausted"))
+            _track_attempt("gemini", klabel, ok=False, exhausted=exhausted)
         rotate_gemini_key()
     return None
 
@@ -424,7 +410,7 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     n_keys = len(GROQ_KEYS)
     n_models = len(models)
     _budget_start = time.time()
-    GROQ_TIME_BUDGET = 15.0
+    GROQ_TIME_BUDGET = 16.0
     for m_attempt in range(n_models):
         model = models[(_groq_model_idx + m_attempt) % n_models]
         model_label = model.split('/')[-1][:18]
@@ -469,6 +455,8 @@ async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes]
         (GEMMA_KEYS or OPENROUTER_KEYS, GEMMA_MODEL, "gemma"),
     ]
     n_models = len(chains)
+    _or_budget_start = time.time()
+    OR_TIME_BUDGET = 15.0
     for m_attempt in range(n_models):
         m_i = (_or_model_idx + m_attempt) % n_models
         keys, model, name = chains[m_i]
@@ -478,6 +466,8 @@ async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes]
         start_k = _or_key_idx.get(name, 0)
         all_exhausted = all(_is_key_exhausted_today(name, f"{name}#{i+1}") for i in range(n_keys))
         for k_attempt in range(n_keys):
+            if time.time() - _or_budget_start > OR_TIME_BUDGET:
+                return None, ""
             key_i = (start_k + k_attempt) % n_keys
             k = keys[key_i]
             klabel = f"{name}#{key_i+1}"
@@ -606,7 +596,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     # burning time retrying the same bad key
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=25) as client:
+            async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
                 if r.status_code == 200:
                     data = r.json()
