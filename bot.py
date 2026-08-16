@@ -3450,7 +3450,6 @@ async def cmd_atlas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     wait_msg = await update.message.reply_text(
         f"🔄 Poll থেকে ব্যাখ্যা তৈরি হচ্ছে...\n"
-        f"⏱️ আনুমানিক সময়: 8 সেকেন্ড\n"
         f"📊 Progress: {_progress_bar(0)} 0%"
     )
 
@@ -3552,20 +3551,16 @@ async def live_progress_task(edit_fn, source_label: str, total_eta: int = 8, ver
             elapsed_line = f"⌛ এখন পর্যন্ত: {elapsed:.0f} সেকেন্ড\n"
             if elapsed < total_eta:
                 pct = int(elapsed / total_eta * 100)
-                eta_left = max(1, int(total_eta - elapsed))
-                eta_line = f"⏱️ আনুমানিক বাকি: {eta_left} সেকেন্ড\n"
             else:
                 # past estimate -- keep % creeping toward 99 (never frozen,
                 # never fully stuck) using a decaying approach curve
                 overtime = elapsed - total_eta
                 pct = min(99, 90 + int(9 * (1 - pow(2.71828, -overtime / 15))))
-                eta_line = "⏳ আরেকটু সময় লাগছে, কাজ চলছে...\n"
             type_line = f"🏷️ টাইপ: {type_label}\n" if type_label else ""
             text = (
                 f"🔄 {source_label} {verb}...\n"
                 f"{type_line}"
                 f"{elapsed_line}"
-                f"{eta_line}"
                 f"📊 Progress: {_progress_bar(pct)} {pct}%"
             )
             try:
