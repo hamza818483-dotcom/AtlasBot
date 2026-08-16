@@ -3034,7 +3034,17 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         # second full AI call), always dedupe, always hard-clamp MAX_MCQ.
         RETRY_THRESHOLD = 5  # only retry the whole AI call if genuinely too few
         attempts = 0
-        while len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1:
+        # v5.11: if the AI returned 0 MCQs with a plain-text explanation
+        # (e.g. "this image has no readable content"), that's a legitimate
+        # answer, not a parsing failure — retrying just burns the Gemini
+        # timeout budget for no benefit. Only retry the 1..RETRY_THRESHOLD-1
+        # range (genuinely too-few, not zero-with-explanation).
+        is_plain_text_explanation = (
+            len(valid_mcqs) == 0 and response_text and
+            len(response_text.strip()) < 500 and
+            '{' not in response_text and '[' not in response_text
+        )
+        while 0 < len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1 and not is_plain_text_explanation:
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
             retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।" + STRICT_SOURCE_RULES
