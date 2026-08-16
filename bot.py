@@ -402,7 +402,14 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
         except Exception as e:
             _dt = time.time() - _t0
             es = str(e).lower()
-            exhausted = any(s in es for s in ("quota", "429", "resource_exhausted"))
+            # v5.19: also treat suspended/permission-denied keys as
+            # "exhausted for today" so rotation skips them immediately on
+            # future calls instead of live-retrying a permanently-dead key
+            # every single time (real case seen: CONSUMER_SUSPENDED/403).
+            exhausted = any(s in es for s in (
+                "quota", "429", "resource_exhausted",
+                "suspended", "permission_denied", "403"
+            ))
             _track_attempt("gemini", klabel, ok=False, exhausted=exhausted)
             log_error(f"[gemini:{klabel}] {type(e).__name__} after {_dt:.1f}s: {e}")
         rotate_gemini_key()
