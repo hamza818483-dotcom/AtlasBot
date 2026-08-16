@@ -3087,6 +3087,30 @@ async def _qbm_upload_figure_crops(image_bytes: bytes, mcqs: list) -> list:
 
 _LAST_QBM_DIAG = {"stage": None, "provider": None, "raw_len": 0, "raw_preview": "", "error": ""}
 
+def _downscale_image_for_gemini_qbm(image_bytes: bytes, max_dim: int = 1600, jpeg_quality: int = 85) -> bytes:
+    """v5.18: QBM pages are often full-resolution phone photos (3000-4000px)
+    of dense, 2-column, small-font pages — Gemini's own generation time (not
+    upload) scales with image complexity, and on these pages it was
+    consistently timing out even at 35s. A moderate downscale (much lighter
+    than Groq's 640px/50% — that resolution is too aggressive and causes
+    hallucination) cuts processing load while keeping text legible, so
+    Gemini can finish within budget without falling back to the
+    lower-accuracy Groq path. Falls back to original bytes on any error."""
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        log_error(f"_downscale_image_for_gemini_qbm failed, using original bytes: {e}")
+        return image_bytes
+
+
 async def _qbm_extract_single_call(image_bytes: bytes) -> list:
     """
     v5.12: single-call extraction — one Gemini call does extraction +
@@ -3106,8 +3130,9 @@ async def _qbm_extract_single_call(image_bytes: bytes) -> list:
     """
     provider = None
     txt = None
+    gemini_image = _downscale_image_for_gemini_qbm(image_bytes)
     for gem_attempt in range(2):
-        txt = await _call_gemini(QBM_EXTRACT_PROMPT, image_bytes)
+        txt = await _call_gemini(QBM_EXTRACT_PROMPT, gemini_image)
         if txt:
             provider = "gemini"
             break
