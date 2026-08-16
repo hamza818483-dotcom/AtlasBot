@@ -424,7 +424,7 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     n_keys = len(GROQ_KEYS)
     n_models = len(models)
     _budget_start = time.time()
-    GROQ_TIME_BUDGET = 18.0
+    GROQ_TIME_BUDGET = 12.0
     for m_attempt in range(n_models):
         model = models[(_groq_model_idx + m_attempt) % n_models]
         model_label = model.split('/')[-1][:18]
@@ -604,7 +604,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     max_retries = 2
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=12) as client:
+            async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
                 if r.status_code == 200:
                     data = r.json()
