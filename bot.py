@@ -364,10 +364,22 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
     # artificial cutoff, matching QuizBot's actual working behavior.
     GEMINI_ATTEMPT_TIMEOUT = 90.0
     GEMINI_TIME_BUDGET = 100.0
+    # v5.28: previously, when EVERY Gemini key was already marked exhausted
+    # for today, the loop still made one live call anyway ("just in case the
+    # flag is stale") -- but since Gemini became primary, this meant every
+    # single request for the rest of the day paid a real 429 round-trip
+    # before falling back to Groq (exactly the RESOURCE_EXHAUSTED spam seen
+    # in error logs). Free tier is only 20 requests/day/key, so once it's
+    # gone it's gone until BD midnight reset -- no point re-probing on every
+    # call. Now: if all keys are exhausted, return None immediately (skip
+    # straight to Groq) instead of wasting a call.
     all_exhausted = all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS)))
+    if all_exhausted:
+        log("⏭️ [gemini] all keys exhausted for today — skipping straight to next provider")
+        return None
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
-        if not all_exhausted and _is_key_exhausted_today("gemini", klabel):
+        if _is_key_exhausted_today("gemini", klabel):
             rotate_gemini_key()
             continue  # already known quota-exhausted today -- skip straight to next key
         if time.time() - _gem_budget_start > GEMINI_TIME_BUDGET:
