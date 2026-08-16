@@ -654,6 +654,13 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
         "temperature": 0.7,
         "max_tokens": 4096,
     }
+    # v5.9: Groq's qwen3.6-27b is a reasoning model that prefixes output
+    # with <think>...</think> before the actual JSON, burning into
+    # max_tokens and breaking JSON parsing (matches QuizBot's proven fix —
+    # reasoning_effort, not reasoning_format, is the param that actually
+    # disables the thinking pass on Groq's endpoint for qwen models).
+    if "qwen" in model.lower():
+        payload["reasoning_effort"] = "none"
     max_retries = 1  # no retry-on-5xx here — a slow/bad attempt should fail
     # fast and let the outer key/model rotation try the next one instead of
     # burning time retrying the same bad key
@@ -1007,6 +1014,16 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
     source_terms = _terms_in_source(source_text) if source_text else set()
     t = (response_text or "").strip()
     t = t.replace('\u060c', ',')  # Arabic comma → normal comma (fixes all-strategies-failed bug)
+    # v5.9: reasoning models (e.g. Groq qwen3.6-27b) sometimes leak raw
+    # <think>...</think> chain-of-thought before the actual JSON output —
+    # strip it so the JSON extraction below can find the real array.
+    if '<think>' in t:
+        think_end = t.find('</think>')
+        if think_end != -1:
+            t = t[think_end + len('</think>'):].strip()
+        else:
+            # unclosed think block — nothing usable after it, drop entirely
+            t = t.split('<think>')[0].strip()
     if t.startswith('```json'):
         t = t[7:]
     if t.startswith('```'):
