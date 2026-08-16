@@ -2796,7 +2796,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         # v5.0: code-level count enforcement — only retry if noticeably short
         # (a near-miss like 9/10 isn't worth doubling total latency with a
         # second full AI call), always dedupe, always hard-clamp MAX_MCQ.
-        RETRY_THRESHOLD = max(1, MIN_MCQ - 3)  # e.g. MIN_MCQ=10 -> retry only if <7
+        RETRY_THRESHOLD = 5  # only retry the whole AI call if genuinely too few
         attempts = 0
         while len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1:
             attempts += 1
@@ -2810,7 +2810,8 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
                     provider = rp
         if len(valid_mcqs) == 0:
             return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
-        valid_mcqs = valid_mcqs[:MAX_MCQ]
+        # no MAX_MCQ clamp here — image path keeps every MCQ the page's
+        # information actually supports, however many that turns out to be
         log(f"✅ Generated {len(valid_mcqs)} MCQs from image (prompt: {prompt_type}, provider: {provider})")
         return valid_mcqs, None
 
