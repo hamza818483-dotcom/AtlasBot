@@ -380,7 +380,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
             loop = asyncio.get_event_loop()
             resp = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=contents,
                     config=types.GenerateContentConfig(
                         temperature=0.7, top_p=0.95, top_k=40,
