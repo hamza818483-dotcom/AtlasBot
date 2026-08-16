@@ -4077,9 +4077,15 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             pass
         prompts = get_prompts_from_db()
         keyboard = []
+        row = []
         for key, prompt_data in prompts.items():
             name = prompt_data.get('name', key)
-            keyboard.append([InlineKeyboardButton(name, callback_data=f"genmcq_{key}")])
+            row.append(InlineKeyboardButton(name, callback_data=f"genmcq_{key}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
         # v4.0: জ্ঞানমূলক / অনুধাবনমূলক buttons (image direct generation)
         keyboard.append([
             InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data="qaimg_k"),
