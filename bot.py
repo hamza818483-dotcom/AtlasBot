@@ -420,13 +420,31 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     This maximizes free-tier throughput across Groq's multiple vision models.
     v4.8: hard time budget (18s) so a batch of slow/dead keys can't stall the
     whole chain — bails out to Gemini fallback quickly instead of grinding
-    through every remaining key/model combo."""
+    through every remaining key/model combo.
+    v5.3: if fewer than MIN_HEALTHY_KEYS are actually healthy right now
+    (most already quota-exhausted/cooling down), skip Groq entirely instead
+    of burning the full time budget scanning mostly-dead keys — jump
+    straight to Gemini fallback instead."""
     global _groq_key_idx, _groq_model_idx
     if not GROQ_KEYS:
         return None
     models = GROQ_MODELS or [GROQ_MODEL]
     n_keys = len(GROQ_KEYS)
     n_models = len(models)
+    # Count healthy keys for the model we'd try first — if only 1 is
+    # healthy, don't bother scanning Groq at all this call, fall through
+    # to Gemini instantly instead of making one slow real attempt first.
+    # (0 healthy keys already skips near-instantly in the loop below since
+    # every key is a known-dead quick-skip, so no special case needed there.)
+    MIN_HEALTHY_KEYS = 3
+    first_model_label = models[_groq_model_idx % n_models].split('/')[-1][:18]
+    healthy_count = sum(
+        1 for i in range(n_keys)
+        if not _is_key_exhausted_today("groq", f"groq#{i+1}:{first_model_label}")
+    )
+    if 0 < healthy_count < MIN_HEALTHY_KEYS:
+        log(f"⏭️ [groq] only {healthy_count}/{n_keys} healthy keys for {first_model_label} — skipping straight to Gemini")
+        return None
     _budget_start = time.time()
     GROQ_TIME_BUDGET = 16.0
     for m_attempt in range(n_models):
