@@ -384,7 +384,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
                     config=types.GenerateContentConfig(
                         temperature=0.7, top_p=0.95, top_k=40,
                         max_output_tokens=4096,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        thinking_config=types.ThinkingConfig(thinking_level="low"),
                     )
                 )),
                 timeout=GEMINI_ATTEMPT_TIMEOUT
