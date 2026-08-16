@@ -1422,7 +1422,10 @@ def log_error(message: str) -> None:
             f.write(f"[{timestamp}] {message}\n{traceback.format_exc()}\n{'='*50}\n")
     except Exception:
         pass
-    # v4.0: auto-forward every error to OWNER (fire-and-forget)
+    # v5.8: auto-forward to owner disabled — errors are still logged to file
+    # and available via /error command on demand. This stops error spam
+    # directly in chat (e.g. rate-limit floods from key rotation).
+    return
     try:
         if application and _bot_loop and OWNER_ID:
             # Transient connection errors — retry handles them, no need to spam owner
