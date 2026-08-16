@@ -355,13 +355,15 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
         setup_gemini()
     tries = max(1, len(GEMINI_KEYS))
     _gem_budget_start = time.time()
-    # v5.7: per-attempt timeout (8s) is now well under the total budget (15s)
-    # so a single slow/dead key can't burn the whole budget in one shot —
-    # this lets multiple keys actually get tried before bailing to the next
-    # provider (previously per-attempt timeout == total budget, so only 1
-    # key was ever attempted no matter how many keys were configured).
-    GEMINI_ATTEMPT_TIMEOUT = 35.0
-    GEMINI_TIME_BUDGET = 60.0
+    # v5.20: QuizBot's proven /qbm implementation uses NO per-attempt
+    # timeout at all — it simply waits for Gemini to finish or error out
+    # naturally. Our earlier 35s hard-timeout was killing slow-but-actually-
+    # working requests on dense pages, forcing wasteful retries into Groq's
+    # lower-accuracy fallback and doubling total latency for nothing. Raised
+    # well above any real generation time instead of introducing an
+    # artificial cutoff, matching QuizBot's actual working behavior.
+    GEMINI_ATTEMPT_TIMEOUT = 90.0
+    GEMINI_TIME_BUDGET = 100.0
     all_exhausted = all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS)))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
@@ -3138,18 +3140,19 @@ async def _qbm_extract_single_call(image_bytes: bytes) -> list:
     provider = None
     txt = None
     gemini_image = _downscale_image_for_gemini_qbm(image_bytes)
-    for gem_attempt in range(2):
-        txt = await _call_gemini(QBM_EXTRACT_PROMPT, gemini_image)
-        if txt:
-            provider = "gemini"
-            break
-        log_error(f"[QBM single-call] Gemini attempt {gem_attempt+1}/2 empty, retrying before Groq fallback")
+    # v5.20: single Gemini attempt now that the per-attempt timeout is high
+    # enough to let a real (slow but working) generation finish — the
+    # earlier 2x retry loop was compensating for premature timeouts and
+    # just doubled total latency (147s) for no accuracy gain.
+    txt = await _call_gemini(QBM_EXTRACT_PROMPT, gemini_image)
+    if txt:
+        provider = "gemini"
     try:
         if not txt:
             txt = await _call_groq(QBM_EXTRACT_PROMPT, image_bytes)
             provider = "groq"
         if not txt:
-            log_error("[QBM single-call] BOTH gemini (2 tries) and groq returned empty/None (no raw text at all)")
+            log_error("[QBM single-call] BOTH gemini and groq returned empty/None (no raw text at all)")
             _LAST_QBM_DIAG["stage"] = "no_provider_response"
             return []
         result = _qbm_parse_json(txt)
