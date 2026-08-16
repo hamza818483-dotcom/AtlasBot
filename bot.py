@@ -336,12 +336,7 @@ def rotate_gemini_key():
 
 STRICT_SOURCE_RULES = """
 
-🔒 STRICT MANDATORY RULES (MUST FOLLOW 100%):
-1. প্রতিটি প্রশ্ন/অপশন/ব্যাখ্যা শুধুমাত্র Input Source (Image/Text) থেকে আসবে। নিজের জ্ঞান/আন্দাজ থেকে কিছু বানানো সম্পূর্ণ নিষেধ।
-2. Source-এর প্রতিটি গুরুত্বপূর্ণ তথ্য কভার করো — যত MCQ সম্ভব বানাও যেন একটাও সম্ভাব্য MCQ মিস না হয়। তবে Quality > Quantity।
-3. হাবিজাবি/দুর্বল/অপ্রাসঙ্গিক MCQ একদম নিষেধ।
-4. একটি প্রশ্নের একটিই সঠিক উত্তর — একাধিক সঠিক যেন না হয়।
-5. Output: ONLY valid JSON, no extra text."""
+RULES: Use ONLY the given source (image/text) — no outside knowledge. Cover all key info as MCQs (quality over quantity). No weak/irrelevant MCQs. Exactly one correct answer per question. Output ONLY valid JSON, no extra text."""
 
 # Plain-text variant (no "Output: ONLY valid JSON" instruction) — used for
 # explanation-style calls (/atlas, handle_explain_from_pending) which must
@@ -350,11 +345,7 @@ STRICT_SOURCE_RULES = """
 # clean human-readable explanation.
 STRICT_SOURCE_RULES_PLAIN = """
 
-🔒 STRICT MANDATORY RULES (MUST FOLLOW 100%):
-1. প্রতিটি তথ্য শুধুমাত্র Input Source (Image/Text) থেকে আসবে। নিজের জ্ঞান/আন্দাজ থেকে ভুল কিছু বানানো সম্পূর্ণ নিষেধ।
-2. Source-এর প্রতিটি গুরুত্বপূর্ণ তথ্য কভার করো — Quality সবসময় Quantity-এর চেয়ে বেশি গুরুত্বপূর্ণ।
-3. হাবিজাবি/দুর্বল/অপ্রাসঙ্গিক তথ্য একদম নিষেধ।
-4. Output অবশ্যই সাধারণ পাঠযোগ্য টেক্সট (plain readable text) হবে — কোনো JSON/code/markdown format নয়।"""
+RULES: Use ONLY the given source (image/text) — no invented facts. Quality over quantity. No irrelevant content. Output must be plain readable text — no JSON/code/markdown."""
 
 async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
     global _bot_genai_client
