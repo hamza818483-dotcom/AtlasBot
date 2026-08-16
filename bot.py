@@ -2811,11 +2811,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
                     provider = rp
         if len(valid_mcqs) == 0:
             return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
-        # v5.1: soft safety cap (not the old strict 10-20) — keeps output
-        # token count bounded so TPM limits don't stall the response, while
-        # still allowing far more than the old MAX_MCQ=20 when the page has it
-        IMAGE_MCQ_HARD_CAP = 30
-        valid_mcqs = valid_mcqs[:IMAGE_MCQ_HARD_CAP]
+        valid_mcqs = valid_mcqs[:MAX_MCQ]
         log(f"✅ Generated {len(valid_mcqs)} MCQs from image (prompt: {prompt_type}, provider: {provider})")
         return valid_mcqs, None
 
