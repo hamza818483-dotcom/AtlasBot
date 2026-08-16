@@ -360,8 +360,18 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
     if _bot_genai_client is None:
         setup_gemini()
     tries = max(1, len(GEMINI_KEYS))
+    _gem_budget_start = time.time()
+    GEMINI_TIME_BUDGET = 15.0  # matches the per-attempt timeout — don't let a
+    # long scan through many known-exhausted keys stall the whole chain
+    all_exhausted = all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS)))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
+        if not all_exhausted and _is_key_exhausted_today("gemini", klabel):
+            rotate_gemini_key()
+            continue  # already known quota-exhausted today -- skip straight to next key
+        if time.time() - _gem_budget_start > GEMINI_TIME_BUDGET:
+            log_error(f"[gemini] time budget ({GEMINI_TIME_BUDGET}s) exceeded mid-scan, bailing to next provider")
+            return None
         _t0 = time.time()
         try:
             contents = [prompt_text]
