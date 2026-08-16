@@ -2636,6 +2636,40 @@ def _has_mixed_digit_script(text: str) -> bool:
     return False
 
 
+def _qbm_parse_plaintext_fallback(text: str) -> list:
+    """Fallback parser: when Gemini ignores the 'JSON only' instruction and
+    replies in plain 'Question... Options: A: ... B: ... Answer: X
+    Explanation: ...' text format instead, parse that structure directly
+    instead of discarding a perfectly good extraction."""
+    out = []
+    # split into blocks by "Options:" marker acting as an anchor
+    blocks = re.split(r'\n\s*(?=[^\n]{0,300}?\bOptions?\s*:)', text)
+    for block in blocks:
+        if not re.search(r'\bOptions?\s*:', block, re.IGNORECASE):
+            continue
+        q_match = re.split(r'\bOptions?\s*:', block, flags=re.IGNORECASE)
+        question = q_match[0].strip().strip('"').strip()
+        question = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', question)
+        rest = q_match[1] if len(q_match) > 1 else ""
+        opts = {}
+        for letter in ("A", "B", "C", "D"):
+            m = re.search(rf'\b{letter}\s*[:.)]\s*"?(.*?)"?(?=\n\s*[A-D]\s*[:.)]|\n\s*Answer|\Z)', rest, re.IGNORECASE | re.DOTALL)
+            if m:
+                opts[letter] = m.group(1).strip().strip('"').strip()
+        ans_m = re.search(r'Answer\s*[:.]\s*"?([A-D])"?', rest, re.IGNORECASE)
+        answer = ans_m.group(1).upper() if ans_m else "A"
+        exp_m = re.search(r'Explanation\s*[:.]\s*"?(.*?)"?\s*$', rest, re.IGNORECASE | re.DOTALL)
+        explanation = exp_m.group(1).strip().strip('"').strip() if exp_m else ""
+        if question and len(opts) == 4:
+            out.append({
+                "question": question,
+                "options": opts,
+                "answer": answer,
+                "explanation": explanation,
+            })
+    return out
+
+
 def _qbm_parse_json(text: str) -> list:
     """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
     if not text:
@@ -2649,7 +2683,12 @@ def _qbm_parse_json(text: str) -> list:
         m = re.search(r'\[.*\]', t, re.DOTALL)
         raw = json.loads(m.group()) if m else json.loads(t)
     except Exception:
-        return []
+        # v5.14: model sometimes ignores the "JSON only" instruction and
+        # replies in plain "Question... Options: A: ... Answer: X" text —
+        # recover that instead of throwing the extraction away.
+        raw = _qbm_parse_plaintext_fallback(t)
+        if not raw:
+            return []
     if not isinstance(raw, list):
         return []
     valid = []
