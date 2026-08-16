@@ -2730,13 +2730,16 @@ async def _qbm_call1_extract(image_bytes: bytes) -> list:
     CALL 1 -- OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
     preserved), while checking-as-it-goes so no duplicate/ghost MCQ enters
-    the list. Groq primary -> Gemini fallback (via _call_groq/_call_gemini,
-    same provider chain already used everywhere else in this bot).
+    the list.
+    v5.11: switched to QuizBot's exact provider order — Gemini primary
+    (better raw extraction quality for the initial pass) -> Groq fallback
+    (higher daily budget, used once Gemini quota is exhausted). Previously
+    this was Groq-primary, the opposite of QuizBot's proven pattern.
     """
     try:
-        txt = await _call_groq(QBM_EXTRACT_PROMPT, image_bytes)
+        txt = await _call_gemini(QBM_EXTRACT_PROMPT, image_bytes)
         if not txt:
-            txt = await _call_gemini(QBM_EXTRACT_PROMPT, image_bytes)
+            txt = await _call_groq(QBM_EXTRACT_PROMPT, image_bytes)
         result = _qbm_parse_json(txt) if txt else []
         return _qbm_dedup_list(result)
     except Exception as e:
@@ -2775,9 +2778,9 @@ TASK (fast audit, connected to Call 1 -- do not redo full extraction):
 
 Output ONLY a JSON array of the MISSED MCQs (same schema as before):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
-        txt = await _call_groq(prompt, image_bytes)
+        txt = await _call_gemini(prompt, image_bytes)
         if not txt:
-            txt = await _call_gemini(prompt, image_bytes)
+            txt = await _call_groq(prompt, image_bytes)
         missed = _qbm_parse_json(txt) if txt else []
 
         combined = list(call1_mcqs) + missed
@@ -2977,9 +2980,11 @@ async def qbm_extract_from_image(image_bytes: bytes) -> list:
     """
     Public entry point: Call 1 (extract) -> Call 2 (miss-check) -> Call 3
     (code-level answer-source re-verification) -> figure crop+upload,
-    connected pipeline, Groq primary throughout. Returns MCQs in this
-    bot's standard {question, options[list], answer[int], explanation}
-    format.
+    connected pipeline. v5.11: Call1/Call2 now Gemini-primary -> Groq
+    fallback, matching QuizBot's proven order (Gemini gives better raw
+    extraction quality; Groq is fallback for its higher daily budget).
+    Returns MCQs in this bot's standard {question, options[list],
+    answer[int], explanation} format.
     """
     await _qbm_ram_aware_acquire()
     try:
