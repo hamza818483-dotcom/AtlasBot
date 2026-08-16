@@ -383,7 +383,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
                     contents=contents,
                     config=types.GenerateContentConfig(
                         temperature=0.7, top_p=0.95, top_k=40,
-                        max_output_tokens=4096,
+                        max_output_tokens=8192,
                     )
                 )),
                 timeout=GEMINI_ATTEMPT_TIMEOUT
@@ -2670,6 +2670,50 @@ def _qbm_parse_plaintext_fallback(text: str) -> list:
     return out
 
 
+def _qbm_recover_truncated_json(t: str) -> list:
+    """When the model's response got cut off mid-array (hit max_output_tokens
+    before finishing), the JSON is invalid as a whole but the array's
+    complete leading objects are still fine — recover those instead of
+    discarding the entire (mostly valid) extraction."""
+    start = t.find('[')
+    if start == -1:
+        return []
+    body = t[start + 1:]
+    objs = []
+    depth = 0
+    in_str = False
+    escape = False
+    obj_start = None
+    for i, ch in enumerate(body):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_str:
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == '{':
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                objs.append(body[obj_start:i + 1])
+                obj_start = None
+    out = []
+    for o in objs:
+        try:
+            out.append(json.loads(o))
+        except Exception:
+            continue
+    return out
+
+
 def _qbm_parse_json(text: str) -> list:
     """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
     if not text:
@@ -2683,10 +2727,11 @@ def _qbm_parse_json(text: str) -> list:
         m = re.search(r'\[.*\]', t, re.DOTALL)
         raw = json.loads(m.group()) if m else json.loads(t)
     except Exception:
-        # v5.14: model sometimes ignores the "JSON only" instruction and
-        # replies in plain "Question... Options: A: ... Answer: X" text —
-        # recover that instead of throwing the extraction away.
-        raw = _qbm_parse_plaintext_fallback(t)
+        # v5.15: response got truncated mid-array (hit token limit) — recover
+        # the complete leading objects instead of throwing away everything.
+        raw = _qbm_recover_truncated_json(t)
+        if not raw:
+            raw = _qbm_parse_plaintext_fallback(t)
         if not raw:
             return []
     if not isinstance(raw, list):
