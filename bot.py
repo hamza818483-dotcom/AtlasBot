@@ -2767,6 +2767,14 @@ def _qbm_parse_json(text: str) -> list:
             if any(re.search(r'(.)\1{15,}', str(o)) for o in opts_list) or re.search(r'(.)\1{15,}', q):
                 log(f"[QBM garbage-guard] Rejected MCQ with repeated-char corruption: {q[:60]}")
                 continue
+            # v5.17: reject MCQs where all 4 options are identical (or 3+ are
+            # identical) — a hallucination pattern seen from Groq on
+            # dense/small-font pages it can't actually read (e.g. every
+            # option literally "mg" instead of distinct values).
+            non_empty_opts = [str(o).strip() for o in opts_list if str(o).strip()]
+            if len(non_empty_opts) >= 3 and len(set(non_empty_opts)) == 1:
+                log(f"[QBM garbage-guard] Rejected MCQ with all-identical options: {q[:60]}")
+                continue
             if not all(opts_list) or not q.strip():
                 continue
             if _has_mixed_digit_script(q) or any(_has_mixed_digit_script(o) for o in opts_list) or _has_mixed_digit_script(expl):
@@ -3087,15 +3095,29 @@ async def _qbm_extract_single_call(image_bytes: bytes) -> list:
     instead of two round-trips (Call1 extract -> Call2 miss-check+verify).
     Simpler and faster; the extraction prompt itself now instructs the
     model to double-check its own work before returning.
+    v5.17: Groq's downscaled image (640px/50% quality, needed to fit its
+    tight TPM budget) makes it hallucinate/garble text on dense, small-font,
+    2-column pages — verified from real user reports (invented questions,
+    "mg" placeholder options, wrong numbers). Extraction accuracy matters
+    far more than speed here, so: retry Gemini itself (fresh key rotation,
+    already handled inside _call_gemini) up to 2 extra times before ever
+    falling back to Groq, and when Groq IS used as a last resort, flag its
+    output as lower-confidence so a human can still tell.
     """
-    try:
+    provider = None
+    txt = None
+    for gem_attempt in range(2):
         txt = await _call_gemini(QBM_EXTRACT_PROMPT, image_bytes)
-        provider = "gemini"
+        if txt:
+            provider = "gemini"
+            break
+        log_error(f"[QBM single-call] Gemini attempt {gem_attempt+1}/2 empty, retrying before Groq fallback")
+    try:
         if not txt:
             txt = await _call_groq(QBM_EXTRACT_PROMPT, image_bytes)
             provider = "groq"
         if not txt:
-            log_error("[QBM single-call] BOTH gemini and groq returned empty/None (no raw text at all)")
+            log_error("[QBM single-call] BOTH gemini (2 tries) and groq returned empty/None (no raw text at all)")
             _LAST_QBM_DIAG["stage"] = "no_provider_response"
             return []
         result = _qbm_parse_json(txt)
@@ -3105,6 +3127,8 @@ async def _qbm_extract_single_call(image_bytes: bytes) -> list:
         _LAST_QBM_DIAG["raw_preview"] = txt[:300]
         if not result:
             log_error(f"[QBM single-call] {provider} gave {len(txt)} chars but parse yielded 0 MCQs. Preview: {txt[:300]}")
+        elif provider == "groq":
+            log_error(f"[QBM single-call] WARNING: used Groq fallback (lower accuracy on dense pages) — {len(result)} MCQs extracted, verify quality")
         return _qbm_dedup_list(result)
     except Exception as e:
         log_error(f"[QBM single-call] failed: {e}")
