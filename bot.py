@@ -780,7 +780,7 @@ async def _call_cf_workers_ai(prompt_text: str, image_bytes: Optional[bytes]) ->
         log_error(f"[cf-workers-ai:cf#1] {type(e).__name__} after {_dt:.1f}s: {e}")
     return None
 
-async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, expect_json: bool = True) -> Tuple[Optional[str], str]:
+async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, expect_json: bool = True, prefer_gemini_for_image: bool = True) -> Tuple[Optional[str], str]:
     """v4.3: Full fallback chain. Returns (text, provider_name) or (None, '').
     Order: Groq (PRIMARY) -> Gemini -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
     -> Cloudflare Workers AI -> NVIDIA Vision.
@@ -789,9 +789,30 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     rule. expect_json=False (for plain-text explanations like /atlas and
     handle_explain_from_pending) uses a version WITHOUT the JSON instruction,
     so the model replies in natural readable Bengali/English text instead of
-    JSON that would otherwise leak straight to the user unconverted."""
+    JSON that would otherwise leak straight to the user unconverted.
+
+    v5.23: prefer_gemini_for_image=True (default) — Groq downscales every
+    image to 640px/50%q to fit its tight TPM budget, which makes dense
+    handwritten Bangla notes illegible and causes the model to hallucinate
+    similar-looking textbook content instead of reading the actual page
+    (confirmed real-world failure: asbestos-formula/Aqua-Regia MCQs generated
+    from a page that was actually about lab heating equipment). For image
+    requests, try Gemini FIRST (full-resolution image, no downscale) and only
+    fall back to Groq if Gemini fails — trading a little speed for reading
+    accuracy on handwriting. Text-only requests keep Groq-first (unaffected,
+    no image quality issue)."""
     rules = STRICT_SOURCE_RULES if expect_json else STRICT_SOURCE_RULES_PLAIN
     full_prompt = prompt_text + rules
+
+    if image_bytes and prefer_gemini_for_image:
+        _t_gem0 = time.time()
+        txt = await _call_gemini(full_prompt, image_bytes)
+        _dt_gem0 = time.time() - _t_gem0
+        if txt:
+            log(f"⏱️ [ai_generate] gemini (image-priority) succeeded in {_dt_gem0:.1f}s")
+            return txt, "gemini"
+        log_error(f"[ai_generate] gemini (image-priority) exhausted after {_dt_gem0:.1f}s, trying groq")
+
     _t_groq = time.time()
     # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
     txt = await _call_groq(full_prompt, image_bytes)
