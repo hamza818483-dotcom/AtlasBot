@@ -1941,6 +1941,8 @@ def generate_caption(user: Dict, practice_no: int, total_mcq: int, prompt_name: 
 🚀 Today Practice No: {practice_no:02d}
 ✅ Total MCQ: {total_mcq}{prompt_line}{time_line}
 
+━━━━━━━━━━━━━━━━━━━━
+
 {ayat}"""
     return caption
 
@@ -2791,10 +2793,12 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
 
         valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
-        # v5.0: code-level count enforcement — loop retrying (not just once) until
-        # MIN_MCQ reached or max attempts used, always dedupe, always hard-clamp MAX_MCQ.
+        # v5.0: code-level count enforcement — only retry if noticeably short
+        # (a near-miss like 9/10 isn't worth doubling total latency with a
+        # second full AI call), always dedupe, always hard-clamp MAX_MCQ.
+        RETRY_THRESHOLD = max(1, MIN_MCQ - 3)  # e.g. MIN_MCQ=10 -> retry only if <7
         attempts = 0
-        while len(valid_mcqs) < MIN_MCQ and attempts < 1:
+        while len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1:
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
             retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
