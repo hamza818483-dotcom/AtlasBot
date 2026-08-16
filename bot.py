@@ -89,12 +89,15 @@ CF_AI_TOKEN = os.getenv("CF_AI_TOKEN", "").strip()
 CF_WORKERS_AI_MODEL = os.getenv("CF_WORKERS_AI_MODEL", "@cf/meta/llama-3.2-11b-vision-instruct")
 CF_WORKERS_AI_BASE = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1" if CF_ACCOUNT_ID else ""
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-vl-32b-instruct")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
 # v4.2: Groq is now PRIMARY. Multiple vision-capable Groq models rotated
 # alongside keys — comma-separated env override supported, sane defaults otherwise.
+# v5.4: llama-4-scout-17b-16e-instruct and qwen3-vl-32b-instruct were both
+# deprecated/retired by Groq (404 model_not_found) — qwen3.6-27b is Groq's
+# current vision-capable model as of mid-2026.
 GROQ_MODELS = [m.strip() for m in os.getenv(
     "GROQ_MODELS",
-    "meta-llama/llama-4-scout-17b-16e-instruct,openai/gpt-oss-120b"
+    "qwen/qwen3.6-27b"
 ).split(",") if m.strip()]
 if GROQ_MODEL not in GROQ_MODELS:
     GROQ_MODELS.insert(0, GROQ_MODEL)
