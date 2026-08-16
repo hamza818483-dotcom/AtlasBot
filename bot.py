@@ -2801,8 +2801,9 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         while len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1:
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
-            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
-            rt, rp = await ai_generate(retry_prompt, image_bytes)
+            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।" + STRICT_SOURCE_RULES
+            rt = await _call_gemini(retry_prompt, image_bytes)
+            rp = "gemini" if rt else ""
             if rt:
                 retry_mcqs = _dedupe_mcqs(parse_mcq_json(rt, prompt_type=prompt_type))
                 if len(retry_mcqs) > len(valid_mcqs):
