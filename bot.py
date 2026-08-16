@@ -1972,6 +1972,26 @@ def clean_mcq_options(mcqs: List[Dict]) -> List[Dict]:
         out.append(m2)
     return out
 
+def shuffle_mcq_answers(mcqs: List[Dict]) -> List[Dict]:
+    """v5.2: AI vision models have a strong positional bias toward putting
+    the correct answer in option B/C — shuffles each MCQ's options randomly
+    and remaps the 'answer' index so the correct position is unpredictable,
+    while keeping every option's actual text (and thus correctness) intact."""
+    out = []
+    for m in mcqs:
+        m2 = dict(m)
+        opts = m2.get('options', [])
+        ans_idx = m2.get('answer')
+        if isinstance(opts, list) and len(opts) > 1 and isinstance(ans_idx, int) and 0 <= ans_idx < len(opts):
+            correct_text = opts[ans_idx]
+            order = list(range(len(opts)))
+            random.shuffle(order)
+            new_opts = [opts[i] for i in order]
+            m2['options'] = new_opts
+            m2['answer'] = new_opts.index(correct_text)
+        out.append(m2)
+    return out
+
 def share_button(quiz_id: str, sender_id: int = 0) -> InlineKeyboardButton:
     """v4.0: Share & Challenge deep-link button with sender tracking."""
     uname = BOT_USERNAME or "atlasprepbot"
@@ -2091,6 +2111,9 @@ Quality সবসময় Quantity এর আগে।
 🔴 অপশন সংখ্যা (ABSOLUTE, প্রতিটি MCQ-তে): প্রতিটি MCQ-তে ঠিক ৪টি (৪টিই, কম না বেশি না) অপশন
 থাকতেই হবে — A, B, C, D। কখনো ২টি বা ৩টি অপশন দিয়ে থামবে না (যেমন শুধু হ্যাঁ/না জোড়া)। ৪টি
 সম্পূর্ণ, তথ্যপূর্ণ, ভিন্ন অপশন ছাড়া MCQ output-এ দেওয়া নিষেধ।
+
+🔴 সঠিক উত্তরের পজিশন: সঠিক উত্তর সবসময় B বা C তে বসিও না — A, B, C, D এর মধ্যে randomly/সমানভাবে
+ছড়িয়ে দাও (প্রতিটি MCQ আলাদাভাবে চিন্তা করে, কোনো fixed pattern অনুসরণ না করে)।
 
 🔴 দৈর্ঘ্য সীমা (ABSOLUTE, Telegram Poll limit — কখনো ভাঙা যাবে না):
 - প্রশ্ন (question): সর্বোচ্চ ২৮০ ক্যারেক্টার (কখনো ৩০০ ছাড়াবে না, নিরাপদ মার্জিন রাখো)।
@@ -2794,6 +2817,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
             valid_mcqs = await qbm_extract_from_image(image_bytes)
             if not valid_mcqs:
                 return [], "📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি।"
+            valid_mcqs = shuffle_mcq_answers(valid_mcqs)
             log(f"✅ [QBM 2-call] Extracted {len(valid_mcqs)} MCQs from image")
             return valid_mcqs, None
 
@@ -2828,6 +2852,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         if len(valid_mcqs) == 0:
             return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
         valid_mcqs = valid_mcqs[:MAX_MCQ]
+        valid_mcqs = shuffle_mcq_answers(valid_mcqs)
         log(f"✅ Generated {len(valid_mcqs)} MCQs from image (prompt: {prompt_type}, provider: {provider})")
         return valid_mcqs, None
 
@@ -2872,6 +2897,7 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
         if len(valid_mcqs) == 0:
             return [], "কোনো MCQ তৈরি করা যায়নি। আরো তথ্য দিন।"
         valid_mcqs = valid_mcqs[:MAX_MCQ]
+        valid_mcqs = shuffle_mcq_answers(valid_mcqs)
         log(f"✅ Generated {len(valid_mcqs)} MCQs from text (prompt: {prompt_type}, provider: {provider})")
         return valid_mcqs, None
 
