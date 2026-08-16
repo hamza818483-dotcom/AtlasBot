@@ -2978,6 +2978,8 @@ async def _qbm_upload_figure_crops(image_bytes: bytes, mcqs: list) -> list:
     return out
 
 
+_LAST_QBM_DIAG = {"stage": None, "provider": None, "raw_len": 0, "raw_preview": "", "error": ""}
+
 async def _qbm_extract_single_call(image_bytes: bytes) -> list:
     """
     v5.12: single-call extraction — one Gemini call does extraction +
@@ -2989,13 +2991,30 @@ async def _qbm_extract_single_call(image_bytes: bytes) -> list:
     """
     try:
         txt = await _call_gemini(QBM_EXTRACT_PROMPT, image_bytes)
+        provider = "gemini"
         if not txt:
             txt = await _call_groq(QBM_EXTRACT_PROMPT, image_bytes)
-        result = _qbm_parse_json(txt) if txt else []
+            provider = "groq"
+        if not txt:
+            log_error("[QBM single-call] BOTH gemini and groq returned empty/None (no raw text at all)")
+            _LAST_QBM_DIAG["stage"] = "no_provider_response"
+            return []
+        result = _qbm_parse_json(txt)
+        _LAST_QBM_DIAG["stage"] = "ok" if result else "parse_empty"
+        _LAST_QBM_DIAG["provider"] = provider
+        _LAST_QBM_DIAG["raw_len"] = len(txt)
+        _LAST_QBM_DIAG["raw_preview"] = txt[:300]
+        if not result:
+            log_error(f"[QBM single-call] {provider} gave {len(txt)} chars but parse yielded 0 MCQs. Preview: {txt[:300]}")
         return _qbm_dedup_list(result)
     except Exception as e:
         log_error(f"[QBM single-call] failed: {e}")
+        _LAST_QBM_DIAG["stage"] = "exception"
+        _LAST_QBM_DIAG["error"] = str(e)
         return []
+
+
+
 
 
 async def qbm_extract_from_image(image_bytes: bytes) -> list:
@@ -4740,9 +4759,17 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
                     + "\n\n🔧 Render env vars (GEMINI_KEY, GROQ_KEY) চেক করুন।"
                 )
             else:
+                diag_stage = _LAST_QBM_DIAG.get("stage")
+                if diag_stage == "no_provider_response":
+                    detail = "AI provider (Gemini+Groq) কোনো response দেয়নি — network/timeout সমস্যা।"
+                elif diag_stage == "parse_empty":
+                    detail = f"AI response এসেছে ({_LAST_QBM_DIAG.get('provider')}, {_LAST_QBM_DIAG.get('raw_len')} chars) কিন্তু তাতে কোনো valid MCQ পার্স হয়নি। Preview: {_LAST_QBM_DIAG.get('raw_preview', '')[:200]}"
+                elif diag_stage == "exception":
+                    detail = f"Exception: {_LAST_QBM_DIAG.get('error', '')[:200]}"
+                else:
+                    detail = "কারণ অজানা।"
                 await query.message.edit_caption(
-                    caption=f"📌 এই পেইজে কোনো তৈরি MCQ (প্রশ্ন+অপশন) খুঁজে পাওয়া যায়নি, "
-                            f"অথবা AI provider সাড়া দেয়নি (raw error: {str(error)[:150] if error else 'empty result'}).\n\n"
+                    caption=f"⚠️ **Extraction fail — technical detail:**\n{detail}\n\n"
                             "💡 আবার চেষ্টা করুন, অথবা অন্য কোনো টাইপ সিলেক্ট করে নতুন MCQ বানিয়ে নিতে পারেন।"
                 )
             return
