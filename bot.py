@@ -448,6 +448,9 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     if 0 < healthy_count < MIN_HEALTHY_KEYS:
         log(f"⏭️ [groq] only {healthy_count}/{n_keys} healthy keys for {first_model_label} — skipping straight to Gemini")
         return None
+    # v5.5: downscale once here (not per-key) — Groq's TPM limit is tight
+    # enough that a full-resolution image alone can exceed it (HTTP 413)
+    groq_image_bytes = _downscale_image_for_tpm(image_bytes) if image_bytes else image_bytes
     _budget_start = time.time()
     GROQ_TIME_BUDGET = 16.0
     for m_attempt in range(n_models):
@@ -466,7 +469,7 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
                 continue  # already known-dead for today -- skip straight to next key
             txt, exhausted = await _call_openai_compat(
                 "https://api.groq.com/openai/v1", k, model,
-                prompt_text, image_bytes, provider="groq", key_label=klabel
+                prompt_text, groq_image_bytes, provider="groq", key_label=klabel
             )
             if txt:
                 _groq_key_idx = key_i
@@ -531,6 +534,28 @@ def _b64_data_url(image_bytes: bytes) -> str:
     elif image_bytes[:4] == b"RIFF":
         mime = "image/webp"
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+
+def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 1280, jpeg_quality: int = 82) -> bytes:
+    """v5.5: Groq's TPM limit (8000 for qwen3.6-27b) counts image tokens
+    proportional to resolution — a full-resolution phone photo (e.g.
+    3000x4000) can alone exceed the whole per-minute budget, causing 413
+    'Request too large' before the model even sees the prompt text. Downscale
+    to a reasonable max dimension and re-encode as JPEG to keep requests
+    comfortably under the limit while preserving readability for OCR/MCQ
+    extraction. Falls back to the original bytes if anything goes wrong."""
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        log_error(f"_downscale_image_for_tpm failed, using original bytes: {e}")
+        return image_bytes
 
 # ============================================================
 # v4.0: PROVIDER/KEY USAGE TRACKING (for /keys command, owner-only)
