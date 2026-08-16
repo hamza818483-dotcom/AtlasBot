@@ -413,13 +413,18 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     """v4.2: Groq PRIMARY provider — smooth key rotation x model rotation.
     On rate-limit/failure, tries the next key; once all keys are exhausted for
     the current model, rotates to the next model and retries all keys again.
-    This maximizes free-tier throughput across Groq's multiple vision models."""
+    This maximizes free-tier throughput across Groq's multiple vision models.
+    v4.8: hard time budget (18s) so a batch of slow/dead keys can't stall the
+    whole chain — bails out to Gemini fallback quickly instead of grinding
+    through every remaining key/model combo."""
     global _groq_key_idx, _groq_model_idx
     if not GROQ_KEYS:
         return None
     models = GROQ_MODELS or [GROQ_MODEL]
     n_keys = len(GROQ_KEYS)
     n_models = len(models)
+    _budget_start = time.time()
+    GROQ_TIME_BUDGET = 18.0
     for m_attempt in range(n_models):
         model = models[(_groq_model_idx + m_attempt) % n_models]
         model_label = model.split('/')[-1][:18]
@@ -427,6 +432,8 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
             _is_key_exhausted_today("groq", f"groq#{i+1}:{model_label}") for i in range(n_keys)
         )
         for k_attempt in range(n_keys):
+            if time.time() - _budget_start > GROQ_TIME_BUDGET:
+                return None
             key_i = (_groq_key_idx + k_attempt) % n_keys
             k = GROQ_KEYS[key_i]
             klabel = f"groq#{key_i+1}:{model_label}"
@@ -597,7 +604,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     max_retries = 2
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=12) as client:
                 r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
                 if r.status_code == 200:
                     data = r.json()
@@ -2787,7 +2794,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
         # v5.0: code-level count enforcement — loop retrying (not just once) until
         # MIN_MCQ reached or max attempts used, always dedupe, always hard-clamp MAX_MCQ.
         attempts = 0
-        while len(valid_mcqs) < MIN_MCQ and attempts < 2:
+        while len(valid_mcqs) < MIN_MCQ and attempts < 1:
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
             retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
