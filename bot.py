@@ -1044,6 +1044,26 @@ def _mcq_violates_word_fidelity(mcq: Dict, source_text: str) -> bool:
     # a large fraction of substantial words are unrecognized
     return len(unknown) / len(q_words) > 0.6
 
+def _mcq_options_violate_word_fidelity(mcq: Dict, source_text: str) -> bool:
+    """v5.22: prompt_2 (True/False) specific — options were found to contain
+    invented facts not grounded in the source page, since the question-only
+    fidelity check above doesn't look at option text. Flags an MCQ if ANY
+    single option is mostly made of words absent from the source (per-option,
+    not averaged, since one hallucinated option is enough to make the MCQ wrong)."""
+    if not source_text or len(source_text.strip()) < 10:
+        return False
+    source_words = set(_BN_WORD_RE.findall(source_text))
+    if len(source_words) < 5:
+        return False
+    for opt in mcq.get('options', []):
+        o_words = [w for w in _BN_WORD_RE.findall(opt) if len(w) >= 3]
+        if len(o_words) < 2:
+            continue  # too short to judge fairly
+        unknown = [w for w in o_words if w not in source_words]
+        if len(unknown) / len(o_words) > 0.6:
+            return True
+    return False
+
 def _parse_markdown_mcqs(text: str) -> List[Dict]:
     """v5.9: fallback for when the model replies in plain markdown MCQ
     format instead of JSON — e.g.:
@@ -1235,6 +1255,8 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             continue  # 🔒 Lethal gene mnemonic word paired with wrong/incomplete disease name after autocorrect
         if _mcq_violates_word_fidelity(mcq, source_text):
             continue  # 🔒 word-fidelity violation — question still uses words not found in source after autocorrect (invented/misspelled)
+        if prompt_type == 'prompt_2' and _mcq_options_violate_word_fidelity(mcq, source_text):
+            continue  # 🔒 True/False style: an option contains invented/hallucinated info not grounded in source
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
         if prompt_type == 'prompt_2' and not _is_tf_style_question(q_text):
@@ -1329,14 +1351,16 @@ PROMPT_02 = """MCQ TYPE: True/False Style
 
 ⚠️ Self-check করো MCQ বানানোর পর: "বললে ভুল হবে না" মানে সেই দাবিটা সত্যি কথা বলছে (তাই সত্য-দাবিতে ভুল হবে না = আসল সত্য option; মিথ্যা-দাবিতে ভুল হবে না = আসল মিথ্যা option)। "বললে ভুল হবে" মানে উল্টোটা।
 
-💥অপশন: 
+💥অপশন (STRICT — সোর্স থেকেই আসতে হবে):
 -ছোট বা বড় (২ টাইপই হতে পারে)
--নির্দিষ্ট টপিক বা বক্স থেকে অপশন বানানো সীমাবদ্ধ থাকবে না,ইনপুট সোর্স থেকে মিক্সড তথ্যের অপশন থাকবে।
+-🚫🚫 প্রতিটা অপশন অবশ্যই Input Image/Text এ সরাসরি উল্লেখিত তথ্য/fact/লাইন থেকে আসবে — নিজে থেকে নতুন fact, সংখ্যা, নাম, বা তথ্য বানানো/অনুমান করা সম্পূর্ণ নিষেধ। সোর্সে যা নেই তা কোনো অপশনে থাকতে পারবে না।
+-"ভুল/মিথ্যা" অপশন বানানোর সময়ও সেই ভুল তথ্যটা সোর্সের একটা সত্যিকারের তথ্যকে সামান্য পাল্টে বানাবে (যেমন সোর্সে থাকা একটা সংখ্যা/নাম/তথ্য অন্য একটা real সোর্স-তথ্যের সাথে অদল-বদল করে, বা সোর্সের একটা real fact-কে negate করে) — কক্ষনো সম্পূর্ণ কাল্পনিক/বাইরের তথ্য দিয়ে ভুল অপশন বানানো যাবে না।
+-নির্দিষ্ট টপিক বা বক্স থেকে ৪ টা অপশন বানানো সীমাবদ্ধ থাকবে না, কিন্তু সবগুলোই সোর্সের মধ্যে থাকা বিভিন্ন real তথ্য/লাইন থেকে আসবে (মিক্সড হলেও সোর্স-বাউন্ড)।
 -অবশ্যই প্রশ্ন অনুযায়ী সঠিক তথ্যের অপশন বানাতে হবে।
 -প্রশ্নে সঠিক/সত্য/পজিটিভ উত্তর বাছাই করতে বললে একটি অপশন সঠিক/সত্য/পজিটিভ হবে,বাকি গুলো ভুল।
 -প্রশ্নে ভুল/মিথ্যা/নেগেটিভ উত্তর বাছাই করতে বললে একটিই অপশনই ভুল/মিথ্যা/নেগেটিভ হবে,বাকিগুলো সঠিক।
--অবশ্যই সকল তথ্য Input Image Or Text থেকেই নিতে হবে।
 -৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must.অর্থাৎ অপশনে হ্যাঁ,না,সত্য,মিথ্যা,জ্বী,না এসব টাইপ কথা থাকবে না।
+-⚠️ প্রতিটা অপশন লেখার পর নিজে চেক করো: "এই তথ্যটা কি সোর্স ইমেজ/টেক্সটে হুবহু বা কাছাকাছি ভাষায় আছে?" — না থাকলে অপশনটা বাতিল করে সোর্স থেকে সঠিক তথ্য দিয়ে আবার লেখো।
 
 💥উত্তর:
 -A/B/C/D এর মধ্যে একটি (A/B/C/D format)
