@@ -453,8 +453,8 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     groq_image_bytes = _downscale_image_for_tpm(image_bytes) if image_bytes else image_bytes
     # v5.6: TPM 8000 is tight even after image downscale if prompt is long —
     # cap prompt text too so image+prompt together stay under budget.
-    if len(prompt_text) > 6000:
-        prompt_text = prompt_text[:6000]
+    if len(prompt_text) > 3500:
+        prompt_text = prompt_text[:3500]
     _budget_start = time.time()
     GROQ_TIME_BUDGET = 16.0
     for m_attempt in range(n_models):
@@ -539,7 +539,7 @@ def _b64_data_url(image_bytes: bytes) -> str:
         mime = "image/webp"
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
-def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 960, jpeg_quality: int = 70) -> bytes:
+def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 768, jpeg_quality: int = 60) -> bytes:
     """v5.5: Groq's TPM limit (8000 for qwen3.6-27b) counts image tokens
     proportional to resolution — a full-resolution phone photo (e.g.
     3000x4000) can alone exceed the whole per-minute budget, causing 413
