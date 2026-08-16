@@ -2752,8 +2752,23 @@ def _qbm_parse_json(text: str) -> list:
             q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
             q = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q)
             q = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q)
-            opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+            # v5.16: model (esp. Groq fallback) sometimes emits "options" as a
+            # LIST instead of the expected {A,B,C,D} dict — handle both shapes
+            # instead of silently dropping the MCQ via the except-continue below.
+            if isinstance(opts, list):
+                padded = (opts + ["", "", "", ""])[:4]
+                opts_list = padded
+            else:
+                opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
             expl = mc.get("explanation", "")
+            # v5.16: garbage/hallucination guard — reject MCQs with absurdly
+            # long runs of a single repeated character (a known Groq failure
+            # mode on hard-to-read images: it loops instead of stopping).
+            if any(re.search(r'(.)\1{15,}', str(o)) for o in opts_list) or re.search(r'(.)\1{15,}', q):
+                log(f"[QBM garbage-guard] Rejected MCQ with repeated-char corruption: {q[:60]}")
+                continue
+            if not all(opts_list) or not q.strip():
+                continue
             if _has_mixed_digit_script(q) or any(_has_mixed_digit_script(o) for o in opts_list) or _has_mixed_digit_script(expl):
                 log(f"[QBM digit-integrity] Mixed Bengali/English digits detected: {q[:60]}")
             valid.append({
