@@ -347,13 +347,13 @@ STRICT_SOURCE_RULES_PLAIN = """
 
 RULES: Use ONLY the given source (image/text) — no invented facts. Quality over quantity. No irrelevant content. Output must be plain readable text — no JSON/code/markdown."""
 
-async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
+async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries: Optional[int] = None) -> Optional[str]:
     global _bot_genai_client
     if not GEMINI_KEYS:
         return None
     if _bot_genai_client is None:
         setup_gemini()
-    tries = max(1, len(GEMINI_KEYS))
+    tries = max(1, len(GEMINI_KEYS)) if max_tries is None else max(1, min(max_tries, len(GEMINI_KEYS)))
     _gem_budget_start = time.time()
     # v5.20: QuizBot's proven /qbm implementation uses NO per-attempt
     # timeout at all — it simply waits for Gemini to finish or error out
@@ -780,7 +780,7 @@ async def _call_cf_workers_ai(prompt_text: str, image_bytes: Optional[bytes]) ->
         log_error(f"[cf-workers-ai:cf#1] {type(e).__name__} after {_dt:.1f}s: {e}")
     return None
 
-async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, expect_json: bool = True) -> Tuple[Optional[str], str]:
+async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, expect_json: bool = True, light_retry: bool = False) -> Tuple[Optional[str], str]:
     """v5.24: Full fallback chain. Returns (text, provider_name) or (None, '').
     Order: Gemini (PRIMARY) -> Groq -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
     -> Cloudflare Workers AI -> NVIDIA Vision.
@@ -801,13 +801,20 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     different hallucinated topics, same root cause). Gemini receives the
     original full-resolution image (no downscale), so accuracy matters more
     than Groq's raw speed here. Groq remains the first fallback if Gemini's
-    keys are exhausted/failing."""
+    keys are exhausted/failing.
+
+    v5.25: light_retry=True — for "MCQ count was too low, try once more"
+    bonus calls that already had one full successful pass. Caps Gemini to
+    a SINGLE key attempt (no full key-pool rotation) instead of re-scanning
+    every key again, since a second full multi-key chain on top of the
+    first one was needlessly doubling key/quota spend for a bonus attempt
+    that isn't essential."""
     rules = STRICT_SOURCE_RULES if expect_json else STRICT_SOURCE_RULES_PLAIN
     full_prompt = prompt_text + rules
 
     _t_gem = time.time()
     # 1) Gemini (PRIMARY -- all keys with rotation, full-resolution image, no downscale)
-    txt = await _call_gemini(full_prompt, image_bytes)
+    txt = await _call_gemini(full_prompt, image_bytes, max_tries=(1 if light_retry else None))
     _dt_gem = time.time() - _t_gem
     if txt:
         log(f"⏱️ [ai_generate] gemini succeeded in {_dt_gem:.1f}s")
@@ -815,6 +822,11 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
             log_error(f"[ai_generate] gemini SLOW SUCCESS: {_dt_gem:.1f}s (target <8s)")
         return txt, "gemini"
     log_error(f"[ai_generate] gemini exhausted after {_dt_gem:.1f}s, trying groq")
+
+    if light_retry:
+        # Bonus attempt — don't also burn a full Groq key-pool scan on top;
+        # the first full pass already tried everything. Stop here.
+        return None, ""
 
     _t_groq = time.time()
     # 2) Groq (fallback -- smooth key x model rotation) -- tracked inside _call_groq
@@ -3321,7 +3333,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
             retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।" + STRICT_SOURCE_RULES
-            rt = await _call_gemini(retry_prompt, image_bytes)
+            rt = await _call_gemini(retry_prompt, image_bytes, max_tries=1)
             rp = "gemini" if rt else ""
             if rt:
                 retry_mcqs = _dedupe_mcqs(parse_mcq_json(rt, prompt_type=prompt_type))
@@ -3374,7 +3386,7 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
         if 0 < len(valid_mcqs) < MIN_MCQ:
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (text) — retrying for more")
             retry_prompt = full_prompt + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে। এবার অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।"
-            rt, rp = await ai_generate(retry_prompt, None)
+            rt, rp = await ai_generate(retry_prompt, None, light_retry=True)
             if rt:
                 retry_mcqs = parse_mcq_json(rt, source_text=text, prompt_type=prompt_type)
                 if len(retry_mcqs) > len(valid_mcqs):
