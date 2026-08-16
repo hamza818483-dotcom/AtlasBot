@@ -360,8 +360,8 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
     # this lets multiple keys actually get tried before bailing to the next
     # provider (previously per-attempt timeout == total budget, so only 1
     # key was ever attempted no matter how many keys were configured).
-    GEMINI_ATTEMPT_TIMEOUT = 8.0
-    GEMINI_TIME_BUDGET = 15.0
+    GEMINI_ATTEMPT_TIMEOUT = 13.0
+    GEMINI_TIME_BUDGET = 26.0
     all_exhausted = all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS)))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
@@ -1006,6 +1006,53 @@ def _mcq_violates_word_fidelity(mcq: Dict, source_text: str) -> bool:
     # a large fraction of substantial words are unrecognized
     return len(unknown) / len(q_words) > 0.6
 
+def _parse_markdown_mcqs(text: str) -> List[Dict]:
+    """v5.9: fallback for when the model replies in plain markdown MCQ
+    format instead of JSON — e.g.:
+        **১. প্রশ্ন টেক্সট?**
+        A) অপশন ১
+        B) অপশন ২
+        C) অপশন ৩
+        D) অপশন ৪
+        উত্তর: B
+    Salvages what it can; returns [] if nothing matches the pattern."""
+    import re as _re
+    results = []
+    # Split into blocks starting at each numbered question line
+    q_pattern = _re.compile(r'^\**\s*(?:\d+|[০-৯]+)[.\)]\s*(.+?)\**\s*$', _re.MULTILINE)
+    opt_pattern = _re.compile(r'^\**\s*([A-Dক-ঘ])[.\)]\s*(.+?)\**\s*$', _re.MULTILINE)
+    ans_pattern = _re.compile(r'(?:উত্তর|Answer|সঠিক উত্তর)\s*[:：]\s*\**\s*([A-Dক-ঘ])', _re.IGNORECASE)
+    q_matches = list(q_pattern.finditer(text))
+    for i, qm in enumerate(q_matches):
+        q_text = qm.group(1).strip()
+        if not q_text or len(q_text) < 3:
+            continue
+        block_start = qm.end()
+        block_end = q_matches[i + 1].start() if i + 1 < len(q_matches) else len(text)
+        block = text[block_start:block_end]
+        opts = opt_pattern.findall(block)
+        if len(opts) < 2:
+            continue
+        options = [o[1].strip() for o in opts]
+        opt_labels = [o[0].strip().upper() for o in opts]
+        if len(options) > 4:
+            options = options[:4]
+            opt_labels = opt_labels[:4]
+        elif len(options) < 4:
+            continue  # downstream requires exactly 4 options
+        ans_m = ans_pattern.search(block)
+        correct_idx = 0
+        if ans_m:
+            ans_label = ans_m.group(1).strip().upper()
+            if ans_label in opt_labels:
+                correct_idx = opt_labels.index(ans_label)
+        results.append({
+            "question": q_text,
+            "options": options,
+            "answer": correct_idx,
+        })
+    return results
+
 def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str = "") -> List[Dict]:
     """Shared cleaner+parser+validator for MCQ JSON from any AI provider.
     If source_text is provided, also enforces STRICT_LANGUAGE_LOCK by
@@ -1073,6 +1120,13 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
                 mcqs = json.loads(salvage)
         except Exception:
             mcqs = None
+    if not mcqs:
+        # v5.9: reasoning_effort="none" (Groq qwen fix) sometimes makes the
+        # model ignore the JSON-only instruction and reply in plain
+        # markdown MCQ format instead (numbered question + A/B/C/D options,
+        # optional bold). Salvage those instead of discarding the whole
+        # batch — this is real usable content, just wrong format.
+        mcqs = _parse_markdown_mcqs(t)
     if not mcqs:
         log_error(f"parse_mcq_json: all strategies failed, input len={len(t)}, first 300 chars: {t[:300]}")
         return []
