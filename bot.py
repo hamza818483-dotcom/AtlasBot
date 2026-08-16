@@ -2978,21 +2978,41 @@ async def _qbm_upload_figure_crops(image_bytes: bytes, mcqs: list) -> list:
     return out
 
 
+async def _qbm_extract_single_call(image_bytes: bytes) -> list:
+    """
+    v5.12: single-call extraction — one Gemini call does extraction +
+    thorough self-check (re-scan for missed MCQs, verify each answer
+    against the page's own marked/inline/answer-key source) in one pass,
+    instead of two round-trips (Call1 extract -> Call2 miss-check+verify).
+    Simpler and faster; the extraction prompt itself now instructs the
+    model to double-check its own work before returning.
+    """
+    try:
+        txt = await _call_gemini(QBM_EXTRACT_PROMPT, image_bytes)
+        if not txt:
+            txt = await _call_groq(QBM_EXTRACT_PROMPT, image_bytes)
+        result = _qbm_parse_json(txt) if txt else []
+        return _qbm_dedup_list(result)
+    except Exception as e:
+        log_error(f"[QBM single-call] failed: {e}")
+        return []
+
+
 async def qbm_extract_from_image(image_bytes: bytes) -> list:
     """
-    Public entry point: Call 1 (extract) -> Call 2 (merged miss-check +
-    answer-source verification, no separate Call 3) -> figure crop+upload,
-    connected pipeline. v5.11: matches QuizBot's exact current design —
-    Gemini-primary -> Groq fallback for both calls, and verification
-    folded into Call 2 instead of a separate Call 3 (QuizBot's own code
-    comment: "no separate Call 3"). Returns MCQs in this bot's standard
-    {question, options[list], answer[int], explanation} format.
+    Public entry point: single Gemini call (extract + self-verify) ->
+    figure crop+upload. v5.12: simplified from the 2-call pipeline
+    (Call1 extract -> Call2 miss-check+verify) to one call per user
+    request — the extraction prompt already instructs thorough self-
+    checking, so a second round-trip added latency without proportional
+    accuracy gain for most pages. Gemini primary -> Groq fallback.
+    Returns MCQs in this bot's standard {question, options[list],
+    answer[int], explanation} format.
     """
     await _qbm_ram_aware_acquire()
     try:
-        call1 = await _qbm_call1_extract(image_bytes)
-        verified = await _qbm_call2_miss_check(image_bytes, call1)
-        with_figures = await _qbm_upload_figure_crops(image_bytes, verified)
+        extracted = await _qbm_extract_single_call(image_bytes)
+        with_figures = await _qbm_upload_figure_crops(image_bytes, extracted)
         result = _qbm_answer_letter_to_index(with_figures)
         # 🔒 Same mnemonic-pairing ground-truth check used elsewhere — catches wrong/
         # incomplete word↔disease pairing even in extraction (not just generation) flow.
