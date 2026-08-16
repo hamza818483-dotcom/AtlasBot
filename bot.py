@@ -360,8 +360,8 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
     # this lets multiple keys actually get tried before bailing to the next
     # provider (previously per-attempt timeout == total budget, so only 1
     # key was ever attempted no matter how many keys were configured).
-    GEMINI_ATTEMPT_TIMEOUT = 13.0
-    GEMINI_TIME_BUDGET = 26.0
+    GEMINI_ATTEMPT_TIMEOUT = 22.0
+    GEMINI_TIME_BUDGET = 40.0
     all_exhausted = all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS)))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
