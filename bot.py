@@ -1142,7 +1142,7 @@ PROMPT_MAP = {
     'prompt_2': {'name': '✅ সত্য-মিথ্যার প্রশ্ন', 'text': PROMPT_02},
     'prompt_3': {'name': '🔥 কঠিন প্রশ্ন', 'text': PROMPT_03},
     'prompt_mixed': {'name': '🎲 Mixed (সবগুলো)', 'text': PROMPT_MIXED},
-    'qbm_extract': {'name': '📌 শুধুমাত্র পেইজে থাকা MCQ', 'text': (
+    'qbm_extract': {'name': '📌 শুধুমাত্র পেইজের MCQ', 'text': (
         "YOU ARE A STRICT MCQ EXTRACTOR IN A PERMANENT SPECIAL MODE. ONLY EXTRACT MCQs THAT "
         "ALREADY EXIST ON THIS PAGE. NEVER INVENT NEW QUESTIONS.\n\n"
         "FORBIDDEN: never create a new question; never add extra MCQs beyond what exists; "
