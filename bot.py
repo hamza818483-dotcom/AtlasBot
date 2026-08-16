@@ -105,7 +105,7 @@ if GROQ_MODEL not in GROQ_MODELS:
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
 OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "google/gemma-4-31b-it:free")
 NEMOTRON_MODEL = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
-GEMMA_MODEL = os.getenv("GEMMA_MODEL", "google/gemma-3-27b-it:free")
+GEMMA_MODEL = os.getenv("GEMMA_MODEL", "google/gemma-3-27b-it")
 
 SUPABASE_URL = "https://wbdyjpjbczfunyhhmtry.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg"
