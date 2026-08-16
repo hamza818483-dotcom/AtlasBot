@@ -1926,12 +1926,13 @@ def get_prompt_display_name(prompt_type: str) -> str:
         return prompt_map[prompt_type].get('name', prompt_type)
     return PROMPT_MAP.get(prompt_type, {}).get('name', prompt_type)
 
-def generate_caption(user: Dict, practice_no: int, total_mcq: int, prompt_name: str = '') -> str:
+def generate_caption(user: Dict, practice_no: int, total_mcq: int, prompt_name: str = '', elapsed_secs: float = None) -> str:
     ayat = get_ayat(None)
     prompt_line = f"\n📋 Type: {prompt_name}" if prompt_name else ""
+    time_line = f"\n⏱️ সময় লেগেছে: {elapsed_secs:.1f}s" if elapsed_secs is not None else ""
     caption = f"""🌟 স্বাগতম প্রিয় শিক্ষার্থী {user['first_name']}..!
 🚀 Today Practice No: {practice_no:02d}
-✅ Total MCQ: {total_mcq}{prompt_line}
+✅ Total MCQ: {total_mcq}{prompt_line}{time_line}
 
 {ayat}"""
     return caption
@@ -4066,6 +4067,19 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 raise
             image_bytes = bytes(await file.download_as_bytearray())
             file_id = document.file_id
+            if (document.mime_type or "").startswith("application/pdf"):
+                try:
+                    from pdf2image import convert_from_bytes
+                    pages = convert_from_bytes(image_bytes, dpi=200, first_page=1, last_page=1)
+                    if not pages:
+                        raise ValueError("no pages rendered")
+                    buf = BytesIO()
+                    pages[0].save(buf, format="JPEG", quality=90)
+                    image_bytes = buf.getvalue()
+                except Exception as e:
+                    log_error(f"PDF first-page render failed: {e}")
+                    await instant_msg.edit_text("❌ PDF এর প্রথম পেইজ থেকে ছবি বানানো যায়নি। আবার চেষ্টা করুন।")
+                    return
         else:
             await instant_msg.edit_text("❌ দয়া করে একটি Image বা PDF পাঠান।")
             return
@@ -4078,8 +4092,11 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         prompts = get_prompts_from_db()
         keyboard = []
         row = []
+        _emoji_strip_re = re.compile(
+            r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\uFE0F]+\s*'
+        )
         for key, prompt_data in prompts.items():
-            name = prompt_data.get('name', key)
+            name = _emoji_strip_re.sub('', prompt_data.get('name', key)).strip()
             row.append(InlineKeyboardButton(name, callback_data=f"genmcq_{key}"))
             if len(row) == 2:
                 keyboard.append(row)
@@ -4410,8 +4427,10 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
         await query.message.edit_caption(caption=t)
     type_label = get_prompt_display_name(prompt_type)
     prog_task = asyncio.create_task(live_progress_task(_edit_cap, "Image", total_eta=8, type_label=type_label))
+    _gen_start = time.time()
     try:
         mcqs, error = await generate_mcq_from_image(image_bytes, prompt_type)
+        gen_elapsed = time.time() - _gen_start
         prog_task.cancel()
         if prompt_type == 'qbm_extract' and (error or not mcqs):
             await query.message.edit_caption(
@@ -4436,7 +4455,7 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
         practice_no = user_data.get('practice_count', 1) if user_data else 1
         prompt_name = get_prompt_display_name(prompt_type)
         allowed, usage, limit, is_perm = check_access(user_id)
-        caption = generate_caption({'first_name': user.first_name or 'User'}, practice_no, len(mcqs), prompt_name)
+        caption = generate_caption({'first_name': user.first_name or 'User'}, practice_no, len(mcqs), prompt_name, elapsed_secs=gen_elapsed)
         keyboard = mcq_set_keyboard(quiz_id, user_id)
         full_caption = f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}"
         await query.message.edit_caption(caption=full_caption, reply_markup=InlineKeyboardMarkup(keyboard))
