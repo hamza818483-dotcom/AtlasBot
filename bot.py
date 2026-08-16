@@ -3307,7 +3307,7 @@ async def cmd_pdfc_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             pass
     except Exception as e:
         log_error(f"pdfc PDF build error: {e}")
-        await loading.edit_text(f"❌ PDF বানাতে error: {e}")
+        await loading.edit_text(BUSY_MSG)
 
 async def cmd_pdfc_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['pdfc_collecting'] = False
@@ -3431,7 +3431,7 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         total_pages = len(PdfReader(BytesIO(pdf_bytes)).pages)
     except Exception as e:
         log_error(f"/tf PDF page-count error: {e}")
-        await status.edit_text(f"❌ PDF পড়তে সমস্যা হয়েছে: {e}")
+        await status.edit_text(BUSY_MSG)
         return
 
     if total_pages == 0:
@@ -4079,7 +4079,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(f"✅ Image {count} save হয়েছে! (আরো দাও বা /done)")
         except Exception as e:
             log_error(f"pdfc image save error: {e}")
-            await update.message.reply_text(f"❌ Image save error: {e}")
+            await update.message.reply_text(BUSY_MSG)
         return
 
     log(f"🖼️ Image from {user_id} ({user['first_name']})")
