@@ -468,7 +468,8 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
                 continue  # already known-dead for today -- skip straight to next key
             txt, exhausted = await _call_openai_compat(
                 "https://api.groq.com/openai/v1", k, model,
-                prompt_text, groq_image_bytes, provider="groq", key_label=klabel
+                prompt_text, groq_image_bytes, provider="groq", key_label=klabel,
+                mcq_count_hint=MAX_MCQ
             )
             if txt:
                 _groq_key_idx = key_i
@@ -582,7 +583,7 @@ def _reset_provider_stats_if_new_day():
         _provider_stats = {}
         _provider_stats_day = today
 
-def _track_attempt(provider: str, key_label: str, ok: bool, exhausted: bool = False):
+def _track_attempt(provider: str, key_label: str, ok: bool, exhausted: bool = False, tpm_retry_after: float = None):
     if not provider:
         return
     _reset_provider_stats_if_new_day()
@@ -600,7 +601,13 @@ def _track_attempt(provider: str, key_label: str, ok: bool, exhausted: bool = Fa
         # a healthier key instead of retrying a known-currently-bad one
         if not exhausted and k["consec_fail"] >= 3:
             k["cooldown_until"] = time.time() + 120  # 2 min cooldown
-    if exhausted:
+        # v5.10: TPM-only 429 (request too large for the rolling window) —
+        # NOT genuine daily quota exhaustion. Groq's error body includes the
+        # exact wait time (e.g. "Please try again in 8.3325s"); use that
+        # instead of marking the key dead for the rest of the day.
+        if tpm_retry_after is not None:
+            k["cooldown_until"] = time.time() + tpm_retry_after
+    if exhausted and tpm_retry_after is None:
         k["exhausted"] = True
     k["last"] = datetime.now(BD_TZ).strftime('%H:%M')
 
@@ -635,7 +642,8 @@ def _is_key_exhausted_today(provider: str, key_label: str) -> bool:
 async def _call_openai_compat(base_url: str, api_key: str, model: str,
                               prompt_text: str, image_bytes: Optional[bytes],
                               extra_headers: Dict = None,
-                              provider: str = "", key_label: str = "") -> Tuple[Optional[str], bool]:
+                              provider: str = "", key_label: str = "",
+                              mcq_count_hint: Optional[int] = None) -> Tuple[Optional[str], bool]:
     """Generic OpenAI-compatible chat call with retry. Returns (text, quota_exhausted)."""
     content: Any
     if image_bytes:
@@ -648,11 +656,19 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:
         headers.update(extra_headers)
+    # v5.10: dynamic max_tokens (QuizBot pattern) — a fixed 4096 either
+    # wastes TPM budget on small requests or risks truncation on large
+    # ones. ~175 tokens per MCQ (Bangla question + 4 options + explanation)
+    # plus a fixed buffer, clamped to a safe range.
+    if mcq_count_hint:
+        max_tok = max(900, min(3800, int(mcq_count_hint) * 175 + 300))
+    else:
+        max_tok = 4096
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.7,
-        "max_tokens": 4096,
+        "max_tokens": max_tok,
     }
     # v5.9: Groq's qwen3.6-27b is a reasoning model that prefixes output
     # with <think>...</think> before the actual JSON, burning into
@@ -680,8 +696,21 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                     log_error(f"[{provider}:{key_label}] 200 but empty content after {_dt:.1f}s")
                     return None, False
                 if r.status_code == 429:
-                    _track_attempt(provider, key_label, ok=False, exhausted=True)
-                    log_error(f"[{provider}:{key_label}] 429 rate-limited/exhausted after {_dt:.1f}s")
+                    body_preview = r.text[:300]
+                    # v5.10: distinguish TPM-only (request too large this
+                    # minute) from genuine daily quota exhaustion — same
+                    # pattern as QuizBot. TPM errors mention "tokens per
+                    # minute"/TPM and include an exact retry-after wait.
+                    is_tpm = bool(re.search(r"tokens per minute|TPM", body_preview, re.I))
+                    retry_after = None
+                    if is_tpm:
+                        m = re.search(r"try again in ([\d.]+)\s*s", body_preview, re.I)
+                        retry_after = float(m.group(1)) if m else 10.0
+                        _track_attempt(provider, key_label, ok=False, exhausted=False, tpm_retry_after=retry_after)
+                        log_error(f"[{provider}:{key_label}] 429 TPM-only (not quota exhaustion), retry in {retry_after}s: {body_preview}")
+                    else:
+                        _track_attempt(provider, key_label, ok=False, exhausted=True)
+                        log_error(f"[{provider}:{key_label}] 429 rate-limited/exhausted after {_dt:.1f}s: {body_preview}")
                     return None, True
                 if r.status_code in (500, 502, 503) and attempt < max_retries - 1:
                     await asyncio.sleep(0.5)
