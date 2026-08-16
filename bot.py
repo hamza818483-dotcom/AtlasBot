@@ -2615,6 +2615,10 @@ wherever a language default is implied, the SOURCE MCQ's own actual language alw
 ════════════════════════════════
 Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
 If NO MCQ exists on this page → return exactly: []
+❌ NEVER show your reasoning, thinking process, or internal notes (e.g. "Wait, let me
+   check...", "high altitude text in question:", self-corrections, or any commentary) —
+   not before, inside, or after the JSON. The response body must be the JSON array and
+   ONLY the JSON array, from the first character to the last.
 
 ════════════════════════════════
 🔠 SPELLING FIDELITY (STRICT — apply while extracting, not while inventing)
