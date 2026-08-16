@@ -3314,10 +3314,12 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
 
         valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
-        # v5.0: code-level count enforcement — only retry if noticeably short
-        # (a near-miss like 9/10 isn't worth doubling total latency with a
-        # second full AI call), always dedupe, always hard-clamp MAX_MCQ.
-        RETRY_THRESHOLD = 5  # only retry the whole AI call if genuinely too few
+        # v5.26: RETRY_THRESHOLD lowered 5->3 — a real case showed 4 valid
+        # MCQs triggering a full second Gemini call just to try for one or
+        # two more, nearly doubling total latency (52.5s for only 4 MCQs)
+        # for marginal benefit. 4 MCQs is already a usable result; only
+        # retry when the count is genuinely too thin (1-2) to be useful.
+        RETRY_THRESHOLD = 3  # only retry the whole AI call if genuinely too few
         attempts = 0
         # v5.11: if the AI returned 0 MCQs with a plain-text explanation
         # (e.g. "this image has no readable content"), that's a legitimate
