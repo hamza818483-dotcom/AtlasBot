@@ -1053,22 +1053,45 @@ def _parse_markdown_mcqs(text: str) -> List[Dict]:
         C) অপশন ৩
         D) অপশন ৪
         উত্তর: B
+    v5.21: broadened to also catch the variants actually seen in the wild:
+      - "**Q2. question?**" / "**MCQ-01:**\nquestion" (Q-prefix / MCQ- header,
+        question sometimes on its own line right after the header)
+      - "[A] option" (square-bracket option labels)
+      - "(ক) option" (parenthesis-wrapped option labels, no need for closing
+        punctuation right after — already covered, kept for clarity)
     Salvages what it can; returns [] if nothing matches the pattern."""
     import re as _re
     results = []
-    # Split into blocks starting at each numbered question line
-    q_pattern = _re.compile(r'^\**\s*(?:\d+|[০-৯]+)[.\)]\s*(.+?)\**\s*$', _re.MULTILINE)
-    opt_pattern = _re.compile(r'^\**\s*([A-Dক-ঘ])[.\)]\s*(.+?)\**\s*$', _re.MULTILINE)
-    ans_pattern = _re.compile(r'(?:উত্তর|Answer|সঠিক উত্তর)\s*[:：]\s*\**\s*([A-Dক-ঘ])', _re.IGNORECASE)
+    # Question header: optional "Q"/"MCQ-" prefix, then a number, then either
+    # the question text on the same line OR nothing (text follows on the next
+    # non-empty line instead).
+    q_pattern = _re.compile(
+        r'^\**\s*(?:Q|MCQ-)?\s*(?:\d+|[০-৯]+)[.\):-]\s*(.*?)\**\s*$',
+        _re.MULTILINE
+    )
+    # Option label: A-D or ক-ঘ, wrapped in [..] or (..), or followed by . ) :
+    opt_pattern = _re.compile(
+        r'^\**\s*(?:\[([A-Dক-ঘ])\]|\(([A-Dক-ঘ])\)|([A-Dক-ঘ])[.\):])\s*(.+?)\**\s*$',
+        _re.MULTILINE
+    )
+    ans_pattern = _re.compile(r'(?:উত্তর|Answer|সঠিক উত্তর)\s*[:：]\s*\**\s*\(?([A-Dক-ঘ])\)?', _re.IGNORECASE)
     q_matches = list(q_pattern.finditer(text))
     for i, qm in enumerate(q_matches):
         q_text = qm.group(1).strip()
-        if not q_text or len(q_text) < 3:
-            continue
         block_start = qm.end()
         block_end = q_matches[i + 1].start() if i + 1 < len(q_matches) else len(text)
         block = text[block_start:block_end]
-        opts = opt_pattern.findall(block)
+        # If the header line itself had no question text (e.g. "**MCQ-01:**"
+        # alone), the question is the next non-empty line before the first option.
+        if not q_text or len(q_text) < 3:
+            first_opt_m = opt_pattern.search(block)
+            lead = block[:first_opt_m.start()] if first_opt_m else block
+            lead_lines = [ln.strip(' *') for ln in lead.strip().split('\n') if ln.strip(' *')]
+            q_text = lead_lines[0] if lead_lines else ""
+        if not q_text or len(q_text) < 3:
+            continue
+        opts_raw = opt_pattern.findall(block)
+        opts = [(g1 or g2 or g3, txt) for g1, g2, g3, txt in opts_raw]
         if len(opts) < 2:
             continue
         options = [o[1].strip() for o in opts]
