@@ -1138,7 +1138,7 @@ PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Opt
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
 
 PROMPT_MAP = {
-    'prompt_1': {'name': '🩺 Medical Standard MCQ', 'text': PROMPT_01},
+    'prompt_1': {'name': '🩺 Medical Standard', 'text': PROMPT_01},
     'prompt_2': {'name': '✅ সত্য-মিথ্যার প্রশ্ন', 'text': PROMPT_02},
     'prompt_3': {'name': '🔥 কঠিন প্রশ্ন', 'text': PROMPT_03},
     'prompt_mixed': {'name': '🎲 Mixed (সবগুলো)', 'text': PROMPT_MIXED},
@@ -4090,43 +4090,36 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass
         prompts = get_prompts_from_db()
-        keyboard = []
-        row = []
         _emoji_strip_re = re.compile(
             r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\uFE0F]+\s*'
         )
-        for key, prompt_data in prompts.items():
-            name = _emoji_strip_re.sub('', prompt_data.get('name', key)).strip()
-            row.append(InlineKeyboardButton(name, callback_data=f"genmcq_{key}"))
+        clean_names = {k: _emoji_strip_re.sub('', v.get('name', k)).strip() for k, v in prompts.items()}
+        keyboard = []
+        row = []
+        for key in prompts:
+            if key == 'qbm_extract':
+                continue  # placed separately below, paired with ব্যাখ্যা চাই
+            row.append(InlineKeyboardButton(clean_names[key], callback_data=f"genmcq_{key}"))
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
         if row:
             keyboard.append(row)
+        if 'qbm_extract' in prompts:
+            keyboard.append([
+                InlineKeyboardButton(clean_names['qbm_extract'], callback_data="genmcq_qbm_extract"),
+                InlineKeyboardButton("ব্যাখ্যা চাই", callback_data="explimg"),
+            ])
         # v4.0: জ্ঞানমূলক / অনুধাবনমূলক buttons (image direct generation)
         keyboard.append([
-            InlineKeyboardButton("🧠 জ্ঞানমূলক প্রশ্ন", callback_data="qaimg_k"),
-            InlineKeyboardButton("💡 অনুধাবনমূলক প্রশ্ন", callback_data="qaimg_c"),
+            InlineKeyboardButton("জ্ঞানমূলক প্রশ্ন", callback_data="qaimg_k"),
+            InlineKeyboardButton("অনুধাবনমূলক প্রশ্ন", callback_data="qaimg_c"),
         ])
-        keyboard.append([InlineKeyboardButton("📖 ব্যাখ্যা চাই", callback_data="explimg")])
         await update.message.reply_photo(
             photo=image_bytes,
             caption=f"""🌟 স্বাগতম {user['first_name']}..!
 
-📸 আপনার Image থেকে MCQ বানাতে MCQ টাইপ সিলেক্ট করুন:
-
-━━━━━━━━━━━━━━━━━━━━
-<b>🩺 Medical Standard</b> — সাধারণ মেডিকেল MCQ
-
-<b>✅ সত্য-মিথ্যার প্রশ্ন</b> — True/False ফরম্যাট
-
-<b>🔥 কঠিন প্রশ্ন</b> — অ্যাডভান্সড লেভেল
-
-<b>🎲 Mixed</b> — সবগুলো মিলিয়ে
-━━━━━━━━━━━━━━━━━━━━
-<b>🧠 জ্ঞানমূলক / 💡 অনুধাবনমূলক</b> — সৃজনশীল PDF
-━━━━━━━━━━━━━━━━━━━━
-<b>📖 ব্যাখ্যা চাই</b> — টপিক/MCQ বিস্তারিত ব্যাখ্যা""",
+কোন ধরণের MCQ চান সিলেক্ট করুন""",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
