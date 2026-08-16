@@ -364,8 +364,13 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
         setup_gemini()
     tries = max(1, len(GEMINI_KEYS))
     _gem_budget_start = time.time()
-    GEMINI_TIME_BUDGET = 15.0  # matches the per-attempt timeout — don't let a
-    # long scan through many known-exhausted keys stall the whole chain
+    # v5.7: per-attempt timeout (8s) is now well under the total budget (15s)
+    # so a single slow/dead key can't burn the whole budget in one shot —
+    # this lets multiple keys actually get tried before bailing to the next
+    # provider (previously per-attempt timeout == total budget, so only 1
+    # key was ever attempted no matter how many keys were configured).
+    GEMINI_ATTEMPT_TIMEOUT = 8.0
+    GEMINI_TIME_BUDGET = 15.0
     all_exhausted = all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS)))
     for attempt in range(tries):
         klabel = f"gemini#{_current_key_idx+1}"
@@ -388,10 +393,10 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
                     config=types.GenerateContentConfig(
                         temperature=0.7, top_p=0.95, top_k=40,
                         max_output_tokens=4096,
-                        thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     )
                 )),
-                timeout=15
+                timeout=GEMINI_ATTEMPT_TIMEOUT
             )
             _dt = time.time() - _t0
             if resp and resp.text:
@@ -403,7 +408,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes]) -> Option
         except asyncio.TimeoutError:
             _dt = time.time() - _t0
             _track_attempt("gemini", klabel, ok=False, exhausted=False)
-            log_error(f"[gemini:{klabel}] TimeoutError after {_dt:.1f}s (limit 15s)")
+            log_error(f"[gemini:{klabel}] TimeoutError after {_dt:.1f}s (limit {GEMINI_ATTEMPT_TIMEOUT}s)")
         except Exception as e:
             _dt = time.time() - _t0
             es = str(e).lower()
