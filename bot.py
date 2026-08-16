@@ -2356,6 +2356,8 @@ ACCURACY_AND_COUNT_LOCK = """
 
 তথ্য নির্ভুলতা: ছবিতে/সোর্সে যা লেখা আছে তার বাইরে কোনো ভুল তথ্য বা অনুমান দেওয়া যাবে না।
 
+🚫🚫 HANDWRITING/হাতের লেখা সংক্রান্ত ABSOLUTE নিয়ম: ছবিতে যদি হাতে লেখা (handwritten) নোট থাকে এবং কোনো অংশ অস্পষ্ট/অপাঠ্য মনে হয়, তাহলে সেই অংশ নিয়ে MCQ বানানো থেকে বিরত থাকবে — কক্ষনো নিজের মেমোরি/প্রশিক্ষণ থেকে "এরকম টপিকে সাধারণত যা থাকে" ধরনের পরিচিত/মুখস্থ তথ্য (যেমন পরিচিত রাসায়নিক পরীক্ষা, বিখ্যাত টেবিল/সূত্র) বসিয়ে MCQ বানানো যাবে না। প্রতিটি MCQ-এর প্রতিটি শব্দ শুধু এই নির্দিষ্ট ছবিতে সরাসরি দৃশ্যমান/পাঠযোগ্য টেক্সট থেকেই আসবে। ছবির বিষয়বস্তু সম্পূর্ণ ভিন্ন কোনো টপিক (যা ছবিতে নেই) দিয়ে MCQ বানানো একটি গুরুতর ভুল — এটা কখনোই করা যাবে না।
+
 ইমেজের সর্বোচ্চ তথ্য ব্যবহার (image হলে): ছবির প্রতিটি অংশ — মূল লেখা, ছক/টেবিল, ডায়াগ্রাম/ছবির
 ভিতরের লেবেল, ফুটনোট, মার্জিনে লেখা, হাইলাইট/আন্ডারলাইন করা অংশ — সব কিছু থেকে MCQ বানানোর
 সুযোগ খুঁজে বের করবে।
@@ -3276,7 +3278,7 @@ async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt
 
         prompts = get_prompts_from_db()
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK + SELF_VERIFY_THOUGHT_LOCK
+        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK + SELF_VERIFY_THOUGHT_LOCK + STRICT_SOURCE_RULES
 
         _t0 = time.time()
         response_text, provider = await ai_generate(prompt_text, image_bytes)
