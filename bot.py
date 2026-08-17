@@ -831,7 +831,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     if txt:
         log(f"⏱️ [ai_generate] gemini succeeded in {_dt_gem:.1f}s")
         if _dt_gem > 8:
-            log_error(f"[ai_generate] gemini SLOW SUCCESS: {_dt_gem:.1f}s (target <8s)")
+            log(f"[ai_generate] gemini SLOW SUCCESS: {_dt_gem:.1f}s (target <8s)", "WARNING")
         return txt, "gemini"
     log_error(f"[ai_generate] gemini exhausted after {_dt_gem:.1f}s, trying groq")
 
@@ -847,7 +847,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     if txt:
         log(f"⏱️ [ai_generate] groq succeeded in {_dt_groq:.1f}s")
         if _dt_groq > 8:
-            log_error(f"[ai_generate] groq SLOW SUCCESS: {_dt_groq:.1f}s (target <8s)")
+            log(f"[ai_generate] groq SLOW SUCCESS: {_dt_groq:.1f}s (target <8s)", "WARNING")
         return txt, "groq"
     log_error(f"[ai_generate] groq exhausted after {_dt_groq:.1f}s, trying openrouter family")
     or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
