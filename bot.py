@@ -4917,7 +4917,11 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
     user_id = user.id
     image_bytes = await _get_pending_image_bytes(context)
     if not image_bytes:
-        await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
+        try:
+            await query.answer("⏳ সেশন শেষ হয়ে গেছে — ছবিটি আবার পাঠান", show_alert=True)
+        except Exception:
+            pass
+        await query.message.reply_text("⏳ সেশন শেষ হয়ে গেছে (expired)।\n📸 অনুগ্রহ করে ছবিটি আবার পাঠান।")
         return
     async def _edit_cap(t):
         await query.message.edit_caption(caption=t)
@@ -5098,7 +5102,11 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
     explanation, or per-option MCQ analysis with formulas/related concepts)."""
     image_bytes = await _get_pending_image_bytes(context)
     if not image_bytes:
-        await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
+        try:
+            await query.answer("⏳ সেশন শেষ হয়ে গেছে — ছবিটি আবার পাঠান", show_alert=True)
+        except Exception:
+            pass
+        await query.message.reply_text("⏳ সেশন শেষ হয়ে গেছে (expired)।\n📸 অনুগ্রহ করে ছবিটি আবার পাঠান।")
         return
     wait_msg = await query.message.reply_text(
         "📖 ব্যাখ্যা তৈরি হচ্ছে..."
@@ -5163,7 +5171,11 @@ async def handle_creative_from_pending(query, ctype_short: str, context: Context
     label = "🧠 জ্ঞানমূলক" if ctype == "knowledge" else "💡 অনুধাবনমূলক"
     image_file_id = context.user_data.get('pending_image_file_id', '')
     if not image_file_id:
-        await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
+        try:
+            await query.answer("⏳ সেশন শেষ হয়ে গেছে — ছবিটি আবার পাঠান", show_alert=True)
+        except Exception:
+            pass
+        await query.message.reply_text("⏳ সেশন শেষ হয়ে গেছে (expired)।\n📸 অনুগ্রহ করে ছবিটি আবার পাঠান।")
         return
     # Save a stub row so exam_server can resolve image by quiz_id
     quiz_id = await save_mcq(user_id=user.id, mcqs=[], source_type=f'creative_{ctype}', prompt_type='prompt_1',
