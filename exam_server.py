@@ -41,7 +41,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 GENAI_API_KEY = os.getenv("GEMINI_KEY", "")
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://atlas-bot-proxy.hamza818483.workers.dev").rstrip("/")
-HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-q4f4.onrender.com")).rstrip("/")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("RENDER_URL", "https://atlasbot-q4f4.onrender.com")).rstrip("/")
 BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("BASE_URL", "https://atlasbot-q4f4.onrender.com")).rstrip("/")
 
 # Fallback providers for Creative (জ্ঞানমূলক/অনুধাবনমূলক) generation when Gemini is exhausted
@@ -1187,7 +1187,7 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
         try:
             obj = await _call_creative_chain(p, img_bytes, [
                 ("https://openrouter.ai/api/v1", OPENROUTER_KEYS, OPENROUTER_QWEN_MODEL,
-                 {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}),
+                 {"HTTP-Referer": PUBLIC_BASE_URL, "X-Title": "ATLAS MCQ Bot"}),
             ])
             if obj is None:
                 continue
@@ -1792,7 +1792,7 @@ def generate_exam_html(cache_id: str, data: Dict, uid: int = 0, name: str = "", 
         "tag": tag, "page": page, "imageFileId": image_file_id, "isNewGen": is_new_gen,
         "mcqs": mcqs, "negPerWrong": NEGATIVE_MARK, "secPerQ": SEC_PER_QUESTION,
         "hasSource": bool(chat_id and message_id), "promptDisplay": prompt_display,
-        "hfSpaceUrl": HF_SPACE_URL,
+        "hfSpaceUrl": PUBLIC_BASE_URL,
         "challengerId": challenger,
         "websiteUrl": "https://atlascourses.com",
         "youtubeUrl": "https://www.youtube.com/@atlasprep",

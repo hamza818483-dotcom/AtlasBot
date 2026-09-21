@@ -112,7 +112,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 SUPABASE_BACKUP_URL = os.getenv("SUPABASE_BACKUP_URL", "").rstrip("/")
 SUPABASE_BACKUP_KEY = os.getenv("SUPABASE_BACKUP_KEY", "")
 
-HF_SPACE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("HF_SPACE_URL", "https://atlasbot-q4f4.onrender.com"))
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("RENDER_URL", "https://atlasbot-q4f4.onrender.com"))
 CF_WORKER_URL = "https://atlas-bot-proxy.hamza818483.workers.dev"
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
 # v4.3: GitHub Pages exam link — CF/Render duitai fail korleo page static
@@ -928,7 +928,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
             log(f"[ai_generate] groq SLOW SUCCESS: {_dt_groq:.1f}s (target <8s)", "WARNING")
         return txt, "groq"
     log_error(f"[ai_generate] groq exhausted after {_dt_groq:.1f}s, trying openrouter family")
-    or_headers = {"HTTP-Referer": HF_SPACE_URL, "X-Title": "ATLAS MCQ Bot"}
+    or_headers = {"HTTP-Referer": PUBLIC_BASE_URL, "X-Title": "ATLAS MCQ Bot"}
     _t_or = time.time()
     # 3) OpenRouter family: Qwen VL 72B / Nemotron / Gemma -- smooth model x key
     # rotation (same pattern as Groq): on failure, tries the next key for the
@@ -4139,7 +4139,7 @@ async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{HF_SPACE_URL}/api/bookmark-pdf",
+                f"{PUBLIC_BASE_URL}/api/bookmark-pdf",
                 json={"mcqs": bms, "header_label": "ATLAS Bookmark Practice Sheet"}
             )
             ct = resp.headers.get("content-type", "")
@@ -5322,7 +5322,7 @@ async def handle_creative_pdf(query, quiz_id: str, ctype: str) -> None:
     cpdf_prog = asyncio.create_task(live_progress_task(_edit_cpdf, label, total_eta=18, verb="PDF তৈরি হচ্ছে"))
     try:
         async with httpx.AsyncClient(timeout=180) as client:
-            resp = await client.get(f"{HF_SPACE_URL}/api/creative-pdf/{quiz_id}", params={"ctype": ctype})
+            resp = await client.get(f"{PUBLIC_BASE_URL}/api/creative-pdf/{quiz_id}", params={"ctype": ctype})
             cpdf_prog.cancel()
             ct = resp.headers.get("content-type", "")
             if resp.status_code == 200 and "pdf" in ct:
@@ -6492,7 +6492,7 @@ async def handle_premium_pdf(query, quiz_id: str) -> None:
     ppdf_prog = asyncio.create_task(live_progress_task(_edit_ppdf, "💎 Premium", total_eta=15, verb="PDF তৈরি হচ্ছে"))
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.get(f"{HF_SPACE_URL}/api/premium-pdf/{quiz_id}")
+            resp = await client.get(f"{PUBLIC_BASE_URL}/api/premium-pdf/{quiz_id}")
             ppdf_prog.cancel()
             ct = resp.headers.get("content-type", "")
             if resp.status_code == 200 and "pdf" in ct:
