@@ -4480,12 +4480,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for key in prompts:
             if key == 'qbm_extract':
                 continue  # placed separately below, paired with ব্যাখ্যা চাই
-            row.append(InlineKeyboardButton(clean_names[key], callback_data=f"genmcq_{key}"))
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
+            keyboard.append([InlineKeyboardButton(clean_names[key], callback_data=f"genmcq_{key}")])
         if 'qbm_extract' in prompts:
             keyboard.append([
                 InlineKeyboardButton(clean_names['qbm_extract'], callback_data="genmcq_qbm_extract"),
