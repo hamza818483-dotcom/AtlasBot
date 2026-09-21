@@ -189,7 +189,7 @@ def get_supabase() -> Client:
             try:
                 new_session = httpx.Client(
                     http2=False,
-                    timeout=20,
+                    timeout=8,
                     limits=httpx.Limits(
                         max_keepalive_connections=0,
                         max_connections=10,
@@ -255,7 +255,7 @@ def _patch_supabase_execute_with_retry() -> None:
 
     def patched_execute(self):
         last_exc = None
-        for attempt in range(4):  # initial try + 3 retries
+        for attempt in range(2):  # initial try + 1 retry (loop-block guard)
             try:
                 return original_execute(self)
             except Exception as e:
@@ -264,9 +264,9 @@ def _patch_supabase_execute_with_retry() -> None:
                 last_exc = e
                 _reset_supabase_client()
                 get_supabase()
-                if attempt < 3:
-                    time.sleep(1.5 * (attempt + 1))
-        log(f"[Supabase] All 4 attempts failed: {type(last_exc).__name__}: {last_exc}", "WARNING")
+                if attempt < 1:
+                    time.sleep(0.4)
+        log(f"[Supabase] All attempts failed: {type(last_exc).__name__}: {last_exc}", "WARNING")
         raise last_exc
 
     SyncQueryRequestBuilder.execute = patched_execute
@@ -7436,7 +7436,7 @@ async def setup_bot() -> None:
     # fix here via a custom HTTPXRequest, since ApplicationBuilder's default
     # transport doesn't otherwise let us configure http2/keepalive.
     request_kwargs = dict(
-        connection_pool_size=8,
+        connection_pool_size=16,
         connect_timeout=30,
         read_timeout=60,
         write_timeout=60,
@@ -7457,6 +7457,7 @@ async def setup_bot() -> None:
         builder
         .request(bot_request)
         .get_updates_request(get_updates_request)
+        .concurrent_updates(int(os.getenv("CONCURRENT_UPDATES", "16")))
         .build()
     )
     await register_handlers()
