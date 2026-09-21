@@ -3562,7 +3562,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ============================================================
 # FEATURE: /pdfc — multi-image → single PDF (ported from QuizBot)
 # ============================================================
+# PDF features (render + PDF input) are OFF by default — they push RAM past
+# the 512MB limit. Set PDF_FEATURES_ENABLED=1 to re-enable.
+PDF_FEATURES_ENABLED = os.getenv("PDF_FEATURES_ENABLED", "0") == "1"
+PDF_DISABLED_MSG = "\u26a0\ufe0f PDF \u09b8\u09c1\u09ac\u09bf\u09a7\u09be \u09b8\u09be\u09ae\u09df\u09bf\u0995\u09ad\u09be\u09ac\u09c7 \u09ac\u09a8\u09cd\u09a7 \u0986\u099b\u09c7\u0964"
+
+
+async def _pdf_off(update_or_query) -> None:
+    try:
+        if hasattr(update_or_query, "answer"):
+            await update_or_query.answer(PDF_DISABLED_MSG, show_alert=True)
+        else:
+            await update_or_query.message.reply_text(PDF_DISABLED_MSG)
+    except Exception:
+        pass
+
+
 async def cmd_pdfc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not PDF_FEATURES_ENABLED:
+        await _pdf_off(update)
+        return
     context.user_data['pdfc_collecting'] = True
     context.user_data['pdfc_imgs'] = []
     await update.message.reply_text(
@@ -3573,6 +3592,9 @@ async def cmd_pdfc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def cmd_pdfc_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not PDF_FEATURES_ENABLED:
+        await _pdf_off(update)
+        return
     if not context.user_data.get('pdfc_collecting'):
         await update.message.reply_text("❌ আগে /pdfc দিয়ে image collection শুরু করো!")
         return
@@ -3686,6 +3708,9 @@ def _expand_page_range(page_range: Optional[str], total_pages: int) -> List[int]
 async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/tf — reply to a PDF to generate True/False (সত্য-মিথ্যা) style MCQs
     page-by-page, optionally posting each page's set to a channel/group/thread."""
+    if not PDF_FEATURES_ENABLED:
+        await _pdf_off(update)
+        return
     user = get_user_info(update)
     user_id = user['user_id']
     msg = update.message
@@ -3991,6 +4016,9 @@ async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
 async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not PDF_FEATURES_ENABLED:
+        await _pdf_off(update)
+        return
     user = get_user_info(update)
     user_id = user['user_id']
     log(f"📑 /bm from {user_id}")
@@ -4048,6 +4076,9 @@ async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── v4.0: /bmexam ──
 async def cmd_bmexam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not PDF_FEATURES_ENABLED:
+        await _pdf_off(update)
+        return
     user = get_user_info(update)
     user_id = user['user_id']
     log(f"🔖 /bmexam from {user_id}")
@@ -4435,6 +4466,12 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     "❌ File সাইজ 20MB-এর বেশি — Telegram এর নিজস্ব লিমিটের কারণে "
                     "বট এই ফাইল ডাউনলোড করতে পারবে না। ছোট সাইজে আবার পাঠান।"
                 )
+                return
+            if (document.mime_type or "").startswith("application/pdf") and not PDF_FEATURES_ENABLED:
+                try:
+                    await instant_msg.edit_text(PDF_DISABLED_MSG)
+                except Exception:
+                    pass
                 return
             try:
                 file = await context.bot.get_file(document.file_id)
@@ -5143,6 +5180,9 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
 
 async def handle_creative_pdf(query, quiz_id: str, ctype: str) -> None:
     """Calls exam_server /api/creative-pdf — sends premium PDF or explains why not possible."""
+    if not PDF_FEATURES_ENABLED:
+        await _pdf_off(query)
+        return
     label = "🧠 জ্ঞানমূলক প্রশ্ন" if ctype == "knowledge" else "💡 অনুধাবনমূলক প্রশ্ন"
     wait_msg = await query.message.reply_text(f"{label} PDF তৈরি হচ্ছে...")
     async def _edit_cpdf(t):
@@ -6306,6 +6346,9 @@ async def handle_class_subject(query, idx: int, context: ContextTypes.DEFAULT_TY
 # ------------------------------------------------------------
 
 async def handle_premium_pdf(query, quiz_id: str) -> None:
+    if not PDF_FEATURES_ENABLED:
+        await _pdf_off(query)
+        return
     log(f"💎 Premium PDF: {quiz_id}")
     mcq_data = await get_mcq(quiz_id)
     if not mcq_data:
@@ -7236,7 +7279,7 @@ async def register_handlers() -> None:
     from menu_module import cmd_menu
     application.add_handler(CommandHandler("menu", cmd_menu))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
-    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_image))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image))
 
     async def _menu_csv_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         from menu_module import MENU_ADD_PENDING, handle_menu_pending
