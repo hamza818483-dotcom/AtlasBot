@@ -4489,13 +4489,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if 'qbm_extract' in prompts:
             keyboard.append([
                 InlineKeyboardButton(clean_names['qbm_extract'], callback_data="genmcq_qbm_extract"),
-                InlineKeyboardButton("ব্যাখ্যা চাই", callback_data="explimg"),
             ])
-        # v4.0: জ্ঞানমূলক / অনুধাবনমূলক buttons (image direct generation)
-        keyboard.append([
-            InlineKeyboardButton("জ্ঞানমূলক প্রশ্ন", callback_data="qaimg_k"),
-            InlineKeyboardButton("অনুধাবনমূলক প্রশ্ন", callback_data="qaimg_c"),
-        ])
         await update.message.reply_photo(
             photo=image_bytes,
             caption=f"""🌟 স্বাগতম {user['first_name']}..!
