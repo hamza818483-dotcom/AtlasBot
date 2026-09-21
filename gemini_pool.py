@@ -1,6 +1,8 @@
 """Account-wise Gemini key pool (shared by bot.py and exam_server.py).
 
 Env formats (first one found wins):
+  GEMINI_KEYS_ACC1 = "keyA,keyB"   GEMINI_KEYS_ACC2 = "keyC,keyD" ...
+      -> one env var per Google account (same as QuizBot). Preferred.
   GEMINI_ACCOUNTS = "acc1:keyA,keyB;acc2:keyC;acc3:keyD,keyE"
       -> each ';' group is one Google account/project. Free-tier quota is
          per project, so load is spread ACROSS accounts first, then across
@@ -21,8 +23,16 @@ _lock = threading.Lock()
 
 
 def _parse() -> List[Tuple[str, List[str]]]:
-    raw = (os.getenv("GEMINI_ACCOUNTS") or "").strip()
     accounts: List[Tuple[str, List[str]]] = []
+    # Preferred: one env var per account (same as QuizBot), e.g.
+    #   GEMINI_KEYS_ACC1=keyA,keyB   GEMINI_KEYS_ACC2=keyC,keyD
+    for env_name in sorted(k for k in os.environ if k.startswith("GEMINI_KEYS_ACC")):
+        ks = [k.strip() for k in os.environ.get(env_name, "").split(",") if k.strip()]
+        if ks:
+            accounts.append((env_name.replace("GEMINI_KEYS_", ""), ks))
+    if accounts:
+        return accounts
+    raw = (os.getenv("GEMINI_ACCOUNTS") or "").strip()
     if raw:
         for i, grp in enumerate(g for g in raw.split(";") if g.strip()):
             grp = grp.strip()
