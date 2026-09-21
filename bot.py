@@ -414,68 +414,94 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
         log("⏭️ [gemini] all keys exhausted for today — skipping straight to next provider")
         return None
     tries = len(GEMINI_KEYS) if max_tries is None else max(1, min(max_tries, len(GEMINI_KEYS)))
-    GEMINI_ATTEMPT_TIMEOUT = 90.0
+    GEMINI_ATTEMPT_TIMEOUT = float(os.getenv("GEMINI_ATTEMPT_TIMEOUT", "45"))
+    GEMINI_HEDGE_AFTER = float(os.getenv("GEMINI_HEDGE_AFTER", "8"))   # slow key -> race a 2nd account's key
     GEMINI_TIME_BUDGET = 100.0
     _budget_start = time.time()
     tried: set = set()
     img_obj = None
-    for _ in range(tries):
-        if time.time() - _budget_start > GEMINI_TIME_BUDGET:
-            log_error(f"[gemini] time budget ({GEMINI_TIME_BUDGET}s) exceeded, bailing to next provider")
+    loop = asyncio.get_running_loop()
+
+    def _start(key):
+        """Launch one attempt on `key` as a task (releases the key when done)."""
+        nonlocal img_obj
+        contents = [prompt_text]
+        if image_bytes:
+            if img_obj is None:
+                img_obj = Image.open(BytesIO(image_bytes))
+            contents.append(img_obj)
+        cli = _gpool.client(key)
+        async def _run():
+            _t0 = time.time()
+            klabel = _gpool.label(key)
+            try:
+                resp = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: cli.models.generate_content(
+                        model="gemini-3.6-flash",
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            temperature=0.7, top_p=0.95, top_k=40,
+                            max_output_tokens=8192,
+                            thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        ))),
+                    timeout=GEMINI_ATTEMPT_TIMEOUT)
+                _dt = time.time() - _t0
+                if resp and resp.text:
+                    _gpool.mark_ok(key)
+                    _track_attempt("gemini", klabel, ok=True)
+                    log(f"🤖 [gemini:{klabel}|{_gpool.account(key)}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
+                    return resp.text
+                _gpool.mark_cooldown(key, 20)
+                _track_attempt("gemini", klabel, ok=False)
+                log_error(f"[gemini:{klabel}] empty response after {_dt:.1f}s")
+            except asyncio.TimeoutError:
+                _gpool.mark_cooldown(key, 45)
+                _track_attempt("gemini", klabel, ok=False, exhausted=False)
+                log_error(f"[gemini:{klabel}] TimeoutError after {time.time()-_t0:.1f}s (limit {GEMINI_ATTEMPT_TIMEOUT}s)")
+            except Exception as e:
+                kind = _gpool.classify_error(e)
+                if kind == "dead":
+                    _gpool.mark_exhausted(key)
+                elif kind == "cool":
+                    _gpool.mark_cooldown(key, 60)
+                else:
+                    _gpool.mark_cooldown(key, 15)
+                _track_attempt("gemini", klabel, ok=False, exhausted=(kind == "dead"))
+                log_error(f"[gemini:{klabel}] {type(e).__name__} after {time.time()-_t0:.1f}s ({kind}): {e}")
+            finally:
+                _gpool.release(key)
             return None
-        key = _gpool.pick(exclude=tried)
-        if key is None:
-            break
-        tried.add(key)
-        klabel = _gpool.label(key)
-        _t0 = time.time()
-        try:
-            contents = [prompt_text]
-            if image_bytes:
-                if img_obj is None:
-                    img_obj = Image.open(BytesIO(image_bytes))
-                contents.append(img_obj)
-            cli = _gpool.client(key)
-            loop = asyncio.get_running_loop()
-            resp = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: cli.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        temperature=0.7, top_p=0.95, top_k=40,
-                        max_output_tokens=8192,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    )
-                )),
-                timeout=GEMINI_ATTEMPT_TIMEOUT
-            )
-            _dt = time.time() - _t0
-            if resp and resp.text:
-                _gpool.mark_ok(key)
-                _track_attempt("gemini", klabel, ok=True)
-                log(f"🤖 [gemini:{klabel}|{_gpool.account(key)}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
-                return resp.text
-            _gpool.mark_cooldown(key, 20)
-            _track_attempt("gemini", klabel, ok=False)
-            log_error(f"[gemini:{klabel}] empty response after {_dt:.1f}s")
-        except asyncio.TimeoutError:
-            _dt = time.time() - _t0
-            _gpool.mark_cooldown(key, 45)
-            _track_attempt("gemini", klabel, ok=False, exhausted=False)
-            log_error(f"[gemini:{klabel}] TimeoutError after {_dt:.1f}s (limit {GEMINI_ATTEMPT_TIMEOUT}s)")
-        except Exception as e:
-            _dt = time.time() - _t0
-            kind = _gpool.classify_error(e)
-            if kind == "dead":
-                _gpool.mark_exhausted(key)
-            elif kind == "cool":
-                _gpool.mark_cooldown(key, 60)
-            else:
-                _gpool.mark_cooldown(key, 15)
-            _track_attempt("gemini", klabel, ok=False, exhausted=(kind == "dead"))
-            log_error(f"[gemini:{klabel}] {type(e).__name__} after {_dt:.1f}s ({kind}): {e}")
-        finally:
-            _gpool.release(key)
+        return asyncio.ensure_future(_run())
+
+    running: set = set()
+    launched = 0
+    try:
+        while True:
+            # launch next attempt if nothing is running (first / after a failure)
+            if not running:
+                if launched >= tries or time.time() - _budget_start > GEMINI_TIME_BUDGET:
+                    break
+                key = _gpool.pick(exclude=tried)
+                if key is None:
+                    break
+                tried.add(key); launched += 1
+                running.add(_start(key))
+            done, running = await asyncio.wait(running, timeout=GEMINI_HEDGE_AFTER,
+                                               return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                res = t.result()
+                if res:
+                    return res
+            if not done and launched < tries:
+                # slow: race one more key (different account thanks to pick()'s round-robin)
+                key = _gpool.pick(exclude=tried)
+                if key is not None:
+                    tried.add(key); launched += 1
+                    log(f"⚡ [gemini] hedge: no reply in {GEMINI_HEDGE_AFTER:.0f}s -> racing {_gpool.label(key)}|{_gpool.account(key)}")
+                    running.add(_start(key))
+    finally:
+        for t in running:          # losers: don't wait, let them finish & release themselves
+            t.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
     return None
 
 _groq_key_idx = 0
@@ -553,6 +579,9 @@ _or_model_idx = 0
 _or_key_idx: Dict[str, int] = {}  # per-model key rotation index (each model may have its own key pool)
 
 
+_or_dead_until: Dict[str, float] = {}
+_last_http_status: Dict[str, int] = {}
+
 async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes],
                                    extra_headers: Dict) -> Tuple[Optional[str], str]:
     """OpenRouter family (Qwen VL / Nemotron / Gemma) -- smooth model x key
@@ -574,6 +603,8 @@ async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes]
         keys, model, name = chains[m_i]
         if not keys:
             continue
+        if _or_dead_until.get(name, 0) > time.time():
+            continue   # model returned 404 recently -> skip (no per-key scan)
         n_keys = len(keys)
         start_k = _or_key_idx.get(name, 0)
         all_exhausted = all(_is_key_exhausted_today(name, f"{name}#{i+1}") for i in range(n_keys))
@@ -594,6 +625,10 @@ async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes]
                 _or_key_idx[name] = key_i
                 _or_model_idx = m_i
                 return txt, name
+            if _last_http_status.get(klabel) == 404:
+                _or_dead_until[name] = time.time() + 6 * 3600
+                log_error(f"[{name}] model {model} 404 (endpoint gone) -> skipping for 6h")
+                break
         # all keys tried for this model -- rotate model on next outer loop
     return None, ""
 
@@ -816,6 +851,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                     await asyncio.sleep(0.5)
                     continue
                 _track_attempt(provider, key_label, ok=False)
+                _last_http_status[key_label] = r.status_code
                 log_error(f"[{provider}:{key_label}] HTTP {r.status_code} after {_dt:.1f}s: {r.text[:200]}")
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             _dt = time.time() - _t0
