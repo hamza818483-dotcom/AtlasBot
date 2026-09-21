@@ -217,6 +217,28 @@ def status() -> List[str]:
     return rows
 
 
+def summary() -> Dict[str, int]:
+    """Counts for /keys: total / healthy / cooldown / exhausted + per-account."""
+    now = time.time()
+    out = {"total": 0, "ok": 0, "cool": 0, "dead": 0, "accounts": 0}
+    per = []
+    for name, keys in ACCOUNTS:
+        a = {"ok": 0, "cool": 0, "dead": 0}
+        for k in keys:
+            if _dead_day.get(k) == _today():
+                a["dead"] += 1
+            elif _cooldown_until.get(k, 0) > now:
+                a["cool"] += 1
+            else:
+                a["ok"] += 1
+        per.append((name, len(keys), a))
+        out["total"] += len(keys)
+        out["ok"] += a["ok"]; out["cool"] += a["cool"]; out["dead"] += a["dead"]
+    out["accounts"] = len(ACCOUNTS)
+    out["per"] = per
+    return out
+
+
 # ─────────────────────────────────────────────────────────────
 # REMOTE POOL: use QuizBot's key pool through its /api/gemini-proxy
 # (keys live ONLY in QuizBot; AtlasBot just sends the request).

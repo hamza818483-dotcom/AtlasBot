@@ -6473,105 +6473,55 @@ async def cmd_speed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/keys — QuizBot-style compact provider summary (Healthy / Cooldown / Exhausted)."""
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
     _reset_provider_stats_if_new_day()
     try:
-        _rows = _gpool.status()
-        if _rows:
-            await update.message.reply_text("🔑 Gemini pool (account-wise):\n" + "\n".join(_rows[:40]))
-    except Exception:
-        pass
-    # Build key inventory from env (reflects HF secrets live on restart)
-    inventory = [
-        ("gemini", GEMINI_KEYS),
-        ("groq", GROQ_KEYS),
-        ("nvidia", NVIDIA_KEYS),
-        ("openrouter-qwen", OPENROUTER_KEYS),
-        ("nemotron", NEMOTRON_KEYS or OPENROUTER_KEYS),
-        ("gemma", GEMMA_KEYS or OPENROUTER_KEYS),
-    ]
-    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
-    lines = [f"🔑 **ATLAS AI KEYS & QUOTA**", f"📅 {today} (BD)", "━━━━━━━━━━━━━━━━━━━━━━"]
-    total_ok = total_fail = 0
-    total_keys = 0
-    total_active = 0
-    total_healthy = 0
-    total_exhausted = 0
-    total_idle = 0
-    for provider, keys in inventory:
-        hint = PROVIDER_QUOTA_HINTS.get(provider, {})
-        plabel = hint.get("label", provider)
-        reset = hint.get("reset", "—")
-        rpd = hint.get("rpd", "?")
-        pstat = _provider_stats.get(provider, {})
-        n_keys = len(keys)
-        total_keys += n_keys
-        if n_keys == 0:
-            lines.append(f"\n*{plabel}*\n  ⚪ কোনো key সেট নেই")
-            continue
-        rpd_int = rpd if isinstance(rpd, int) else 0
-        lines.append(f"\n*{plabel}*  (RPD≈{rpd}/key · reset: {reset})")
-        for i, k in enumerate(keys):
-            klabel = f"{provider}#{i+1}"
-            ks = pstat.get(klabel, {})
-            ok = ks.get("ok", 0)
-            fail = ks.get("fail", 0)
-            exhausted = ks.get("exhausted", False)
-            last = ks.get("last", "—")
-            total_ok += ok
-            total_fail += fail
-            used_today = ok + fail
-            remaining = max(0, rpd_int - used_today) if rpd_int > 0 else "?"
-            if exhausted:
-                status = "🔴 Exhausted"
-                total_exhausted += 1
-                remaining = 0
-            elif ok > 0 or fail > 0:
-                status = "🟢 Active"
-                total_active += 1
-                total_healthy += 1
-            else:
-                status = "⚪ Idle (untested)"
-                total_active += 1
-                total_idle += 1
-            lines.append(f"  {i+1}. `{_key_prefix(k)}` {status}")
-            lines.append(f"     ✅{ok} ❌{fail} | 📊 Used:{used_today}/{rpd} | 🟩 বাকি:{remaining} | 🕐{last}")
-    # Overall daily attempt capacity estimate
-    cap = 0
-    for provider, keys in inventory:
-        rpd = PROVIDER_QUOTA_HINTS.get(provider, {}).get("rpd", 0)
-        if isinstance(rpd, int):
-            # avoid double counting openrouter shared keys
-            if provider in ("nemotron", "gemma") and not (NEMOTRON_KEYS if provider=="nemotron" else GEMMA_KEYS):
+        lines = ["🔑 <b>AI Provider Key Status</b>\n"]
+        # Gemini: real pool state (cooldown/dead) + per-account breakdown
+        sm = _gpool.summary()
+        if sm["total"]:
+            lines.append(f"🔵 <b>Gemini</b> (gemini-3.6-flash): {sm['total']} key · {sm['accounts']} account\n"
+                         f"  ✅ Healthy: {sm['ok']} | ⏳ Cooldown: {sm['cool']} | 🔴 আজকে exhausted: {sm['dead']}")
+            for name, n, a_ in sm["per"]:
+                lines.append(f"    • {name}: {n} key → ✅{a_['ok']} ⏳{a_['cool']} 🔴{a_['dead']}")
+        else:
+            lines.append("🔵 <b>Gemini</b>: 0 key (GEMINI_KEYS_ACC1.. সেট নেই)")
+        if _gpool.PROXY_ENABLED:
+            lines.append("  🔗 QuizBot proxy: চালু")
+        # other providers
+        inventory = [
+            ("groq", GROQ_KEYS, "🟢"),
+            ("nvidia", NVIDIA_KEYS, "⚪"),
+            ("openrouter-qwen", OPENROUTER_KEYS, "⚪"),
+            ("nemotron", NEMOTRON_KEYS or OPENROUTER_KEYS, "⚪"),
+            ("gemma", GEMMA_KEYS or OPENROUTER_KEYS, "⚪"),
+        ]
+        for provider, keys, icon in inventory:
+            plabel = PROVIDER_QUOTA_HINTS.get(provider, {}).get("label", provider)
+            n = len(keys)
+            if n == 0:
+                lines.append(f"\n⚪ <b>{plabel}</b>: 0 key (কনফিগার করা নেই)")
                 continue
-            cap += rpd * len(keys)
-    images_per_day = cap  # 1 attempt ≈ 1 image/text generation
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"📊 **Summary**")
-    lines.append(f"  🔑 Total keys: {total_keys}")
-    lines.append(f"  🟢 Healthy (used today, no quota issue): {total_healthy}")
-    lines.append(f"  ⚪ Untested (not used yet): {total_idle}")
-    lines.append(f"  🔴 Exhausted/Problem: {total_exhausted}")
-    lines.append(f"  ✅ Today success: {total_ok} · ❌ fail: {total_fail}")
-    lines.append(f"  📈 আনুমানিক দৈনিক capacity: ~{cap} attempts")
-    lines.append(f"  🖼️ আনুমানিক দৈনিক image/text MCQ: ~{images_per_day} টি")
-    lines.append(f"\n💡 HF Secrets এ নতুন key যোগ করে restart দিলে এখানে auto update হবে।")
-    text = "\n".join(lines)
-    # Telegram 4096-char limit: chunk safely
-    if len(text) <= 4000:
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    else:
-        chunk = ""
-        for line in lines:
-            if len(chunk) + len(line) + 1 > 3900:
-                await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
-                chunk = ""
-            chunk += line + "\n"
-        if chunk:
-            await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+            exhausted = cooling = 0
+            pstat = _provider_stats.get(provider, {})
+            for k_, st in pstat.items():
+                if st.get("exhausted"):
+                    exhausted += 1
+                elif st.get("cooldown_until", 0) and time.time() < st.get("cooldown_until", 0):
+                    cooling += 1
+            healthy = max(0, n - exhausted - cooling)
+            lines.append(f"\n{icon} <b>{plabel}</b>: {n} key\n"
+                         f"  ✅ Healthy: {healthy} | ⏳ Cooldown: {cooling} | 🔴 আজকে exhausted: {exhausted}")
+        if CF_ACCOUNT_ID and CF_AI_TOKEN:
+            lines.append("\n⚪ <b>Cloudflare Workers AI</b>: চালু")
+        await update.message.reply_text("\n".join(lines)[:4000], parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log_error(f"cmd_keys error: {e}")
+        await update.message.reply_text(f"❌ /keys failed: {str(e)[:150]}")
 
 # ------------------------------------------------------------
 # v4.0: PENDING INPUT ROUTER (pomo/rev/rand/class + bmexam_count + gpa)
@@ -7064,122 +7014,51 @@ async def cmd_whcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ping — QuizBot-style: instant, in-memory only (no DB / no user scan)."""
     user = get_user_info(update)
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু Owner ব্যবহার করতে পারবেন।")
         return
     try:
+        _t0 = time.time()
+        sent = await update.message.reply_text("🏓 Pong!")
         now = datetime.now(BD_TZ)
         if _bot_start_time:
-            uptime_delta = now - _bot_start_time
-            days = uptime_delta.days
-            hours, rem = divmod(uptime_delta.seconds, 3600)
-            mins, secs = divmod(rem, 60)
-            uptime_parts = []
-            if days > 0:
-                uptime_parts.append(f"{days} দিন")
-            if hours > 0:
-                uptime_parts.append(f"{hours} ঘণ্টা")
-            if mins > 0:
-                uptime_parts.append(f"{mins} মিনিট")
-            uptime_parts.append(f"{secs} সেকেন্ড")
-            uptime_str = " ".join(uptime_parts)
-            start_str = _bot_start_time.strftime("%Y-%m-%d %I:%M:%S %p")
+            secs_total = int((now - _bot_start_time).total_seconds())
+            d, rem = divmod(secs_total, 86400)
+            h, rem = divmod(rem, 3600)
+            m, _ = divmod(rem, 60)
+            uptime_str = (f"{d}d " if d else "") + f"{h}h {m}m"
+            start_str = _bot_start_time.strftime("%d-%b %I:%M %p")
         else:
-            uptime_str = "অজানা"
-            start_str = "অজানা"
-
+            uptime_str, start_str = "অজানা", "অজানা"
+        latency_ms = int((time.time() - _t0) * 1000)
         try:
-            client = get_supabase()
-            all_users = client.table('users').select('user_id,first_name,is_permitted,usage_count,daily_limit,last_reset').execute().data or []
+            _gs = _gpool.summary()
+            gem = f"{_gs['total']} key ({_gs['ok']} healthy)" if _gs["total"] else "0"
         except Exception:
-            all_users = []
-        total_users = len(all_users)
-        permitted_users = sum(1 for u in all_users if u.get('is_permitted'))
-        free_users = total_users - permitted_users
-        today_str = now.strftime('%Y-%m-%d')
-        active_today = sum(1 for u in all_users if u.get('usage_count', 0) > 0)
-
-        inventory = [
-            ("gemini", GEMINI_KEYS),
-            ("groq", GROQ_KEYS),
-            ("nvidia", NVIDIA_KEYS),
-            ("openrouter-qwen", OPENROUTER_KEYS),
-            ("nemotron", NEMOTRON_KEYS or OPENROUTER_KEYS),
-            ("gemma", GEMMA_KEYS or OPENROUTER_KEYS),
-            ("cf-workers-ai", [CF_AI_TOKEN] if (CF_ACCOUNT_ID and CF_AI_TOKEN) else []),
-        ]
-        total_keys = 0
-        key_lines = []
-        for provider, keys in inventory:
-            hint = PROVIDER_QUOTA_HINTS.get(provider, {})
-            plabel = hint.get("label", provider)
-            n = len(keys)
-            total_keys += n
-            if n > 0:
-                key_lines.append(f"  {plabel}: <b>{n}</b> keys")
-
-        pomo_count = len(_pomodoro_sessions)
-        active_quizzes = len(_timer_tasks)
-
-        # v4.1: কোন platform-এ চলছে আর webhook এখন আসলে কোন route-এ আছে তা
-        # Telegram থেকে সরাসরি জিজ্ঞেস করে দেখানো হয় (local _failover_active
-        # ফ্ল্যাগের উপর নির্ভর না করে — কারণ GitHub Actions watchdog যদি
-        # switch করে, HF process নিজে সেটা জানে না)।
-        host_label = "🟦 Render"
-        route_label = "❓ Unknown"
+            gem = str(len(GEMINI_KEYS))
         try:
-            wh_info = await application.bot.get_webhook_info()
-            wh_url = wh_info.url or ""
-            _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-            _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-            if _render_secondary and _render_secondary in wh_url:
-                route_label = "🟠 Render SECONDARY (failover active! Primary down)"
-            elif _render_primary and _render_primary in wh_url:
-                route_label = "🟢 Render PRIMARY (normal)"
-            elif "onrender.com" in wh_url:
-                route_label = "🟡 Render (unknown account)"
-            elif wh_url:
-                route_label = "🟢 Cloudflare Proxy (স্বাভাবিক)"
-            else:
-                route_label = "⚠️ Webhook সেট নেই"
+            rows = list(_SPEED_LOG)
+            last = f"{rows[-1]['ai']:.1f}s ({rows[-1]['prov']})" if rows else "—"
         except Exception:
-            pass
-
+            last = "—"
         text = (
-            f"📌 <b>ATLAS BOT — STATUS</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🟢 <b>Bot Status:</b> Active\n"
-            f"🖥️ <b>Host:</b> {host_label}\n"
-            f"🔌 <b>Webhook Route:</b> {route_label}\n"
-            f"🕐 <b>চালু হয়েছে:</b> {start_str} (BD)\n"
-            f"⏱️ <b>Uptime:</b> {uptime_str}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👥 <b>USERS</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  📊 Total Users: <b>{total_users}</b>\n"
-            f"  🌟 Permitted: <b>{permitted_users}</b>\n"
-            f"  🔒 Free: <b>{free_users}</b>\n"
-            f"  🔥 আজ Active: <b>{active_today}</b>\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔑 <b>AI KEYS</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  🔑 Total Keys: <b>{total_keys}</b>\n"
+            "🏓 <b>Pong! ATLAS Bot Online</b>\n\n"
+            f"⚡ <b>Latency:</b> {latency_ms}ms\n"
+            f"🖥 <b>Running on:</b> Render\n"
+            f"🕐 চালু হয়েছে: {start_str}\n"
+            f"⏱ Active আছে: {uptime_str}\n"
+            f"🔑 Gemini Keys: {gem}\n"
+            f"🧠 শেষ MCQ generation: {last}"
         )
-        for line in key_lines:
-            text += line + "\n"
-        text += (
-            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚡ <b>LIVE SESSIONS</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  🍅 Pomodoro চলছে: <b>{pomo_count}</b>\n"
-            f"  📝 Quiz চলছে: <b>{active_quizzes}</b>\n\n"
-            f"📅 <b>Date:</b> {now.strftime('%Y-%m-%d %I:%M %p')} (BD)"
-        )
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        try:
+            await sent.edit_text(text, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
     except Exception as e:
         log_error(f"cmd_ping error: {e}")
-        await update.message.reply_text("⏳ সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        await update.message.reply_text("🏓 Pong! (stats error)")
 
 # ============================================================
 # SECTION: LIVE QUIZ (CSV-based, auto-pin pre-message)
