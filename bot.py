@@ -3148,10 +3148,16 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
     """Generate MCQs from an image — Gemini→NVIDIA→OpenRouter chain + cache."""
     try:
         # v4.0: instant cache hit for same image+prompt_type
+        _T0 = time.time()
         src_hash = hashlib.md5(image_bytes).hexdigest() + f"_{prompt_type}"
-        cached = (await _db(find_cached_mcq, src_hash, prompt_type))
+        # cache lookup + prompt fetch run IN PARALLEL (both are DB round-trips)
+        cached, prompts = await asyncio.gather(
+            _db(find_cached_mcq, src_hash, prompt_type),
+            _db(get_prompts_from_db),
+        )
+        _T_DB = time.time() - _T0
         if cached and cached.get('mcqs'):
-            log(f"⚡ Cache hit for image (prompt: {prompt_type})")
+            log(f"⚡ Cache hit for image (prompt: {prompt_type}) in {_T_DB:.1f}s")
             return clean_mcq_options(cached['mcqs']), None
 
         # v4.7: qbm_extract now uses QuizBot's exact 2-call connected pipeline
@@ -3165,18 +3171,20 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
             log(f"✅ [QBM 2-call] Extracted {len(valid_mcqs)} MCQs from image")
             return valid_mcqs, None
 
-        prompts = (await _db(get_prompts_from_db))
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
         prompt_text = prompt_text + COMPACT_MCQ_RULES
 
         _t0 = time.time()
         response_text, provider = await ai_generate(prompt_text, image_bytes)
-        log(f"⏱️ [genmcq] ai_generate call took {time.time()-_t0:.1f}s (provider={provider or 'NONE'})")
+        _T_AI = time.time() - _t0
+        log(f"⏱️ [genmcq] db={_T_DB:.1f}s ai={_T_AI:.1f}s (provider={provider or 'NONE'}, img={len(image_bytes)//1024}KB, prompt={len(prompt_text)}ch)")
         if not response_text:
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
+        _tp = time.time()
         valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
+        log(f"⏱️ [genmcq] parse={time.time()-_tp:.2f}s mcqs={len(valid_mcqs)}")
         # v5.26: RETRY_THRESHOLD lowered 5->3 — a real case showed 4 valid
         # MCQs triggering a full second Gemini call just to try for one or
         # two more, nearly doubling total latency (52.5s for only 4 MCQs)
@@ -4932,7 +4940,9 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
             return
         image_file_id = context.user_data.get('pending_image_file_id', '')
         src_hash = hashlib.md5(image_bytes).hexdigest() + f"_{prompt_type}"
+        _ts = time.time()
         quiz_id = await save_mcq(user_id=user_id, mcqs=(await _db(apply_tag_exp, clean_mcq_options(mcqs))), source_type='image', prompt_type=prompt_type, image_file_id=image_file_id, chat_id=None, message_id=None, source_hash=src_hash)
+        log(f"⏱️ [genmcq] gen={gen_elapsed:.1f}s save_mcq={time.time()-_ts:.1f}s TOTAL_so_far={time.time()-_gen_start:.1f}s")
         new_usage = (await _db(increment_usage, user_id))
         user_data = (await _db(get_user, user_id))
         practice_no = user_data.get('practice_count', 1) if user_data else 1
