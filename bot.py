@@ -179,9 +179,16 @@ PREMIUM_MSG = """
 supabase: Client = None
 supabase_backup: Client = None
 
+import threading as _threading
+_SB_LOCK = _threading.RLock()
+
+
 def get_supabase() -> Client:
     global supabase
-    if supabase is None:
+    if supabase is not None:
+        return supabase
+    with _SB_LOCK:
+      if supabase is None:
         try:
             supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
             # postgrest এর httpx session এ keepalive disable করো
@@ -192,7 +199,7 @@ def get_supabase() -> Client:
                     timeout=8,
                     limits=httpx.Limits(
                         max_keepalive_connections=0,
-                        max_connections=10,
+                        max_connections=14,
                         keepalive_expiry=0,
                     ),
                 )
@@ -272,6 +279,21 @@ def _patch_supabase_execute_with_retry() -> None:
     SyncQueryRequestBuilder.execute = patched_execute
 
 _patch_supabase_execute_with_retry()
+
+# ── Scale: run blocking Supabase helpers in a dedicated thread pool so one
+# slow DB call never freezes the event loop for every other user. ──
+from concurrent.futures import ThreadPoolExecutor as _TPE
+_DB_POOL = _TPE(max_workers=int(os.getenv("DB_THREADS", "12")), thread_name_prefix="db")
+
+
+async def _db(fn, *args, **kwargs):
+    """Await a blocking (sync) helper without blocking the event loop."""
+    loop = asyncio.get_running_loop()
+    if kwargs:
+        import functools as _ft
+        return await loop.run_in_executor(_DB_POOL, _ft.partial(fn, *args, **kwargs))
+    return await loop.run_in_executor(_DB_POOL, fn, *args)
+
 
 def get_supabase_backup() -> Optional[Client]:
     """v4.0: optional secondary Supabase mirror. Silent if not configured."""
@@ -2343,7 +2365,7 @@ def _get_result_for_quiz(user_id: int, quiz_id: str) -> Optional[Dict]:
 
 async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: str, receiver_result: Dict) -> None:
     try:
-        sender_result = _get_result_for_quiz(sender_id, quiz_id)
+        sender_result = (await _db(_get_result_for_quiz, sender_id, quiz_id))
         if not sender_result:
             return
         try:
@@ -3138,11 +3160,26 @@ async def qbm_extract_from_image(image_bytes: bytes) -> list:
         _QBM_EXTRACT_HARD_CAP.release()
 
 
-_GEN_SEM = asyncio.Semaphore(int(os.getenv("GEN_CONCURRENCY", "2")))  # RAM guard: max concurrent image->MCQ pipelines
+_GEN_SEM = asyncio.Semaphore(int(os.getenv("GEN_CONCURRENCY", "6")))  # RAM guard: max concurrent image->MCQ pipelines
+
+
+async def _wait_for_ram_headroom(ceiling_mb: int = 400, max_wait: float = 45.0) -> None:
+    """Back-pressure: if process RSS is near the 512MB limit, wait (bounded)
+    for it to drop before starting another heavy pipeline, instead of OOM."""
+    try:
+        import psutil
+        proc = psutil.Process(os.getpid())
+        waited = 0.0
+        while proc.memory_info().rss / (1024 * 1024) > ceiling_mb and waited < max_wait:
+            await asyncio.sleep(1.0)
+            waited += 1.0
+    except Exception:
+        return
 
 
 async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
     async with _GEN_SEM:
+        await _wait_for_ram_headroom()
         return await _generate_mcq_from_image_inner(image_bytes, prompt_type)
 
 
@@ -3151,7 +3188,7 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
     try:
         # v4.0: instant cache hit for same image+prompt_type
         src_hash = hashlib.md5(image_bytes).hexdigest() + f"_{prompt_type}"
-        cached = find_cached_mcq(src_hash, prompt_type)
+        cached = (await _db(find_cached_mcq, src_hash, prompt_type))
         if cached and cached.get('mcqs'):
             log(f"⚡ Cache hit for image (prompt: {prompt_type})")
             return clean_mcq_options(cached['mcqs']), None
@@ -3167,7 +3204,7 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
             log(f"✅ [QBM 2-call] Extracted {len(valid_mcqs)} MCQs from image")
             return valid_mcqs, None
 
-        prompts = get_prompts_from_db()
+        prompts = (await _db(get_prompts_from_db))
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
         prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK + SELF_VERIFY_THOUGHT_LOCK + STRICT_SOURCE_RULES
 
@@ -3233,12 +3270,12 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
     try:
         cache_suffix = f"_{prompt_type}_{'max' if maximize else 'sel'}"
         src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + cache_suffix
-        cached = find_cached_mcq(src_hash, prompt_type)
+        cached = (await _db(find_cached_mcq, src_hash, prompt_type))
         if cached and cached.get('mcqs'):
             log(f"⚡ Cache hit for text (prompt: {prompt_type}, max={maximize})")
             return clean_mcq_options(cached['mcqs']), None
 
-        prompts = get_prompts_from_db()
+        prompts = (await _db(get_prompts_from_db))
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
         prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK
         if maximize:
@@ -3485,7 +3522,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = user['user_id']
     first_name = user['first_name']
     log(f"📱 /start from {user_id} ({first_name})")
-    create_user(user_id, first_name, user['username'])
+    (await _db(create_user, user_id, first_name, user['username']))
 
     # v4.0: Share & Challenge deep link — /start quiz_<id> or /start quiz_<id>_c<sender_id>
     if context.args and context.args[0].startswith('quiz_'):
@@ -3505,7 +3542,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         mcq_data = await get_mcq(quiz_id)
         if mcq_data:
             mcqs = mcq_data['mcqs']
-            prompt_name = get_prompt_display_name(mcq_data.get('prompt_type', 'prompt_1'))
+            prompt_name = (await _db(get_prompt_display_name, mcq_data.get('prompt_type', 'prompt_1')))
             challenge_line = ""
             if sender_id and sender_id != user_id:
                 try:
@@ -3531,7 +3568,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await update.message.reply_text("❌ Quiz টি পাওয়া যায়নি বা মেয়াদোত্তীর্ণ।")
 
-    allowed, usage, limit, is_perm = check_access(user_id)
+    allowed, usage, limit, is_perm = (await _db(check_access, user_id))
     status = "✅ Permitted" if is_perm else "🔒 Free"
     safe_name = escape_markdown(first_name, version=1)
 
@@ -3769,7 +3806,7 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    allowed, usage, limit, is_perm = check_access(user_id)
+    allowed, usage, limit, is_perm = (await _db(check_access, user_id))
     if not allowed:
         if is_perm:
             await msg.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
@@ -3889,9 +3926,9 @@ async def cmd_tf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if per_page_count and per_page_count > 0:
                 mcqs = mcqs[:per_page_count]
 
-            mcqs = apply_tag_exp(clean_mcq_options(mcqs))
+            mcqs = (await _db(apply_tag_exp, clean_mcq_options(mcqs)))
             all_mcqs_for_csv.extend(mcqs)
-            increment_usage(user_id)
+            (await _db(increment_usage, user_id))
             ok_count += 1
             page_stats.append((page_no, len(mcqs), _time.monotonic() - page_start))
         except Exception as e:
@@ -4019,7 +4056,7 @@ async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     user_id = user['user_id']
     log(f"📚 /all from {user_id}")
-    mcqs_data = get_user_mcqs(user_id)
+    mcqs_data = (await _db(get_user_mcqs, user_id))
     if not mcqs_data:
         await update.message.reply_text("📭 আপনার কোনো সংরক্ষিত MCQ নেই।\n\nএকটি Image বা Text পাঠিয়ে MCQ বানান!")
         return
@@ -4031,7 +4068,7 @@ async def cmd_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             prompt_type = mcq_data.get('prompt_type', 'prompt_1')
             count = len(mcqs)
             created = mcq_data.get('created_at', 'Unknown')
-            prompt_name = get_prompt_display_name(prompt_type)
+            prompt_name = (await _db(get_prompt_display_name, prompt_type))
             # v4.0: date + time both shown
             created_str = f"{created[:10]} 🕐 {created[11:16]}" if created and len(str(created)) >= 16 else (created[:10] if created else 'Unknown')
             text = f"📦 MCQ Set #{i+1}\n📝 {count} টি প্রশ্ন\n📋 Type: {prompt_name}\n🔄 Source: {mcq_data.get('source_type','text')}\n📅 {created_str}"
@@ -4060,7 +4097,7 @@ async def cmd_bm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     user_id = user['user_id']
     log(f"📑 /bm from {user_id}")
-    bms = get_all_bookmarks(user_id)
+    bms = (await _db(get_all_bookmarks, user_id))
     if not bms:
         await update.message.reply_text(
             "📭 আপনার কোনো Bookmark করা MCQ নেই।\n\n🌐 Website Exam এ গিয়ে 🔖 বাটনে চাপ দিয়ে প্রশ্ন Bookmark করুন!\n\n💡 Bookmark MCQ দিয়ে Exam দিতে: /bmexam"
@@ -4120,7 +4157,7 @@ async def cmd_bmexam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = get_user_info(update)
     user_id = user['user_id']
     log(f"🔖 /bmexam from {user_id}")
-    bms = get_all_bookmarks(user_id)
+    bms = (await _db(get_all_bookmarks, user_id))
     if not bms:
         await update.message.reply_text("📭 আপনার কোনো Bookmark করা MCQ নেই।\n\n🌐 Website Exam এ গিয়ে 🔖 বাটনে চাপ দিয়ে প্রশ্ন Bookmark করুন!")
         return
@@ -4211,15 +4248,15 @@ async def cmd_permit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         if args[0].lower() == 'remove' and len(args) > 1:
             target_id = int(args[1])
-            unpermit_user(target_id)
+            (await _db(unpermit_user, target_id))
             await update.message.reply_text(f"❌ User {target_id} permit removed.")
             log(f"🔒 Permit removed: {target_id}")
         else:
             target_id = int(args[0])
-            existing = get_user(target_id)
+            existing = (await _db(get_user, target_id))
             if not existing:
-                create_user(target_id, f"User_{target_id}", "")
-            permit_user(target_id)
+                (await _db(create_user, target_id, f"User_{target_id}", ""))
+            (await _db(permit_user, target_id))
             await update.message.reply_text(f"✅ User {target_id} permitted!\n📦 Premium Access: 50 pages/day\n🔄 Reset: প্রতি ২৪ ঘণ্টায়")
             log(f"🔓 Permit granted: {target_id} (50/day premium)")
     except ValueError:
@@ -4236,12 +4273,12 @@ async def cmd_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if len(args) == 1:
         count = int(args[0])
-        set_setting('daily_limit', count)
+        (await _db(set_setting, 'daily_limit', count))
         await update.message.reply_text(f"✅ সবার daily limit **{count}** সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
     elif len(args) == 2:
         target_id = int(args[0])
         count = int(args[1])
-        set_user_limit(target_id, count)
+        (await _db(set_user_limit, target_id, count))
         await update.message.reply_text(f"✅ User `{target_id}` এর limit **{count}** সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4251,11 +4288,11 @@ async def cmd_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args
     if not args:
-        current = get_setting('free_limit', DEFAULT_FREE_LIMIT)
+        current = (await _db(get_setting, 'free_limit', DEFAULT_FREE_LIMIT))
         await update.message.reply_text(f"বর্তমান free limit: **{current}**\nUsage: `/free <count>`", parse_mode=ParseMode.MARKDOWN)
         return
     count = int(args[0])
-    set_setting('free_limit', count)
+    (await _db(set_setting, 'free_limit', count))
     await update.message.reply_text(f"✅ Free users **{count}** বার use করতে পারবে।", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4265,11 +4302,11 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args
     if not args:
-        current = get_setting('daily_limit', DEFAULT_DAILY_LIMIT)
+        current = (await _db(get_setting, 'daily_limit', DEFAULT_DAILY_LIMIT))
         await update.message.reply_text(f"বর্তমান permitted daily limit: **{current}**\nUsage: `/daily <count>`", parse_mode=ParseMode.MARKDOWN)
         return
     count = int(args[0])
-    set_setting('daily_limit', count)
+    (await _db(set_setting, 'daily_limit', count))
     await update.message.reply_text(f"✅ Permitted users দৈনিক **{count}** বার use করতে পারবে।", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_setneg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4279,11 +4316,11 @@ async def cmd_setneg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     args = context.args
     if not args:
-        current = get_setting('negative_mark', DEFAULT_NEGATIVE_MARK)
+        current = (await _db(get_setting, 'negative_mark', DEFAULT_NEGATIVE_MARK))
         await update.message.reply_text(f"বর্তমান negative mark: **{current}**\nUsage: `/setneg -0.50`", parse_mode=ParseMode.MARKDOWN)
         return
     value = float(args[0])
-    set_setting('negative_mark', value)
+    (await _db(set_setting, 'negative_mark', value))
     await update.message.reply_text(f"✅ Negative mark **{value}** সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_settimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4293,11 +4330,11 @@ async def cmd_settimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     args = context.args
     if not args:
-        current = get_setting('timer_seconds', DEFAULT_TIMER)
+        current = (await _db(get_setting, 'timer_seconds', DEFAULT_TIMER))
         await update.message.reply_text(f"বর্তমান timer: **{current}** সেকেন্ড\nUsage: `/settimer 30`", parse_mode=ParseMode.MARKDOWN)
         return
     seconds = int(args[0])
-    set_setting('timer_seconds', seconds)
+    (await _db(set_setting, 'timer_seconds', seconds))
     await update.message.reply_text(f"✅ Quiz timer **{seconds}** সেকেন্ড সেট করা হয়েছে।", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4307,18 +4344,18 @@ async def cmd_tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args
     if not args:
-        current = get_setting('quiz_tag', '')
+        current = (await _db(get_setting, 'quiz_tag', ''))
         if current:
             await update.message.reply_text(f"📌 Current tag: **[{current}]**\n\nRemove করতে: `/tag off`", parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text("📌 কোনো tag সেট নেই।\nUsage: `/tag ExamName`", parse_mode=ParseMode.MARKDOWN)
         return
     if args[0].lower() == 'off':
-        set_setting('quiz_tag', '')
+        (await _db(set_setting, 'quiz_tag', ''))
         await update.message.reply_text("✅ Tag remove করা হয়েছে।")
     else:
         tag = ' '.join(args)
-        set_setting('quiz_tag', tag)
+        (await _db(set_setting, 'quiz_tag', tag))
         await update.message.reply_text(f"✅ Tag সেট: **[{tag}]**\n\nসব Quiz/Poll/Exam এ দেখাবে।", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4328,18 +4365,18 @@ async def cmd_exp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args
     if not args:
-        current = get_setting('quiz_exp', '')
+        current = (await _db(get_setting, 'quiz_exp', ''))
         if current:
             await update.message.reply_text(f"📝 Current exp: **{current}**\n\nRemove করতে: `/exp off`", parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text("📝 কোনো exp text সেট নেই।\nUsage: `/exp ExamName`", parse_mode=ParseMode.MARKDOWN)
         return
     if args[0].lower() == 'off':
-        set_setting('quiz_exp', '')
+        (await _db(set_setting, 'quiz_exp', ''))
         await update.message.reply_text("✅ Exp text remove করা হয়েছে।")
     else:
         exp_text = ' '.join(args)
-        set_setting('quiz_exp', exp_text)
+        (await _db(set_setting, 'quiz_exp', exp_text))
         await update.message.reply_text(f"✅ Exp text সেট: **{exp_text}**", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4369,7 +4406,7 @@ async def cmd_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not is_admin(user['user_id']):
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
-    prompts = get_prompts_from_db()
+    prompts = (await _db(get_prompts_from_db))
     keyboard = []
     for key, prompt_data in prompts.items():
         name = prompt_data.get('name', key)
@@ -4392,7 +4429,7 @@ async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not replied_msg:
         await update.message.reply_text("📨 **Broadcast Usage:**\n\n1. একটি মেসেজ/ইমিজ পাঠান\n2. সেই মেসেজে reply দিয়ে `/send` দিন\n3. সবার কাছে মেসেজটি পাঠানো হবে", parse_mode=ParseMode.MARKDOWN)
         return
-    users = get_all_users()
+    users = (await _db(get_all_users))
     if not users:
         await update.message.reply_text("❌ কোনো ইউজার নেই।")
         return
@@ -4467,7 +4504,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     log(f"🖼️ Image from {user_id} ({user['first_name']})")
-    allowed, usage, limit, is_perm = check_access(user_id)
+    allowed, usage, limit, is_perm = (await _db(check_access, user_id))
     if not allowed:
         if is_perm:
             await update.message.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
@@ -4545,7 +4582,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await instant_msg.delete()
         except Exception:
             pass
-        prompts = get_prompts_from_db()
+        prompts = (await _db(get_prompts_from_db))
         _emoji_strip_re = re.compile(
             r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\uFE0F]+\s*'
         )
@@ -4599,7 +4636,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "❌ **দু:খিত!** 😕\n\nআপনার Text এ Proper info নেই!\nআরো তথ্য দিন, আমি MCQ Practice Tool বানিয়ে দিবো 😃\n\n📝 **টিপস:**\n• কমপক্ষে ৪-৫ লাইন লিখুন\n• বিস্তারিত তথ্য দিন\n• গুরুত্বপূর্ণ পয়েন্ট উল্লেখ করুন\n• ৩০+ শব্দ দিন"
         )
         return
-    allowed, usage, limit, is_perm = check_access(user_id)
+    allowed, usage, limit, is_perm = (await _db(check_access, user_id))
     if not allowed:
         if is_perm:
             await update.message.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
@@ -4683,7 +4720,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("🗑️ এই MCQ সেটটি Delete করবেন? এটি আর ফেরত আসবে না।", reply_markup=InlineKeyboardMarkup(kb), reply_to_message_id=query.message.message_id)
         elif data.startswith("delc_"):
             quiz_id = data.replace("delc_", "")
-            ok = delete_mcq(quiz_id, user.id)
+            ok = (await _db(delete_mcq, quiz_id, user.id))
             try:
                 await query.message.delete()
             except Exception:
@@ -4760,7 +4797,7 @@ async def cmd_txt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "📝 কমপক্ষে ৪-৫ লাইন, ৩০+ শব্দ লাগবে।"
         )
         return
-    allowed, usage, limit, is_perm = check_access(user_id)
+    allowed, usage, limit, is_perm = (await _db(check_access, user_id))
     if not allowed:
         if is_perm:
             await update.message.reply_text(f"❌ আপনার আজকের লিমিট ({limit}) শেষ। আগামীকাল আবার চেষ্টা করুন।")
@@ -4785,12 +4822,12 @@ async def cmd_txt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await status.edit_text("❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।")
             return
         src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + "_prompt_1_max"
-        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
-        new_usage = increment_usage(user_id)
-        user_data = get_user(user_id)
+        quiz_id = await save_mcq(user_id=user_id, mcqs=(await _db(apply_tag_exp, clean_mcq_options(mcqs))), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
+        new_usage = (await _db(increment_usage, user_id))
+        user_data = (await _db(get_user, user_id))
         practice_no = user_data.get('practice_count', 1) if user_data else 1
         caption = generate_caption({'first_name': user.get('first_name') or 'User'}, practice_no, len(mcqs), "Maximum MCQ")
-        allowed2, usage2, limit2, is_perm2 = check_access(user_id)
+        allowed2, usage2, limit2, is_perm2 = (await _db(check_access, user_id))
         keyboard = mcq_set_keyboard(quiz_id, user_id)
         full_caption = f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit2}"
         await status.edit_text(full_caption, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -4833,13 +4870,13 @@ async def handle_text_mcq_generation(query, mode: str, context: ContextTypes.DEF
             await query.message.edit_text("❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।")
             return
         src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + f"_prompt_1_{'max' if is_max else 'sel'}"
-        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
-        new_usage = increment_usage(user_id)
-        user_data = get_user(user_id)
+        quiz_id = await save_mcq(user_id=user_id, mcqs=(await _db(apply_tag_exp, clean_mcq_options(mcqs))), source_type='text', prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None, source_hash=src_hash)
+        new_usage = (await _db(increment_usage, user_id))
+        user_data = (await _db(get_user, user_id))
         practice_no = user_data.get('practice_count', 1) if user_data else 1
         mode_label = "Maximum MCQ" if is_max else "Selected MCQ"
         caption = generate_caption({'first_name': user.first_name or 'User'}, practice_no, len(mcqs), mode_label)
-        allowed, usage, limit, is_perm = check_access(user_id)
+        allowed, usage, limit, is_perm = (await _db(check_access, user_id))
         keyboard = mcq_set_keyboard(quiz_id, user_id)
         full_caption = f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}"
         await query.message.edit_text(full_caption, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -4884,7 +4921,7 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
         return
     async def _edit_cap(t):
         await query.message.edit_caption(caption=t)
-    type_label = get_prompt_display_name(prompt_type)
+    type_label = (await _db(get_prompt_display_name, prompt_type))
     prog_task = asyncio.create_task(live_progress_task(_edit_cap, "Image", total_eta=8, type_label=type_label))
     _gen_start = time.time()
     try:
@@ -4930,12 +4967,12 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
             return
         image_file_id = context.user_data.get('pending_image_file_id', '')
         src_hash = hashlib.md5(image_bytes).hexdigest() + f"_{prompt_type}"
-        quiz_id = await save_mcq(user_id=user_id, mcqs=apply_tag_exp(clean_mcq_options(mcqs)), source_type='image', prompt_type=prompt_type, image_file_id=image_file_id, chat_id=None, message_id=None, source_hash=src_hash)
-        new_usage = increment_usage(user_id)
-        user_data = get_user(user_id)
+        quiz_id = await save_mcq(user_id=user_id, mcqs=(await _db(apply_tag_exp, clean_mcq_options(mcqs))), source_type='image', prompt_type=prompt_type, image_file_id=image_file_id, chat_id=None, message_id=None, source_hash=src_hash)
+        new_usage = (await _db(increment_usage, user_id))
+        user_data = (await _db(get_user, user_id))
         practice_no = user_data.get('practice_count', 1) if user_data else 1
-        prompt_name = get_prompt_display_name(prompt_type)
-        allowed, usage, limit, is_perm = check_access(user_id)
+        prompt_name = (await _db(get_prompt_display_name, prompt_type))
+        allowed, usage, limit, is_perm = (await _db(check_access, user_id))
         caption = generate_caption({'first_name': user.first_name or 'User'}, practice_no, len(mcqs), prompt_name, elapsed_secs=gen_elapsed)
         keyboard = mcq_set_keyboard(quiz_id, user_id)
         full_caption = f"{caption}\n\n📊 আজকের ব্যবহার: {new_usage}/{limit}"
@@ -5212,7 +5249,7 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
             )
         return
 
-    new_mcqs = apply_tag_exp(clean_mcq_options(_normalize_qbm_answers(mcqs)))
+    new_mcqs = (await _db(apply_tag_exp, clean_mcq_options(_normalize_qbm_answers(mcqs))))
     new_quiz_id = await save_mcq(
         user_id=user.id, mcqs=new_mcqs, source_type='image',
         prompt_type='qbm_extract', image_file_id=image_file_id,
@@ -5299,14 +5336,14 @@ async def handle_poll_solve(query, quiz_id: str, user) -> None:
     if not mcq_data:
         await query.message.reply_text("❌ MCQ data পাওয়া যায়নি।")
         return
-    mcqs = apply_tag_exp(clean_mcq_options(mcq_data['mcqs']))
+    mcqs = (await _db(apply_tag_exp, clean_mcq_options(mcq_data['mcqs'])))
     total = len(mcqs)
     image_file_id = mcq_data.get('image_file_id')
     if image_file_id:
         async def _send_pre_image():
             await query.message.chat.send_photo(
                 photo=image_file_id,
-                caption=f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n📋 Type: {get_prompt_display_name(mcq_data.get('prompt_type','prompt_1'))}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}",
+                caption=f"📊 **Poll Session Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n📝 Total Questions: {total}\n📋 Type: {(await _db(get_prompt_display_name, mcq_data.get('prompt_type','prompt_1')))}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{get_ayat(None)}",
                 parse_mode=ParseMode.MARKDOWN
             )
         try:
@@ -5358,9 +5395,9 @@ async def handle_quiz_start(query, quiz_id: str, user, chat_id: int) -> None:
         return
     mcqs = clean_mcq_options(mcq_data['mcqs'])
     random.shuffle(mcqs)
-    mcqs = apply_tag_exp(mcqs)
+    mcqs = (await _db(apply_tag_exp, mcqs))
     total = len(mcqs)
-    settings = get_all_settings()
+    settings = (await _db(get_all_settings))
     timer = int(settings.get('timer_seconds', DEFAULT_TIMER))
     neg_mark = abs(float(settings.get('negative_mark', DEFAULT_NEGATIVE_MARK)))
     quiz_state = {
@@ -5368,9 +5405,9 @@ async def handle_quiz_start(query, quiz_id: str, user, chat_id: int) -> None:
         'correct': 0, 'wrong': 0, 'skipped': 0, 'start_time': time.time(),
         'timer': timer, 'neg_mark': neg_mark, 'current_poll_id': None,
     }
-    save_active_quiz(chat_id, quiz_state)
+    (await _db(save_active_quiz, chat_id, quiz_state))
     image_file_id = mcq_data.get('image_file_id')
-    prompt_name = get_prompt_display_name(mcq_data.get('prompt_type', 'prompt_1'))
+    prompt_name = (await _db(get_prompt_display_name, mcq_data.get('prompt_type', 'prompt_1')))
     ready_text = (
         f"📝 **Quiz Ready!**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 Total Questions: {total}\n⏱️ Per Question: {timer} সেকেন্ড\n"
@@ -5389,17 +5426,17 @@ async def handle_quiz_start(query, quiz_id: str, user, chat_id: int) -> None:
         await query.message.reply_text(ready_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
 async def send_first_question(query, chat_id: int) -> None:
-    quiz = get_active_quiz(chat_id)
+    quiz = (await _db(get_active_quiz, chat_id))
     if not quiz:
         await query.message.reply_text("❌ Quiz session expired। আবার শুরু করুন।")
         return
     quiz['current_index'] = 0
-    save_active_quiz(chat_id, quiz)
+    (await _db(save_active_quiz, chat_id, quiz))
     await send_countdown(chat_id)
     await send_quiz_poll(chat_id)
 
 async def send_quiz_poll(chat_id: int) -> None:
-    quiz = get_active_quiz(chat_id)
+    quiz = (await _db(get_active_quiz, chat_id))
     if not quiz:
         return
     idx = quiz['current_index']
@@ -5439,26 +5476,26 @@ async def send_quiz_poll(chat_id: int) -> None:
             old_task.cancel()
         task = asyncio.create_task(_quiz_timer_task(chat_id, timer + 0.1))
         _timer_tasks[chat_id] = task
-        save_active_quiz(chat_id, quiz)
+        (await _db(save_active_quiz, chat_id, quiz))
         log(f"📊 Quiz poll sent: Q{idx+1}/{total} chat={chat_id}")
     except Exception as e:
         log_error(f"Send quiz poll error: {e}")
         quiz['skipped'] += 1
         quiz['current_index'] += 1
-        save_active_quiz(chat_id, quiz)
+        (await _db(save_active_quiz, chat_id, quiz))
         await asyncio.sleep(0.5)
         await send_quiz_poll(chat_id)
 
 async def _quiz_timer_task(chat_id: int, delay: float) -> None:
     await asyncio.sleep(delay)
-    quiz = get_active_quiz(chat_id)
+    quiz = (await _db(get_active_quiz, chat_id))
     if not quiz:
         return
     log(f"⏱️ Timer expired chat={chat_id}, auto-next")
     quiz['skipped'] += 1
     quiz['answers'][quiz['current_index']] = -1
     quiz['current_index'] += 1
-    save_active_quiz(chat_id, quiz)
+    (await _db(save_active_quiz, chat_id, quiz))
     await send_quiz_poll(chat_id)
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5484,7 +5521,7 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_id = _poll_chat_map.get(poll_id)
     if not chat_id:
         return
-    quiz = get_active_quiz(chat_id)
+    quiz = (await _db(get_active_quiz, chat_id))
     if not quiz:
         return
     task = _timer_tasks.pop(chat_id, None)
@@ -5506,12 +5543,12 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         quiz['skipped'] += 1
         quiz['answers'][idx] = -1
     quiz['current_index'] += 1
-    save_active_quiz(chat_id, quiz)
+    (await _db(save_active_quiz, chat_id, quiz))
     await send_quiz_poll(chat_id)
 
 async def end_quiz(chat_id: int) -> None:
     global _poll_chat_map
-    quiz = get_active_quiz(chat_id)
+    quiz = (await _db(get_active_quiz, chat_id))
     if not quiz:
         return
     total = len(quiz['mcqs'])
@@ -5539,7 +5576,7 @@ async def end_quiz(chat_id: int) -> None:
     )
     quiz_id = quiz['quiz_id']
     _last_quiz_answers[chat_id] = {'answers': quiz['answers'], 'mcqs': quiz['mcqs']}
-    save_mistakes_from_quiz(chat_id, quiz)
+    (await _db(save_mistakes_from_quiz, chat_id, quiz))
     keyboard = [
         [InlineKeyboardButton("🔄 Quiz Again", callback_data=f"retake_{quiz_id}"), InlineKeyboardButton("🆕 New Quiz", callback_data=f"newq_{quiz_id}")],
         [InlineKeyboardButton("❌ Mistake Practice", callback_data=f"mistake_{quiz_id}"), InlineKeyboardButton("📸 Back to Source", callback_data=f"back_{quiz_id}")],
@@ -5547,7 +5584,7 @@ async def end_quiz(chat_id: int) -> None:
         [InlineKeyboardButton("🌐 Atlas Website", url="https://atlascourses.com"), InlineKeyboardButton("▶️ Atlas YouTube", url="https://www.youtube.com/@atlasprep")]
     ]
     try:
-        save_result(user_id=chat_id, quiz_id=quiz_id, quiz_name=f"Quiz_{quiz_id[:6]}", total=total, right=correct, wrong=wrong, skipped=skipped, time_taken=time_taken, mark=final_mark, negative_mark=penalty)
+        (await _db(save_result, user_id=chat_id, quiz_id=quiz_id, quiz_name=f"Quiz_{quiz_id[:6]}", total=total, right=correct, wrong=wrong, skipped=skipped, time_taken=time_taken, mark=final_mark, negative_mark=penalty))
     except Exception as e:
         log_error(f"Save result error: {e}")
     try:
@@ -5558,7 +5595,7 @@ async def end_quiz(chat_id: int) -> None:
     if challenge and challenge.get('quiz_id') == quiz_id:
         recv_res = {'correct': correct, 'wrong': wrong, 'mark': final_mark, 'total': total, 'time_taken': time_taken}
         asyncio.create_task(_send_challenge_comparison(chat_id, challenge['sender_id'], quiz_id, recv_res))
-    remove_active_quiz(chat_id)
+    (await _db(remove_active_quiz, chat_id))
     _poll_chat_map = {k: v for k, v in _poll_chat_map.items() if v != chat_id}
 
 # ============================================================
@@ -5574,7 +5611,7 @@ async def handle_new_practice(query, user, mode: str, quiz_id: str) -> None:
             return
         image_file_id = mcq_data.get('image_file_id')
         prompt_type = mcq_data.get('prompt_type', 'prompt_1')
-        prompt_name = get_prompt_display_name(prompt_type)
+        prompt_name = (await _db(get_prompt_display_name, prompt_type))
         if not image_file_id:
             await query.message.reply_text("❌ মূল ইমেজ পাওয়া যায়নি। নতুন ইমেজ পাঠান।")
             return
@@ -5603,7 +5640,7 @@ async def handle_new_practice(query, user, mode: str, quiz_id: str) -> None:
             await wait_msg.edit_text(f"❌ {err_msg}")
             return
         random.shuffle(mcqs)
-        new_mcqs = apply_tag_exp(clean_mcq_options(mcqs[:NEW_PRACTICE_COUNT]))
+        new_mcqs = (await _db(apply_tag_exp, clean_mcq_options(mcqs[:NEW_PRACTICE_COUNT])))
         new_quiz_id = await save_mcq(user_id=user.id, mcqs=new_mcqs, source_type='image', prompt_type=prompt_type, image_file_id=image_file_id, chat_id=None, message_id=None)
         try:
             await wait_msg.delete()
@@ -5612,13 +5649,13 @@ async def handle_new_practice(query, user, mode: str, quiz_id: str) -> None:
         if mode == 'quiz':
             chat_id = query.message.chat_id
             quiz_state = {
-                'quiz_id': new_quiz_id, 'mcqs': apply_tag_exp(new_mcqs), 'current_index': 0,
+                'quiz_id': new_quiz_id, 'mcqs': (await _db(apply_tag_exp, new_mcqs)), 'current_index': 0,
                 'answers': {}, 'correct': 0, 'wrong': 0, 'skipped': 0, 'start_time': time.time(),
-                'timer': int(get_setting('timer_seconds', DEFAULT_TIMER)),
-                'neg_mark': abs(float(get_setting('negative_mark', DEFAULT_NEGATIVE_MARK))),
+                'timer': int((await _db(get_setting, 'timer_seconds', DEFAULT_TIMER))),
+                'neg_mark': abs(float((await _db(get_setting, 'negative_mark', DEFAULT_NEGATIVE_MARK)))),
                 'current_poll_id': None,
             }
-            save_active_quiz(chat_id, quiz_state)
+            (await _db(save_active_quiz, chat_id, quiz_state))
             keyboard = [[InlineKeyboardButton("▶️ Start Quiz", callback_data=f"startquiz_{new_quiz_id}")]]
             await query.message.reply_text(f"✅ {len(new_mcqs)} টি নতুন MCQ রেডি!\n\n[▶️ Start Quiz] চাপুন।", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
@@ -5655,15 +5692,15 @@ async def handle_mistake_practice(query, user, chat_id: int, quiz_id: str) -> No
         await query.message.reply_text("✅ কোনো ভুল উত্তর নেই! সব সঠিক ছিল! 🎉")
         return
     random.shuffle(wrong_mcqs)
-    tagged_mcqs = apply_tag_exp(clean_mcq_options(wrong_mcqs))
+    tagged_mcqs = (await _db(apply_tag_exp, clean_mcq_options(wrong_mcqs)))
     quiz_state = {
         'quiz_id': quiz_id, 'mcqs': tagged_mcqs, 'current_index': 0,
         'answers': {}, 'correct': 0, 'wrong': 0, 'skipped': 0, 'start_time': time.time(),
-        'timer': int(get_setting('timer_seconds', DEFAULT_TIMER)),
-        'neg_mark': abs(float(get_setting('negative_mark', DEFAULT_NEGATIVE_MARK))),
+        'timer': int((await _db(get_setting, 'timer_seconds', DEFAULT_TIMER))),
+        'neg_mark': abs(float((await _db(get_setting, 'negative_mark', DEFAULT_NEGATIVE_MARK)))),
         'current_poll_id': None,
     }
-    save_active_quiz(chat_id, quiz_state)
+    (await _db(save_active_quiz, chat_id, quiz_state))
     keyboard = [[InlineKeyboardButton("▶️ Start Mistake Practice", callback_data=f"startquiz_{quiz_id}")]]
     await query.message.reply_text(
         f"❌ **Mistake Practice**\n━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -5692,7 +5729,7 @@ async def handle_back_to_source(query, quiz_id: str) -> None:
             kb = mcq_set_keyboard(quiz_id, query.from_user.id)
             await query.message.chat.send_photo(
                 photo=image_file_id,
-                caption=f"📸 **আপনার মূল Source Image**\n📝 Total MCQ: {len(mcq_data.get('mcqs', []))}\n📋 Type: {get_prompt_display_name(mcq_data.get('prompt_type','prompt_1'))}",
+                caption=f"📸 **আপনার মূল Source Image**\n📝 Total MCQ: {len(mcq_data.get('mcqs', []))}\n📋 Type: {(await _db(get_prompt_display_name, mcq_data.get('prompt_type','prompt_1')))}",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -5724,7 +5761,7 @@ async def handle_prompt_edit_start(query, prompt_key: str) -> None:
     if not is_admin(user_id):
         await query.message.reply_text("❌ Unauthorized")
         return
-    prompts = get_prompts_from_db()
+    prompts = (await _db(get_prompts_from_db))
     prompt_data = prompts.get(prompt_key, PROMPT_MAP.get(prompt_key, {}))
     prompt_name = prompt_data.get('name', prompt_key)
     prompt_text = prompt_data.get('text', '')
@@ -5739,7 +5776,7 @@ async def handle_prompt_view(query, prompt_key: str) -> None:
     if not is_admin(user_id):
         await query.message.reply_text("❌ Unauthorized")
         return
-    prompts = get_prompts_from_db()
+    prompts = (await _db(get_prompts_from_db))
     prompt_data = prompts.get(prompt_key, PROMPT_MAP.get(prompt_key, {}))
     prompt_name = prompt_data.get('name', prompt_key)
     prompt_text = prompt_data.get('text', 'N/A')
@@ -5823,14 +5860,14 @@ async def handle_prompt_edit_text(update: Update, context: ContextTypes.DEFAULT_
         new_key = lines[0].strip()
         new_name = lines[1].strip()
         new_text = '\n'.join(lines[2:])
-        update_prompt_in_db(new_key, new_name, new_text)
+        (await _db(update_prompt_in_db, new_key, new_name, new_text))
         await update.message.reply_text(f"✅ New prompt **{new_name}** added!\nKey: `{new_key}`", parse_mode=ParseMode.MARKDOWN)
         log(f"📝 New prompt added: {new_key}")
     else:
-        prompts = get_prompts_from_db()
+        prompts = (await _db(get_prompts_from_db))
         prompt_data = prompts.get(prompt_key, PROMPT_MAP.get(prompt_key, {}))
         prompt_name = prompt_data.get('name', prompt_key)
-        update_prompt_in_db(prompt_key, prompt_name, text)
+        (await _db(update_prompt_in_db, prompt_key, prompt_name, text))
         await update.message.reply_text(f"✅ Prompt **{prompt_name}** updated!", parse_mode=ParseMode.MARKDOWN)
         log(f"📝 Prompt updated: {prompt_key}")
     raise ApplicationHandlerStop
@@ -6129,11 +6166,11 @@ async def cmd_revision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_revision_mode(query, mode: str) -> None:
     user_id = query.from_user.id
     if mode == 'all':
-        pool = get_all_user_mcq_pool(user_id)
+        pool = (await _db(get_all_user_mcq_pool, user_id))
     elif mode == 'mistake':
-        pool = get_mistake_mcqs(user_id, ['wrong'])
+        pool = (await _db(get_mistake_mcqs, user_id, ['wrong']))
     else:
-        pool = get_mistake_mcqs(user_id, ['wrong', 'skip'])
+        pool = (await _db(get_mistake_mcqs, user_id, ['wrong', 'skip']))
     if not pool:
         await query.message.reply_text("📭 এই ক্যাটাগরিতে কোনো MCQ নেই। আগে কিছু practice করুন!")
         return
@@ -6150,15 +6187,15 @@ async def _start_practice_set(message, user, mode: str, count_text: str, mcqs_ov
     if mcqs_override is not None:
         pool = mcqs_override
     elif mode == 'all':
-        pool = get_all_user_mcq_pool(user_id)
+        pool = (await _db(get_all_user_mcq_pool, user_id))
     elif mode == 'mistake':
-        pool = get_mistake_mcqs(user_id, ['wrong'])
+        pool = (await _db(get_mistake_mcqs, user_id, ['wrong']))
     elif mode == 'special':
-        pool = get_mistake_mcqs(user_id, ['wrong', 'skip'])
+        pool = (await _db(get_mistake_mcqs, user_id, ['wrong', 'skip']))
     elif mode == 'bookmark':
-        pool = get_all_bookmarks(user_id)
+        pool = (await _db(get_all_bookmarks, user_id))
     else:
-        pool = get_all_user_mcq_pool(user_id)
+        pool = (await _db(get_all_user_mcq_pool, user_id))
     if not pool:
         await message.reply_text("📭 কোনো MCQ পাওয়া যায়নি।")
         return
@@ -6174,7 +6211,7 @@ async def _start_practice_set(message, user, mode: str, count_text: str, mcqs_ov
         await message.reply_text("❌ সঠিক সংখ্যা লিখুন অথবা \"All\" লিখুন।")
         return
     random.shuffle(pool)
-    selected = apply_tag_exp(clean_mcq_options(pool[:count]))
+    selected = (await _db(apply_tag_exp, clean_mcq_options(pool[:count])))
     src = {'random': 'random', 'bookmark': 'bookmark_exam'}.get(mode, f'revision_{mode}')
     quiz_id = await save_mcq(user_id=user_id, mcqs=selected, source_type=src, prompt_type='prompt_1', image_file_id=None, chat_id=None, message_id=None)
     label = REVISION_LABELS.get(mode, '🔖 Bookmark Exam' if mode == 'bookmark' else mode)
@@ -6196,7 +6233,7 @@ async def _start_practice_set(message, user, mode: str, count_text: str, mcqs_ov
 async def cmd_random(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     log(f"🎲 /random from {user['user_id']}")
-    pool = get_all_user_mcq_pool(user['user_id'])
+    pool = (await _db(get_all_user_mcq_pool, user['user_id']))
     if not pool:
         await update.message.reply_text("📭 আপনার কোনো সংরক্ষিত MCQ নেই। আগে Image/Text পাঠিয়ে MCQ বানান!")
         return
@@ -6247,8 +6284,8 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user = get_user_info(update)
     user_id = user['user_id']
     log(f"📊 /progress from {user_id}")
-    results = get_user_results(user_id, limit=50)
-    udata = get_user(user_id) or {}
+    results = (await _db(get_user_results, user_id, limit=50))
+    udata = (await _db(get_user, user_id)) or {}
     if not results:
         await update.message.reply_text("📭 এখনো কোনো Quiz result জমা হয়নি। আগে কিছু practice করুন!")
         return
@@ -6293,7 +6330,7 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = get_user_info(update)
     user_id = user['user_id']
     log(f"📈 /report from {user_id}")
-    udata = get_user(user_id) or {}
+    udata = (await _db(get_user, user_id)) or {}
     practiced = udata.get('practice_count', 0)
     limit = udata.get('daily_limit', DEFAULT_DAILY_LIMIT)
     try:
@@ -6363,7 +6400,7 @@ async def cmd_class(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    rows = get_classes()
+    rows = (await _db(get_classes))
     if not rows:
         msg = "📭 এখনো কোনো class add করা হয়নি।"
         if is_admin(user_id):
@@ -6388,7 +6425,7 @@ async def handle_class_subject(query, idx: int, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text("❌ Subject পাওয়া যায়নি। আবার /class দিন।")
         return
     subject = subjects[idx]
-    rows = [r for r in get_classes() if r['subject'] == subject]
+    rows = [r for r in (await _db(get_classes)) if r['subject'] == subject]
     keyboard = [[InlineKeyboardButton(f"▶️ {r['chapter']}", url=r['link'])] for r in rows]
     await query.message.reply_text(
         f"📘 **{subject}**\n\n👇 Chapter এ click করলেই YouTube এ class শুরু হবে:",
@@ -6956,7 +6993,7 @@ async def checkin_scheduler() -> None:
                 await asyncio.sleep(max(60, (nxt - now).total_seconds()))
                 continue
 
-            last_str = get_setting('checkin_last_sent_at', '')
+            last_str = (await _db(get_setting, 'checkin_last_sent_at', ''))
             if last_str:
                 try:
                     last_dt = datetime.fromisoformat(last_str)
@@ -6969,7 +7006,7 @@ async def checkin_scheduler() -> None:
                 except Exception:
                     pass
 
-            users = _get_active_checkin_users()
+            users = (await _db(_get_active_checkin_users))
             log(f"🔔 Check-in: {len(users)} active users")
             for uid in users:
                 try:
@@ -6985,7 +7022,7 @@ async def checkin_scheduler() -> None:
                     continue
                 except Exception:
                     continue
-            set_setting('checkin_last_sent_at', now.isoformat())
+            (await _db(set_setting, 'checkin_last_sent_at', now.isoformat()))
         except Exception as e:
             log_error(f"checkin_scheduler error: {e}")
         await asyncio.sleep(6 * 3600)  # every 6 hours
@@ -7004,7 +7041,7 @@ async def daily_reset_scheduler() -> None:
             log(f"⏰ Next daily reset in {wait_seconds/3600:.1f} hours")
             await asyncio.sleep(wait_seconds)
             log("🔄 Running daily reset...")
-            reset_daily_usage()
+            (await _db(reset_daily_usage))
             try:
                 await enforce_quotas()
                 log("✅ Storage quota enforcement complete")
@@ -7220,7 +7257,7 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await wait_msg.edit_text("❌ CSV থেকে কোনো valid MCQ parse করা যায়নি। Format চেক করুন।")
             return
         chat_id = update.effective_chat.id
-        settings = get_all_settings()
+        settings = (await _db(get_all_settings))
         timer = int(settings.get('timer_seconds', DEFAULT_TIMER))
         pre_text = (
             f"🔴 <b>LIVE QUIZ শুরু হচ্ছে!</b>\n"

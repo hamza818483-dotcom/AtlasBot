@@ -235,6 +235,19 @@ def store_exam(quiz_id: str, mcqs: List[Dict], topic: str = "", page: int = 1,
     print(f"📦 Exam stored: {quiz_id} ({len(mcqs)} questions)")
     return quiz_id
 
+# Scale: run blocking Supabase/rehydrate work in a thread pool so slow DB
+# calls never freeze the event loop for other users.
+from concurrent.futures import ThreadPoolExecutor as _TPE
+_DB_POOL = _TPE(max_workers=int(os.getenv("DB_THREADS", "12")), thread_name_prefix="examdb")
+
+
+async def _db(fn, *args):
+    return await asyncio.get_running_loop().run_in_executor(_DB_POOL, fn, *args)
+
+
+_EXAM_GEN_SEM = asyncio.Semaphore(int(os.getenv("EXAM_GEN_CONCURRENCY", "4")))  # RAM guard for website "new exam" generation
+
+
 def _get_exam(cache_id: str) -> Optional[Dict]:
     if cache_id in exam_store:
         return exam_store[cache_id]
@@ -432,25 +445,30 @@ async def _tg_send_message(chat_id: int, text: str, reply_to: int = None,
 async def _send_web_challenge_comparison(receiver_id: int, sender_id: int, cache_id: str,
                                           r_correct: int, r_wrong: int, r_total: int, r_time: int):
     try:
-        client = get_supabase()
-        sr = client.table('results').select('*').eq('user_id', sender_id).eq('quiz_id', cache_id).order('created_at', desc=True).limit(1).execute()
-        if not sr.data:
+        def _fetch():
+            client = get_supabase()
+            sr_ = client.table('results').select('*').eq('user_id', sender_id).eq('quiz_id', cache_id).order('created_at', desc=True).limit(1).execute()
+            if not sr_.data:
+                return None
+            try:
+                si_ = client.table('users').select('first_name').eq('user_id', sender_id).limit(1).execute()
+                sn_ = si_.data[0]['first_name'] if si_.data else f"User#{sender_id}"
+            except Exception:
+                sn_ = f"User#{sender_id}"
+            try:
+                ri_ = client.table('users').select('first_name').eq('user_id', receiver_id).limit(1).execute()
+                rn_ = ri_.data[0]['first_name'] if ri_.data else f"User#{receiver_id}"
+            except Exception:
+                rn_ = f"User#{receiver_id}"
+            return sr_.data[0], sn_, rn_
+        _res = await _db(_fetch)
+        if not _res:
             return
-        s = sr.data[0]
+        s, sender_name, recv_name = _res
         s_correct, s_wrong, s_total = s.get('correct', 0), s.get('wrong', 0), s.get('total', 0)
         s_mark, s_time = s.get('mark', 0), s.get('time_taken', 0)
         r_neg = r_wrong * NEGATIVE_MARK
         r_mark = r_correct - r_neg
-        try:
-            si = client.table('users').select('first_name').eq('user_id', sender_id).limit(1).execute()
-            sender_name = si.data[0]['first_name'] if si.data else f"User#{sender_id}"
-        except Exception:
-            sender_name = f"User#{sender_id}"
-        try:
-            ri = client.table('users').select('first_name').eq('user_id', receiver_id).limit(1).execute()
-            recv_name = ri.data[0]['first_name'] if ri.data else f"User#{receiver_id}"
-        except Exception:
-            recv_name = f"User#{receiver_id}"
         s_pct = round(s_correct / s_total * 100) if s_total else 0
         r_pct = round(r_correct / r_total * 100) if r_total else 0
         if r_mark > s_mark:
@@ -586,7 +604,7 @@ async def health():
 
 @app.get("/exam/{cache_id}", response_class=HTMLResponse)
 async def serve_exam(cache_id: str, uid: int = 0, name: str = "", challenger: int = 0):
-    data = _get_exam(cache_id)
+    data = (await _db(_get_exam, cache_id))
     if not data:
         return HTMLResponse(_not_found_html(), status_code=404)
     user_name = (name or "").strip()
@@ -594,7 +612,7 @@ async def serve_exam(cache_id: str, uid: int = 0, name: str = "", challenger: in
 
 @app.get("/api/exam/{cache_id}")
 async def api_exam(cache_id: str):
-    data = _get_exam(cache_id)
+    data = (await _db(_get_exam, cache_id))
     if not data:
         return JSONResponse({"error": "not_found"}, status_code=404)
     return {
@@ -636,7 +654,7 @@ async def api_result(request: Request):
     time_taken = int(body.get("time_taken", 0))
     challenger_id = int(body.get("challenger_id", 0) or 0)
     total = correct + wrong + skipped
-    data = _get_exam(cache_id)
+    data = (await _db(_get_exam, cache_id))
     topic = data.get("topic", "ATLAS Exam") if data else "ATLAS Exam"
     page = data.get("page", 1) if data else 1
     try:
@@ -697,11 +715,11 @@ async def api_new_exam(request: Request):
             "ok": False, "error": "limit_reached",
             "message": f"❌ আজকের New Exam লিমিট শেষ ({used}/{limit})। আগামীকাল আবার চেষ্টা করুন।"
         })
-    src = _get_exam(cache_id)
+    src = (await _db(_get_exam, cache_id))
     if not src:
         return JSONResponse({"ok": False, "error": "not_found", "message": "Exam পাওয়া যায়নি।"})
     src_id = src.get("src_cache_id", cache_id)
-    src_entry = _get_exam(src_id) or src
+    src_entry = (await _db(_get_exam, src_id)) or src
     regen_count = src_entry.get("regen_count", 0)
     if regen_count >= 3:
         return JSONResponse({
@@ -719,8 +737,17 @@ async def api_new_exam(request: Request):
     if _exam_genai_client is None:
         return JSONResponse({"ok": False, "error": "no_key", "message": "Gemini API key সেট নেই।"})
     try:
-        img = Image.open(BytesIO(img_bytes))
-        valid_mcqs = _gen_new_exam_mcqs(img, min_count=10)
+        def _gen_sync():
+            _im = Image.open(BytesIO(img_bytes))
+            try:
+                _im.draft("RGB", (1600, 1600))
+            except Exception:
+                pass
+            if max(_im.size) > 1600:
+                _im.thumbnail((1600, 1600))
+            return _gen_new_exam_mcqs(_im, min_count=10)
+        async with _EXAM_GEN_SEM:
+            valid_mcqs = await asyncio.wait_for(_db(_gen_sync), timeout=120)
         if len(valid_mcqs) < 5:
             return JSONResponse({"ok": False, "error": "empty", "message": "যথেষ্ট প্রশ্ন পাওয়া যায়নি। একটু পরে আবার চেষ্টা করুন।"})
         new_mcqs = valid_mcqs[:NEW_PRACTICE_COUNT]
@@ -730,7 +757,6 @@ async def api_new_exam(request: Request):
         return JSONResponse({"ok": False, "error": "gen_fail", "message": "প্রশ্ন তৈরি ব্যর্থ হয়েছে। একটু পরে আবার চেষ্টা করুন।"})
     new_id = uuid.uuid4().hex[:16]
     try:
-        client = get_supabase()
         row = {
             'quiz_id': new_id, 'user_id': user_id,
             'mcqs': json.dumps(new_mcqs, ensure_ascii=False),
@@ -741,8 +767,10 @@ async def api_new_exam(request: Request):
             'message_id': src.get('message_id'),
             'created_at': datetime.now(BD_TZ).isoformat()
         }
-        client.table('mcqs').insert(row).execute()
-        _mirror_insert('mcqs', row)
+        def _save_row():
+            get_supabase().table('mcqs').insert(row).execute()
+            _mirror_insert('mcqs', row)
+        await _db(_save_row)
     except Exception as e:
         print(f"Save new exam error: {e}")
     store_exam(
@@ -770,7 +798,7 @@ async def api_solve_pdf(request: Request):
         return JSONResponse({"error": "bad_json"}, status_code=400)
     cache_id = body.get("cache_id", "")
     answers = body.get("answers", {}) or {}
-    data = _get_exam(cache_id)
+    data = (await _db(_get_exam, cache_id))
     if not data:
         return JSONResponse({"error": "not_found"}, status_code=404)
     if cache_id in exam_store:
@@ -804,7 +832,7 @@ async def api_save_answers(request: Request):
 async def _precache_solve_pdf(cache_id: str):
     """Pre-render Solve PDF in background so it's instant when user clicks."""
     try:
-        data = _get_exam(cache_id)
+        data = (await _db(_get_exam, cache_id))
         if not data:
             return
         answers = data.get("last_answers", {}) or {}
@@ -824,7 +852,7 @@ async def api_solve_pdf_html(cache_id: str):
     """Browser-side Solve PDF: returns raw HTML instantly, no chromium/weasyprint needed.
     Client renders this via html2pdf.js in-browser."""
     try:
-        data = _get_exam(cache_id)
+        data = (await _db(_get_exam, cache_id))
         if not data:
             return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
         raw_answers = data.get("last_answers", {}) or {}
@@ -846,7 +874,7 @@ async def api_solve_pdf_html(cache_id: str):
 
 async def api_solve_pdf_direct(cache_id: str):
     """Instant PDF link (like Premium PDF) — serves pre-cached PDF when available."""
-    data = _get_exam(cache_id)
+    data = (await _db(_get_exam, cache_id))
     if not data:
         return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
     cached = data.get("cached_solve_pdf")
@@ -887,7 +915,7 @@ async def api_back_to_source(request: Request):
     user_id = int(body.get("user_id", 0) or 0)
     if not user_id:
         return JSONResponse({"ok": False, "message": "User ID প্রয়োজন।"})
-    data = _get_exam(cache_id)
+    data = (await _db(_get_exam, cache_id))
     if not data:
         return JSONResponse({"ok": False, "message": "Source পাওয়া যায়নি।"})
     chat_id = data.get("chat_id") or user_id
@@ -919,7 +947,7 @@ async def api_premium_pdf_post(request: Request):
 @app.get("/api/premium-pdf/{cache_id}")
 async def api_premium_pdf_get(cache_id: str):
     try:
-        data = _get_exam(cache_id)
+        data = (await _db(_get_exam, cache_id))
         if not data:
             print(f"[premium-pdf] exam not found: {cache_id}")
             return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
@@ -948,7 +976,7 @@ async def api_premium_pdf_get(cache_id: str):
         return JSONResponse({"ok": False, "message": f"অপ্রত্যাশিত সমস্যা: {str(e)[:120]}"}, status_code=500)
 
 async def _do_premium_pdf(cache_id: str, header_label: str = "") -> JSONResponse:
-    data = _get_exam(cache_id)
+    data = (await _db(_get_exam, cache_id))
     if not data:
         return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
     mcqs = data.get("mcqs", [])
@@ -1151,7 +1179,7 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
     try:
         if ctype not in ("knowledge", "comprehension"):
             ctype = "knowledge"
-        data = _get_exam(cache_id)
+        data = (await _db(_get_exam, cache_id))
         if not data:
             print(f"[creative-pdf] exam not found: {cache_id}")
             return JSONResponse({"ok": False, "reason": "Source পাওয়া যায়নি।"}, status_code=404)
