@@ -97,6 +97,8 @@ def account(key: str) -> str:
 
 
 def is_available(key: str) -> bool:
+    if key in _banned:
+        return False
     now = time.time()
     if _dead_day.get(key) == _today():
         return False
@@ -107,7 +109,7 @@ def is_available(key: str) -> bool:
 
 def all_dead() -> bool:
     with _lock:
-        return bool(KEYS) and all(_dead_day.get(k) == _today() for k in KEYS)
+        return bool(KEYS) and all((_dead_day.get(k) == _today() or k in _banned) for k in KEYS)
 
 
 _acc_rr = 0
@@ -189,6 +191,48 @@ def client(key: str):
         return c
 
 
+# ── PERMANENT ban (suspended / banned / invalid key): never tried again, survives restart ──
+_banned: set = set()
+_ban_persist_cb = None        # set by bot.py: fn(key, reason) -> saves to DB (best effort)
+_PERM_MARKERS = ("consumer_suspended", "has been suspended", "suspended",
+                 "permission_denied", "api key not valid", "api_key_invalid",
+                 "api key expired", "key has been disabled", "project has been denied")
+
+
+def is_banned(key: str) -> bool:
+    return key in _banned
+
+
+def ban(key: str, reason: str = "", persist: bool = True) -> None:
+    """Permanently exclude `key` (this process + saved to DB so restarts skip it too)."""
+    if not key:
+        return
+    with _lock:
+        newly = key not in _banned
+        _banned.add(key)
+        _dead_day[key] = _today()
+    if newly and persist and _ban_persist_cb:
+        try:
+            _ban_persist_cb(key, reason)
+        except Exception:
+            pass
+
+
+def load_banned(keys) -> int:
+    """Called once at startup with keys loaded from DB."""
+    n = 0
+    with _lock:
+        for k in keys or []:
+            if k and k not in _banned:
+                _banned.add(k); n += 1
+    return n
+
+
+def is_permanent_error(err) -> bool:
+    es = str(err).lower()
+    return any(m in es for m in _PERM_MARKERS)
+
+
 def classify_error(err: Exception) -> str:
     """'dead' (quota/suspended for the day) | 'cool' (rate limit / transient) | 'other'."""
     es = str(err).lower()
@@ -211,7 +255,7 @@ def status() -> List[str]:
     rows = []
     for name, keys in ACCOUNTS:
         for k in keys:
-            st = "dead" if _dead_day.get(k) == _today() else (
+            st = "BANNED" if k in _banned else "dead" if _dead_day.get(k) == _today() else (
                 "cool" if _cooldown_until.get(k, 0) > now else "ok")
             rows.append(f"{label(k)} [{name}] {st} inflight={_inflight.get(k, 0)}")
     return rows
@@ -220,12 +264,14 @@ def status() -> List[str]:
 def summary() -> Dict[str, int]:
     """Counts for /keys: total / healthy / cooldown / exhausted + per-account."""
     now = time.time()
-    out = {"total": 0, "ok": 0, "cool": 0, "dead": 0, "accounts": 0}
+    out = {"total": 0, "ok": 0, "cool": 0, "dead": 0, "banned": 0, "accounts": 0}
     per = []
     for name, keys in ACCOUNTS:
-        a = {"ok": 0, "cool": 0, "dead": 0}
+        a = {"ok": 0, "cool": 0, "dead": 0, "banned": 0}
         for k in keys:
-            if _dead_day.get(k) == _today():
+            if k in _banned:
+                a["banned"] += 1
+            elif _dead_day.get(k) == _today():
                 a["dead"] += 1
             elif _cooldown_until.get(k, 0) > now:
                 a["cool"] += 1
@@ -233,7 +279,7 @@ def summary() -> Dict[str, int]:
                 a["ok"] += 1
         per.append((name, len(keys), a))
         out["total"] += len(keys)
-        out["ok"] += a["ok"]; out["cool"] += a["cool"]; out["dead"] += a["dead"]
+        out["ok"] += a["ok"]; out["cool"] += a["cool"]; out["dead"] += a["dead"]; out["banned"] += a["banned"]
     out["accounts"] = len(ACCOUNTS)
     out["per"] = per
     return out

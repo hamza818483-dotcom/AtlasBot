@@ -460,7 +460,10 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                 log_error(f"[gemini:{klabel}] TimeoutError after {time.time()-_t0:.1f}s (limit {GEMINI_ATTEMPT_TIMEOUT}s)")
             except Exception as e:
                 kind = _gpool.classify_error(e)
-                if kind == "dead":
+                if _gpool.is_permanent_error(e):
+                    _gpool.ban(key, str(e)[:160])     # suspended/banned/invalid -> NEVER tried again
+                    log_error(f"[gemini:{klabel}] 🚫 PERMANENTLY BANNED (suspended/invalid) — will never be tried again")
+                elif kind == "dead":
                     _gpool.mark_exhausted(key)
                 elif kind == "cool":
                     _gpool.mark_cooldown(key, 60)
@@ -503,6 +506,36 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
         for t in running:          # losers: don't wait, let them finish & release themselves
             t.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
     return None
+
+# ── permanent Gemini key bans: saved in Supabase table `gemini_banned_keys` (key_hash, reason) ──
+# SQL (run once):  create table if not exists gemini_banned_keys (key_hash text primary key, key_tail text, reason text, banned_at timestamptz default now());
+def _key_hash(k: str) -> str:
+    return hashlib.sha256(k.encode()).hexdigest()
+
+def _persist_ban(key: str, reason: str) -> None:
+    def _w():
+        try:
+            get_supabase().table('gemini_banned_keys').upsert(
+                {"key_hash": _key_hash(key), "key_tail": key[-6:], "reason": (reason or "")[:300]}).execute()
+        except Exception as e:
+            log_error(f"[ban-persist] {str(e)[:100]} (table missing? run the SQL shown in bot.py)")
+    try:
+        _DB_POOL.submit(_w)
+    except Exception:
+        pass
+
+def _load_banned_keys() -> None:
+    try:
+        rows = get_supabase().table('gemini_banned_keys').select('key_hash').execute().data or []
+        hashes = {r['key_hash'] for r in rows}
+        hit = [k for k in _gpool.KEYS if _key_hash(k) in hashes]
+        n = _gpool.load_banned(hit)
+        if n:
+            log(f"🚫 [gemini] {n} permanently-banned key(s) loaded from DB — skipped forever")
+    except Exception as e:
+        log_error(f"[ban-load] {str(e)[:100]}")
+
+_gpool._ban_persist_cb = _persist_ban
 
 # ── /speed: in-bot generation timing history (last 20) ──
 from collections import deque as _dq
@@ -6485,9 +6518,9 @@ async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sm = _gpool.summary()
         if sm["total"]:
             lines.append(f"🔵 <b>Gemini</b> (gemini-3.6-flash): {sm['total']} key · {sm['accounts']} account\n"
-                         f"  ✅ Healthy: {sm['ok']} | ⏳ Cooldown: {sm['cool']} | 🔴 আজকে exhausted: {sm['dead']}")
+                         f"  ✅ Healthy: {sm['ok']} | ⏳ Cooldown: {sm['cool']} | 🔴 আজকে exhausted: {sm['dead']} | 🚫 Banned: {sm['banned']}")
             for name, n, a_ in sm["per"]:
-                lines.append(f"    • {name}: {n} key → ✅{a_['ok']} ⏳{a_['cool']} 🔴{a_['dead']}")
+                lines.append(f"    • {name}: {n} key → ✅{a_['ok']} ⏳{a_['cool']} 🔴{a_['dead']} 🚫{a_['banned']}")
         else:
             lines.append("🔵 <b>Gemini</b>: 0 key (GEMINI_KEYS_ACC1.. সেট নেই)")
         if _gpool.PROXY_ENABLED:
@@ -7585,6 +7618,10 @@ async def main() -> None:
     global _bot_loop, _bot_start_time
     _bot_loop = asyncio.get_event_loop()
     _bot_start_time = datetime.now(BD_TZ)
+    try:
+        _load_banned_keys()
+    except Exception:
+        pass
     log("=" * 60)
     log("🚀 ATLAS MCQ BOT STARTING (WEBHOOK MODE) - v4.0")
     log("=" * 60)
