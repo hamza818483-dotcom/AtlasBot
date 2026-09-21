@@ -329,26 +329,23 @@ def init_database():
 # SECTION 4: GEMINI SETUP (Multi-key rotation; AIza & AQ. both work —
 # they are plain API-key strings, SDK handles both formats identically)
 # ============================================================
-GEMINI_KEYS = [k.strip() for k in GENAI_API_KEY.split(",") if k.strip()]
-_current_key_idx = 0
+import gemini_pool as _gpool
+GEMINI_KEYS = list(_gpool.KEYS)          # flat, account-interleaved (kept for legacy checks)
+_current_key_idx = 0                      # legacy (unused by new pool, kept so old refs don't break)
 _bot_genai_client = None
 
 def setup_gemini():
     global _bot_genai_client
     if GEMINI_KEYS:
-        _bot_genai_client = genai.Client(api_key=GEMINI_KEYS[0])
-        log(f"✅ Gemini configured ({len(GEMINI_KEYS)} keys loaded)")
+        _bot_genai_client = _gpool.client(GEMINI_KEYS[0])
+        accs = ", ".join(f"{n}({len(k)})" for n, k in _gpool.ACCOUNTS)
+        log(f"✅ Gemini pool ready: {len(GEMINI_KEYS)} keys across {len(_gpool.ACCOUNTS)} accounts [{accs}]")
     else:
         log("⚠️ No GEMINI keys!", "WARNING")
 
 def rotate_gemini_key():
-    global _bot_genai_client, _current_key_idx
-    if len(GEMINI_KEYS) <= 1:
-        return False
-    _current_key_idx = (_current_key_idx + 1) % len(GEMINI_KEYS)
-    _bot_genai_client = genai.Client(api_key=GEMINI_KEYS[_current_key_idx])
-    log(f"🔄 Rotated to key #{_current_key_idx+1}/{len(GEMINI_KEYS)}")
-    return True
+    """Legacy no-op: rotation is now per-call inside gemini_pool.pick()."""
+    return len(GEMINI_KEYS) > 1
 
 # ============================================================
 # SECTION 4B: v4.0 MULTI-AI FALLBACK ENGINE
@@ -370,51 +367,42 @@ STRICT_SOURCE_RULES_PLAIN = """
 RULES: Use ONLY the given source (image/text) — no invented facts. Quality over quantity. No irrelevant content. Output must be plain readable text — no JSON/code/markdown."""
 
 async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries: Optional[int] = None) -> Optional[str]:
-    global _bot_genai_client
+    """Account-wise Gemini pool: each call atomically picks the next healthy,
+    least-loaded key (round-robin ACROSS accounts), so concurrent users are
+    spread over all keys. A failing key is cooled down / marked dead and the
+    next key is tried; every attempt uses its own cached client (no shared
+    global -> no race between concurrent users)."""
     if not GEMINI_KEYS:
         return None
-    if _bot_genai_client is None:
-        setup_gemini()
-    tries = max(1, len(GEMINI_KEYS)) if max_tries is None else max(1, min(max_tries, len(GEMINI_KEYS)))
-    _gem_budget_start = time.time()
-    # v5.20: QuizBot's proven /qbm implementation uses NO per-attempt
-    # timeout at all — it simply waits for Gemini to finish or error out
-    # naturally. Our earlier 35s hard-timeout was killing slow-but-actually-
-    # working requests on dense pages, forcing wasteful retries into Groq's
-    # lower-accuracy fallback and doubling total latency for nothing. Raised
-    # well above any real generation time instead of introducing an
-    # artificial cutoff, matching QuizBot's actual working behavior.
-    GEMINI_ATTEMPT_TIMEOUT = 90.0
-    GEMINI_TIME_BUDGET = 100.0
-    # v5.28: previously, when EVERY Gemini key was already marked exhausted
-    # for today, the loop still made one live call anyway ("just in case the
-    # flag is stale") -- but since Gemini became primary, this meant every
-    # single request for the rest of the day paid a real 429 round-trip
-    # before falling back to Groq (exactly the RESOURCE_EXHAUSTED spam seen
-    # in error logs). Free tier is only 20 requests/day/key, so once it's
-    # gone it's gone until BD midnight reset -- no point re-probing on every
-    # call. Now: if all keys are exhausted, return None immediately (skip
-    # straight to Groq) instead of wasting a call.
-    all_exhausted = all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS)))
-    if all_exhausted:
+    if _gpool.all_dead():
         log("⏭️ [gemini] all keys exhausted for today — skipping straight to next provider")
         return None
-    for attempt in range(tries):
-        klabel = f"gemini#{_current_key_idx+1}"
-        if _is_key_exhausted_today("gemini", klabel):
-            rotate_gemini_key()
-            continue  # already known quota-exhausted today -- skip straight to next key
-        if time.time() - _gem_budget_start > GEMINI_TIME_BUDGET:
-            log_error(f"[gemini] time budget ({GEMINI_TIME_BUDGET}s) exceeded mid-scan, bailing to next provider")
+    tries = len(GEMINI_KEYS) if max_tries is None else max(1, min(max_tries, len(GEMINI_KEYS)))
+    GEMINI_ATTEMPT_TIMEOUT = 90.0
+    GEMINI_TIME_BUDGET = 100.0
+    _budget_start = time.time()
+    tried: set = set()
+    img_obj = None
+    for _ in range(tries):
+        if time.time() - _budget_start > GEMINI_TIME_BUDGET:
+            log_error(f"[gemini] time budget ({GEMINI_TIME_BUDGET}s) exceeded, bailing to next provider")
             return None
+        key = _gpool.pick(exclude=tried)
+        if key is None:
+            break
+        tried.add(key)
+        klabel = _gpool.label(key)
         _t0 = time.time()
         try:
             contents = [prompt_text]
             if image_bytes:
-                contents.append(Image.open(BytesIO(image_bytes)))
-            loop = asyncio.get_event_loop()
+                if img_obj is None:
+                    img_obj = Image.open(BytesIO(image_bytes))
+                contents.append(img_obj)
+            cli = _gpool.client(key)
+            loop = asyncio.get_running_loop()
             resp = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: _bot_genai_client.models.generate_content(
+                loop.run_in_executor(None, lambda: cli.models.generate_content(
                     model="gemini-3.6-flash",
                     contents=contents,
                     config=types.GenerateContentConfig(
@@ -426,29 +414,31 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
             )
             _dt = time.time() - _t0
             if resp and resp.text:
+                _gpool.mark_ok(key)
                 _track_attempt("gemini", klabel, ok=True)
-                log(f"⏱️ [gemini:{klabel}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
+                log(f"🤖 [gemini:{klabel}|{_gpool.account(key)}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
                 return resp.text
+            _gpool.mark_cooldown(key, 20)
             _track_attempt("gemini", klabel, ok=False)
             log_error(f"[gemini:{klabel}] empty response after {_dt:.1f}s")
         except asyncio.TimeoutError:
             _dt = time.time() - _t0
+            _gpool.mark_cooldown(key, 45)
             _track_attempt("gemini", klabel, ok=False, exhausted=False)
             log_error(f"[gemini:{klabel}] TimeoutError after {_dt:.1f}s (limit {GEMINI_ATTEMPT_TIMEOUT}s)")
         except Exception as e:
             _dt = time.time() - _t0
-            es = str(e).lower()
-            # v5.19: also treat suspended/permission-denied keys as
-            # "exhausted for today" so rotation skips them immediately on
-            # future calls instead of live-retrying a permanently-dead key
-            # every single time (real case seen: CONSUMER_SUSPENDED/403).
-            exhausted = any(s in es for s in (
-                "quota", "429", "resource_exhausted",
-                "suspended", "permission_denied", "403"
-            ))
-            _track_attempt("gemini", klabel, ok=False, exhausted=exhausted)
-            log_error(f"[gemini:{klabel}] {type(e).__name__} after {_dt:.1f}s: {e}")
-        rotate_gemini_key()
+            kind = _gpool.classify_error(e)
+            if kind == "dead":
+                _gpool.mark_exhausted(key)
+            elif kind == "cool":
+                _gpool.mark_cooldown(key, 60)
+            else:
+                _gpool.mark_cooldown(key, 15)
+            _track_attempt("gemini", klabel, ok=False, exhausted=(kind == "dead"))
+            log_error(f"[gemini:{klabel}] {type(e).__name__} after {_dt:.1f}s ({kind}): {e}")
+        finally:
+            _gpool.release(key)
     return None
 
 _groq_key_idx = 0
@@ -6510,6 +6500,12 @@ async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
         return
     _reset_provider_stats_if_new_day()
+    try:
+        _rows = _gpool.status()
+        if _rows:
+            await update.message.reply_text("🔑 Gemini pool (account-wise):\n" + "\n".join(_rows[:40]))
+    except Exception:
+        pass
     # Build key inventory from env (reflects HF secrets live on restart)
     inventory = [
         ("gemini", GEMINI_KEYS),

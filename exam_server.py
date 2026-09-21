@@ -118,30 +118,49 @@ def _mirror_insert(table: str, row: Dict) -> None:
 # ============================================================
 # SECTION 4: GEMINI SETUP
 # ============================================================
-_exam_genai_client: Optional[genai.Client] = None
-GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEY", "").split(",") if k.strip()]
-_exam_key_idx = 0
+import gemini_pool as _gpool
+_exam_genai_client: Optional[genai.Client] = None   # legacy handle (kept for None-checks)
+GEMINI_KEYS = list(_gpool.KEYS)
 
 def setup_gemini():
     global _exam_genai_client
-    if GENAI_API_KEY:
-        first_key = GENAI_API_KEY.split(",")[0].strip()
-        _exam_genai_client = genai.Client(api_key=first_key)
-        print(f"✅ Gemini API configured (Exam Server) key_len={len(first_key)}")
+    if GEMINI_KEYS:
+        _exam_genai_client = _gpool.client(GEMINI_KEYS[0])
+        print(f"✅ Gemini pool ready (Exam Server): {len(GEMINI_KEYS)} keys / {len(_gpool.ACCOUNTS)} accounts")
     else:
-        print("⚠️ GENAI_API_KEY not set! (Exam Server)")
+        print("⚠️ No Gemini keys set! (Exam Server)")
 
 def _rotate_exam_key():
-    """Switch the exam Gemini client to the next key (round-robin)."""
-    global _exam_genai_client, _exam_key_idx
-    if not GEMINI_KEYS:
-        return
-    _exam_key_idx = (_exam_key_idx + 1) % len(GEMINI_KEYS)
-    try:
-        _exam_genai_client = genai.Client(api_key=GEMINI_KEYS[_exam_key_idx])
-        print(f"🔄 Exam Gemini key rotated -> #{_exam_key_idx+1}")
-    except Exception as e:
-        print(f"rotate exam key failed: {e}")
+    """Legacy no-op: rotation is per-call inside gemini_pool."""
+    return None
+
+def _gemini_generate(contents, config, model="gemini-2.5-flash"):
+    """One Gemini call through the account-wise pool with automatic failover
+    to the next healthy key. Blocking (call from a worker thread)."""
+    tried = set()
+    last = None
+    for _ in range(max(1, len(GEMINI_KEYS))):
+        key = _gpool.pick(exclude=tried)
+        if key is None:
+            break
+        tried.add(key)
+        try:
+            resp = _gpool.client(key).models.generate_content(model=model, contents=contents, config=config)
+            _gpool.mark_ok(key)
+            return resp
+        except Exception as e:
+            last = e
+            kind = _gpool.classify_error(e)
+            if kind == "dead":
+                _gpool.mark_exhausted(key)
+            else:
+                _gpool.mark_cooldown(key, 60 if kind == "cool" else 15)
+            print(f"[gemini:{_gpool.label(key)}|{_gpool.account(key)}] {kind}: {str(e)[:120]}")
+        finally:
+            _gpool.release(key)
+    if last:
+        raise last
+    raise RuntimeError("no gemini key available")
 
 def _parse_new_exam_json(response_text: str) -> List[Dict]:
     """Clean + parse + validate MCQ JSON from Gemini for New Exam."""
@@ -168,48 +187,30 @@ def _parse_new_exam_json(response_text: str) -> List[Dict]:
     return valid
 
 def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
-    """Generate New Exam MCQs with all-key rotation + one retry if too few.
-    Returns [] only if every key/attempt failed."""
-    global _exam_genai_client
-    if _exam_genai_client is None:
-        setup_gemini()
-    if _exam_genai_client is None:
+    """Generate New Exam MCQs via the account-wise Gemini pool (auto key
+    failover) + one stronger retry if too few. Returns [] only if all fail."""
+    if not GEMINI_KEYS:
         return []
-    tries = max(1, len(GEMINI_KEYS))
     best: List[Dict] = []
-    for attempt in range(tries):
-        try:
-            resp = _exam_genai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[PROMPT_NEW_EXAM, img],
-                config=types.GenerateContentConfig(
-                    temperature=0.7, top_p=0.95, top_k=40,
-                    max_output_tokens=8192,
-                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                )
-            )
-            mcqs = _parse_new_exam_json(resp.text if resp else "")
-            if len(mcqs) > len(best):
-                best = mcqs
-            if len(best) >= min_count:
-                return best
-            # too few -> retry once on same key with stronger instruction
-            resp2 = _exam_genai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[PROMPT_NEW_EXAM + "\n\n🔴 অবশ্যই কমপক্ষে ১৫টি ভিন্ন MCQ বানাও। JSON array তে ১৫+ object থাকতেই হবে।", img],
-                config=types.GenerateContentConfig(
-                    temperature=0.8, top_p=0.95, top_k=40, max_output_tokens=8192,
-                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                )
-            )
-            mcqs2 = _parse_new_exam_json(resp2.text if resp2 else "")
-            if len(mcqs2) > len(best):
-                best = mcqs2
-            if len(best) >= min_count:
-                return best
-        except Exception as e:
-            print(f"New exam gen attempt {attempt+1} failed: {e}")
-            _rotate_exam_key()
+    try:
+        resp = _gemini_generate(
+            [PROMPT_NEW_EXAM, img],
+            types.GenerateContentConfig(
+                temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=8192,
+                thinking_config=types.ThinkingConfig(thinking_budget=1024)))
+        best = _parse_new_exam_json(resp.text if resp else "")
+        if len(best) >= min_count:
+            return best
+        resp2 = _gemini_generate(
+            [PROMPT_NEW_EXAM + "\n\n\u26a0\ufe0f \u0995\u09ae\u09aa\u0995\u09cd\u09b7\u09c7 \u09e7\u09e6\u099f\u09bf MCQ \u09a6\u09be\u0993\u0964 \u09b6\u09c1\u09a7\u09c1 JSON array \u09a6\u09be\u0993\u0964", img],
+            types.GenerateContentConfig(
+                temperature=0.8, top_p=0.95, top_k=40, max_output_tokens=8192,
+                thinking_config=types.ThinkingConfig(thinking_budget=1024)))
+        mcqs2 = _parse_new_exam_json(resp2.text if resp2 else "")
+        if len(mcqs2) > len(best):
+            best = mcqs2
+    except Exception as e:
+        print(f"New exam gen failed: {e}")
     return best
 
 # ============================================================
@@ -1106,15 +1107,13 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
     if _exam_genai_client is not None:
         def _call(p: str):
             img = Image.open(BytesIO(img_bytes))
-            resp = _exam_genai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[p, img],
-                config=types.GenerateContentConfig(
+            resp = _gemini_generate(
+                [p, img],
+                types.GenerateContentConfig(
                     temperature=0.6, top_p=0.95, top_k=40,
                     max_output_tokens=8192,
                     thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                )
-            )
+                ))
             txt = (resp.text or "").strip()
             for tag in ['```json', '```']:
                 if txt.startswith(tag):

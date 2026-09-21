@@ -1,0 +1,36 @@
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [ERROR] [ATLAS] [gemini:gemini#1] Exception after 0.1s (dead): 429 RESOURCE_EXHAUSTED quota exceeded per day
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [ERROR] [ATLAS] [gemini:gemini#1] Exception after 0.1s (dead): 429 RESOURCE_EXHAUSTED quota exceeded per day
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [ERROR] [ATLAS] [gemini:gemini#1] Exception after 0.1s (dead): 429 RESOURCE_EXHAUSTED quota exceeded per day
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [ERROR] [ATLAS] [gemini:gemini#1] Exception after 0.2s (dead): 429 RESOURCE_EXHAUSTED quota exceeded per day
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [ERROR] [ATLAS] [gemini:gemini#1] Exception after 0.2s (dead): 429 RESOURCE_EXHAUSTED quota exceeded per day
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [ERROR] [ATLAS] [gemini:gemini#1] Exception after 0.3s (dead): 429 RESOURCE_EXHAUSTED quota exceeded per day
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.3s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#2|accB] OK in 0.2s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#3|accC] OK in 0.1s (11 chars)
+[2026-09-21 14:34:07] [INFO] [ATLAS] 🤖 [gemini:gemini#4|accA] OK in 0.1s (11 chars)
