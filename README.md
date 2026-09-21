@@ -5,6 +5,7 @@ colorFrom: indigo
 colorTo: purple
 sdk: docker
 sdk_version: "24.0.0"
+app_port: 7860
 app_file: bot.py
 pinned: false
 replicas: 1
