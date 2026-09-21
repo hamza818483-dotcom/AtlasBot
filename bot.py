@@ -504,6 +504,18 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
             t.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
     return None
 
+# ── /speed: in-bot generation timing history (last 20) ──
+from collections import deque as _dq
+_SPEED_LOG = _dq(maxlen=20)
+
+def _speed_record(**kw):
+    try:
+        kw["t"] = datetime.now(BD_TZ).strftime("%H:%M:%S")
+        _SPEED_LOG.append(kw)
+    except Exception:
+        pass
+
+
 _groq_key_idx = 0
 _groq_model_idx = 0
 
@@ -3118,6 +3130,9 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
         log(f"⏱️ [genmcq] parse={time.time()-_tp:.2f}s mcqs={len(valid_mcqs)}")
+        _speed_record(kind=prompt_type, db=_T_DB, ai=_T_AI, prov=(provider or "NONE"),
+                      img=len(image_bytes)//1024, plen=len(prompt_text), n=len(valid_mcqs),
+                      base_from_db=(prompts.get(prompt_type, {}).get('text') != PROMPT_MAP.get(prompt_type, {}).get('text')))
         # v5.26: RETRY_THRESHOLD lowered 5->3 — a real case showed 4 valid
         # MCQs triggering a full second Gemini call just to try for one or
         # two more, nearly doubling total latency (52.5s for only 4 MCQs)
@@ -6408,6 +6423,55 @@ async def handle_premium_pdf(query, quiz_id: str) -> None:
 # v4.0: /keys — owner-only model+key analytics (single message)
 # ------------------------------------------------------------
 
+async def cmd_speed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/speed — শেষ ২০টি MCQ generation-এর সময় ও কারণ (শুধু অ্যাডমিন)।"""
+    user = get_user_info(update)
+    if not is_admin(user['user_id']):
+        await update.message.reply_text("❌ এই কমান্ড শুধু এডমিন ব্যবহার করতে পারবেন।")
+        return
+    lines = ["⚡ SPEED REPORT", "━━━━━━━━━━━━━━━━━━━━"]
+    # prompt source check: DB vs code
+    try:
+        pr = await _db(get_prompts_from_db)
+        lines.append("📝 Prompt (কোথা থেকে আসছে):")
+        for k in ("prompt_1", "prompt_2", "prompt_3", "prompt_mixed"):
+            if k in PROMPT_MAP:
+                dbt = (pr.get(k) or {}).get('text', '') or ''
+                cdt = PROMPT_MAP[k]['text']
+                src = "✅ কোড (ছোট)" if dbt == cdt else "⚠️ DATABASE (আলাদা)"
+                lines.append(f"• {k}: {len(dbt)} অক্ষর — {src}")
+    except Exception as e:
+        lines.append(f"prompt check error: {str(e)[:80]}")
+    lines.append("")
+    rows = list(_SPEED_LOG)
+    if not rows:
+        lines.append("এখনো কোনো generation হয়নি। একটা page দিয়ে MCQ বানিয়ে আবার /speed দিন।")
+    else:
+        lines.append("🕒 শেষ generation (সময়: AI / DB):")
+        for r in rows[-12:]:
+            lines.append(f"{r['t']} {r['kind']} → AI {r['ai']:.1f}s, DB {r['db']:.1f}s | {r['prov']} | {r['n']}টি MCQ | ছবি {r['img']}KB | prompt {r['plen']}ch")
+        ais = [r['ai'] for r in rows]
+        avg = sum(ais) / len(ais)
+        lines.append("")
+        lines.append(f"📊 গড় AI সময়: {avg:.1f}s | সবচেয়ে ধীর: {max(ais):.1f}s | দ্রুততম: {min(ais):.1f}s")
+        fb = [r for r in rows if r['prov'] != 'gemini']
+        if fb:
+            lines.append(f"⚠️ {len(fb)}/{len(rows)}টিতে Gemini ব্যর্থ → fallback ({', '.join(sorted({r['prov'] for r in fb}))})")
+        slow = [r for r in rows if r['ai'] > 20]
+        if slow:
+            lines.append(f"🐢 {len(slow)}টি ২০s-এর বেশি")
+        if any(r.get('base_from_db') for r in rows):
+            lines.append("⚠️ কিছু generation-এ DATABASE-এর prompt ব্যবহার হয়েছে")
+        # verdict
+        if avg <= 20 and not fb:
+            lines.append("✅ গতি ঠিক আছে (লক্ষ্য ≤২০s)")
+        elif fb:
+            lines.append("👉 আসল সমস্যা: Gemini কাজ করছে না (key/quota) — /keys দেখুন")
+        else:
+            lines.append("👉 Gemini চলছে কিন্তু ধীর — MCQ বেশি বলে output বড় হতে পারে")
+    await update.message.reply_text("\n".join(lines)[:4000])
+
+
 async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_info(update)
     if not is_admin(user['user_id']):
@@ -7272,6 +7336,7 @@ async def register_handlers() -> None:
     application.add_handler(CommandHandler("log", cmd_log))
     application.add_handler(CommandHandler("error", cmd_error))
     application.add_handler(CommandHandler("keys", cmd_keys))
+    application.add_handler(CommandHandler("speed", cmd_speed))
     application.add_handler(CommandHandler("prompt", cmd_prompt))
     application.add_handler(CommandHandler("send", cmd_send))
     application.add_handler(CommandHandler("timer", cmd_timer))
@@ -7362,6 +7427,7 @@ async def set_bot_commands() -> None:
         owner_commands = user_commands + [
             BotCommand("info", "👥 ইউজার রিপোর্ট"),
             BotCommand("keys", "🔑 AI Keys/Quota analytics"),
+            BotCommand("speed", "⚡ MCQ speed report"),
             BotCommand("permit", "✅ ইউজার পারমিট"),
             BotCommand("limit", "⚙️ লিমিট সেট"),
             BotCommand("free", "🔢 ফ্রি লিমিট"),
