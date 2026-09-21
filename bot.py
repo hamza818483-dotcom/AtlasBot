@@ -4539,7 +4539,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else:
             await instant_msg.edit_text("❌ দয়া করে একটি Image বা PDF পাঠান।")
             return
-        context.user_data['pending_image'] = image_bytes
+        context.user_data['pending_image'] = None  # RAM guard: bytes not held; re-fetched by file_id on demand
         context.user_data['pending_image_file_id'] = file_id
         try:
             await instant_msg.delete()
@@ -4859,10 +4859,26 @@ async def handle_text_mcq_generation(query, mode: str, context: ContextTypes.DEF
         except Exception:
             pass
 
+async def _get_pending_image_bytes(context) -> Optional[bytes]:
+    """RAM guard: pending image is stored as file_id only; download on demand."""
+    b = context.user_data.get('pending_image')
+    if b:
+        return b
+    fid = context.user_data.get('pending_image_file_id')
+    if not fid:
+        return None
+    try:
+        f = await context.bot.get_file(fid)
+        return _ingest_shrink(bytes(await f.download_as_bytearray()))
+    except Exception as e:
+        log_error(f"pending image re-fetch failed: {e}")
+        return None
+
+
 async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = query.from_user
     user_id = user.id
-    image_bytes = context.user_data.get('pending_image')
+    image_bytes = await _get_pending_image_bytes(context)
     if not image_bytes:
         await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
         return
@@ -5043,7 +5059,7 @@ async def handle_explain_from_pending(query, context: ContextTypes.DEFAULT_TYPE)
     """User pressed 📖 ব্যাখ্যা চাই on a freshly sent image: sends the image
     directly to AI with a detailed step-by-step explanation prompt (topic
     explanation, or per-option MCQ analysis with formulas/related concepts)."""
-    image_bytes = context.user_data.get('pending_image')
+    image_bytes = await _get_pending_image_bytes(context)
     if not image_bytes:
         await query.message.reply_text("❌ ইমেজ ডাটা পাওয়া যায়নি। আবার ইমেজ পাঠান।")
         return

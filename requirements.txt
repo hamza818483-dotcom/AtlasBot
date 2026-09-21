@@ -1,28 +1,14 @@
 python-telegram-bot>=20.0
-aiosqlite
 aiohttp
-beautifulsoup4
 pillow
-pypdf
-pdf2image
-pytesseract
-reportlab
 httpx
-python-dotenv
 fastapi
 uvicorn
-requests
-pyrogram
-tgcrypto
-jinja2
 supabase
 google-genai
-pandas
 certifi
 pytz
-flask
-playwright
-aiofile
-weasyprint
 psutil
 telethon
+# PDF features disabled (RAM). To re-enable set PDF_FEATURES_ENABLED=1 + PDF_RENDER_ENABLED=1
+# and add back: pypdf pdf2image reportlab weasyprint playwright (+ chromium/poppler in Dockerfile)
