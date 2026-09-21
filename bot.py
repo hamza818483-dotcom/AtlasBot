@@ -141,8 +141,8 @@ DEFAULT_FREE_LIMIT = 3
 DEFAULT_DAILY_LIMIT = 5
 DEFAULT_NEGATIVE_MARK = -0.50
 NEW_PRACTICE_COUNT = 15
-MAX_MCQ = 20
-MIN_MCQ = 10
+MAX_MCQ = 200   # effectively no cap: as many as the page info allows
+MIN_MCQ = 3
 POLL_DELAY = 1.5
 
 FREE_NEW_EXAM_LIMIT = 2
@@ -441,7 +441,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                         contents=contents,
                         config=types.GenerateContentConfig(
                             temperature=0.7, top_p=0.95, top_k=40,
-                            max_output_tokens=8192,
+                            max_output_tokens=16384,
                             thinking_config=types.ThinkingConfig(thinking_budget=0),
                         ))),
                     timeout=GEMINI_ATTEMPT_TIMEOUT)
@@ -1461,7 +1461,7 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা এসব info theke mcq banabe na.
 -🚫 STRICT: সোর্সে যদি মনে রাখার কৌশল/ছন্দ/rhyme/mnemonic শব্দ থাকে (যেমন "রূপা-রেটিনোব্লাস্টোমা", "পাশে/থাকে/সার" এর মত অর্থহীন সাউন্ড-শব্দ যেগুলো শুধু মুখস্থ করানোর জন্য ব্যবহৃত হয়), সেই ছন্দের শব্দগুলো (রূপা/পাশে/থাকে/সার টাইপ) কখনোই MCQ প্রশ্ন বা অপশন হিসেবে ব্যবহার করা যাবে না। শুধুমাত্র mnemonic এর সাথে যুক্ত আসল মেডিকেল/একাডেমিক তথ্য (রোগের নাম, লক্ষণ, সংজ্ঞা ইত্যাদি) নিয়ে MCQ বানাতে হবে — অর্থহীন ছন্দ-শব্দ নিয়ে না।
 -হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে।
--গড়ে ১০ থেকে ২০ টি Mcq বানাতে হবে (তথ্যের পরিমাণ অনুযায়ী)।তথ্য কম থাকলে ১০-১২টি, বেশি থাকলে ১৫-২০টি
+-MCQ এর সংখ্যার কোনো সীমা নেই — পেইজের তথ্য যত আছে তার সবটুকু কাজে লাগিয়ে যতগুলো সম্ভব MCQ বানাও (কোনো তথ্য বাদ দিও না, ফালতু/পুনরাবৃত্ত প্রশ্ন দিয়ে সংখ্যা বাড়িও না)।
 
 💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
 -সোর্স থেকে সকল টাইপের প্রশ্ন বানাতে হবে
@@ -1493,7 +1493,7 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 
 PROMPT_02 = """MCQ TYPE: True/False Style
 
-🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ): Source এ যত তথ্য আছে তার ভিত্তিতে গড়ে ১০ থেকে ২০ টি MCQ বানাতে হবে। কখনোই মাত্র ১-২টি MCQ বানিয়ে থামবে না। তথ্য কম থাকলে ১০-১২টি, তথ্য বেশি থাকলে ১৫-২০টি — একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করো।
+🔴 সংখ্যা: কোনো নির্দিষ্ট সীমা নেই — Source এ যত তথ্য আছে তার সবটুকু ব্যবহার করে যতগুলো সম্ভব MCQ বানাও। কখনোই মাত্র ১-২টি বানিয়ে থামবে না; তথ্য শেষ হলে থামো, ফালতু প্রশ্ন দিয়ে সংখ্যা বাড়িও না।
 
 🚫🚫 MANDATORY EXACT PHRASING (STRICT — এটাই সবচেয়ে বড় নিয়ম): প্রতিটি প্রশ্নের বাক্যে অক্ষরে অক্ষরে অবশ্যই "বললে ভুল হবে" এই ৪টি শব্দ পরপর থাকতেই হবে, এবং একই বাক্যে "সত্য" অথবা "মিথ্যা" শব্দও থাকতেই হবে। নিচের ৪টি প্যাটার্নের বাইরে অন্য কোনো ভাষায়/গঠনে প্রশ্ন লেখা সম্পূর্ণ নিষেধ (প্যারাফ্রেজ, সমার্থক শব্দ, ভিন্ন বাক্যগঠন — কোনোটাই চলবে না)। প্রতিটি প্রশ্ন লেখার পর নিজে চেক করো এই ৪ শব্দ (বললে ভুল হবে) হুবহু আছে কিনা — না থাকলে বাতিল করে আবার লেখো।
 
@@ -1527,7 +1527,7 @@ PROMPT_02 = """MCQ TYPE: True/False Style
 -সব তথ্য 100% Input Source থেকেই — নিজে থেকে তথ্য বানানো নিষেধ।
 -Bengali, max 165 chars
 -🚫 চূড়ান্ত চেক: প্রতিটি "question" ফিল্ডে হুবহু "বললে ভুল হবে" এই শব্দগুচ্ছ + "সত্য" অথবা "মিথ্যা" শব্দ আছে কিনা যাচাই করো — না থাকলে সেই প্রশ্ন output করা যাবে না।
--JSON output only (একটি বড় array, ১০-২০টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-JSON output only (একটি বড় array, যতগুলো সম্ভব object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
 
 PROMPT_03 = """MCQ TYPE: Short Question, Long Options
@@ -1539,7 +1539,7 @@ PROMPT_03 = """MCQ TYPE: Short Question, Long Options
 -ব্যাখ্যা (STRICT): 4টা Option A,B,C,D প্রতিটির তথ্য আলাদা থাকবে — সঠিকটা কেন সঠিক + বাকি ৩টা কেন ভুল, সবই Precisely। শুধু 1 লাইনের সাধারণ ব্যাখ্যা নিষেধ।
 -Input source থেকেই সব, নিজে থেকে তথ্য বানানো নিষেধ
 -Bengali, max 165 chars
--গড়ে ১০ থেকে ২০ টি Mcq (তথ্যের পরিমাণ অনুযায়ী)
+-MCQ সংখ্যার সীমা নেই — তথ্য যত আছে তত
 -JSON output only. Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)
 -৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must. হ্যাঁ/না টাইপ কথা থাকবে না।
@@ -1548,7 +1548,7 @@ PROMPT_03 = """MCQ TYPE: Short Question, Long Options
 PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Options)
 
 🔴 সংখ্যা ও মিশ্রণ (সবচেয়ে গুরুত্বপূর্ণ):
-- Source এর তথ্যের ভিত্তিতে গড়ে ১০ থেকে ২০ টি MCQ বানাতে হবে (তথ্য কম হলে ১০-১২টি, বেশি হলে ১৫-২০টি)। কখনোই ১-২টি বানিয়ে থামবে না।
+- Source এর সব তথ্য ব্যবহার করে যতগুলো সম্ভব MCQ বানাও (কোনো সংখ্যা-সীমা নেই)। কখনোই ১-২টি বানিয়ে থামবে না।
 - নিচের ৩ ধরনের প্রশ্ন বাধ্যতামূলকভাবে মিশ্রিত করতে হবে — প্রতিটি ধরন থেকে প্রায় সমান সংখ্যক (≈৩ ভাগের ১ ভাগ করে):
   Type 1 (Standard Easy): সাধারণ প্রশ্ন, ৪টি অপশন, একটি সঠিক
   Type 2 (True/False): "নিচের কোনটিকে সত্য/মিথ্যা বললে ভুল হবে (না)?" ধরনের — সত্য/মিথ্যা ভঙ্গি randomly। 🔴 Logic: "সত্য বললে ভুল হবে না"→answer=সত্য option, "সত্য বললে ভুল হবে"→answer=মিথ্যা option, "মিথ্যা বললে ভুল হবে"→answer=সত্য option, "মিথ্যা বললে ভুল হবে না"→answer=মিথ্যা option। ভুল ম্যাপ করা যাবে না।
@@ -1564,7 +1564,7 @@ PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Opt
 -Input source থেকেই সব তথ্য, নিজে থেকে তথ্য বানানো নিষেধ
 -ব্যাখ্যা (STRICT): 4টা Option A,B,C,D প্রতিটির তথ্য আলাদা থাকবে, শুধু 1 লাইনের সাধারণ ব্যাখ্যা নিষেধ
 -Bengali explanation, max 165-200 chars
--JSON output only (একটি বড় array, ১০-২০টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
+-JSON output only (একটি বড় array, যতগুলো সম্ভব object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}]
 -answer must be integer 0-3 (A=0, B=1, C=2, D=3)"""
 
 PROMPT_MAP = {
@@ -2506,7 +2506,7 @@ RULES (strict):
 - Use ONLY what is visible/written in the source; no outside knowledge, no guessing unclear (esp. handwritten) parts.
 - Write question, options and explanation in the SAME language & digit script as the source; never translate. Copy terms/names with exact source spelling; fix only obvious typos.
 - Mnemonic/pair tables: copy each pair verbatim; never mix pairs; a mnemonic word never stands alone as an option.
-- 10-20 MCQs (10-12 if little content, 15-20 if rich). Quality over quantity; cover all key info; no weak MCQs.
+- NO fixed MCQ count: make as many MCQs as the page's information allows (maximum coverage) — use EVERY fact, table row, label, footnote, highlighted part. Never pad with weak/duplicate/repeated questions; when info runs out, stop.
 - Exactly 4 distinct options (A-D), exactly one correct; spread the correct answer evenly across A/B/C/D.
 - Limits: question <=280 chars, each option <=95 chars, explanation <=180 chars; always complete sentences.
 - OUTPUT: ONLY a valid JSON array, nothing else. Last element: {"_source_terms": ["key terms/names in exact source spelling"]}"""
@@ -3205,7 +3205,7 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         while 0 < len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1 and not is_plain_text_explanation:
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
-            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
+            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করে যতগুলো সম্ভব ভিন্ন, নির্ভুল বানানের MCQ বানাও।"
             rt = await _call_gemini(retry_prompt, image_bytes, max_tries=1)
             rp = "gemini" if rt else ""
             if rt:
