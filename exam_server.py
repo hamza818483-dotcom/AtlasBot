@@ -137,8 +137,41 @@ def _rotate_exam_key():
 def _gemini_generate(contents, config, model="gemini-2.5-flash"):
     """One Gemini call through the account-wise pool with automatic failover
     to the next healthy key. Blocking (call from a worker thread)."""
+    # 1) QuizBot's shared pool via /api/gemini-proxy (keys live only in QuizBot)
+    if _gpool.proxy_available():
+        try:
+            import io as _io, httpx as _hx
+            _img = None
+            _text = ""
+            for _c in contents:
+                if isinstance(_c, str):
+                    _text += _c
+                else:
+                    _img = _c
+            _bytes = None
+            if _img is not None:
+                _buf = _io.BytesIO()
+                _img.convert("RGB").save(_buf, format="JPEG", quality=85)
+                _bytes = _buf.getvalue()
+            _body = _gpool.build_proxy_body(_text, _bytes,
+                                            max_tokens=getattr(config, "max_output_tokens", None) or 8192,
+                                            temperature=getattr(config, "temperature", None) or 0.7)
+            _r = _hx.post(f"{_gpool.QUIZBOT_URL}/api/gemini-proxy", json=_body, timeout=75.0)
+            if _r.status_code == 200 and (_r.json().get("answer") or "").strip():
+                _gpool.proxy_mark_ok()
+                class _R:  # minimal resp shape (.text)
+                    pass
+                _o = _R(); _o.text = _r.json()["answer"]
+                return _o
+            _gpool.proxy_mark_fail(hard=_r.status_code in (403, 404))
+            print(f"[gemini:quizbot-pool] HTTP {_r.status_code}: {_r.text[:100]}")
+        except Exception as _e:
+            _gpool.proxy_mark_fail()
+            print(f"[gemini:quizbot-pool] {type(_e).__name__}: {str(_e)[:100]}")
     tried = set()
     last = None
+    if not GEMINI_KEYS:
+        raise RuntimeError("no gemini key available")
     for _ in range(max(1, len(GEMINI_KEYS))):
         key = _gpool.pick(exclude=tried)
         if key is None:
@@ -189,7 +222,7 @@ def _parse_new_exam_json(response_text: str) -> List[Dict]:
 def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
     """Generate New Exam MCQs via the account-wise Gemini pool (auto key
     failover) + one stronger retry if too few. Returns [] only if all fail."""
-    if not GEMINI_KEYS:
+    if not GEMINI_KEYS and not _gpool.PROXY_ENABLED:
         return []
     best: List[Dict] = []
     try:
@@ -735,7 +768,7 @@ async def api_new_exam(request: Request):
         return JSONResponse({"ok": False, "error": "image_fail", "message": "ছবি লোড করা যায়নি।"})
     if _exam_genai_client is None:
         setup_gemini()
-    if _exam_genai_client is None:
+    if _exam_genai_client is None and not _gpool.PROXY_ENABLED:
         return JSONResponse({"ok": False, "error": "no_key", "message": "Gemini API key সেট নেই।"})
     try:
         def _gen_sync():
@@ -1104,7 +1137,7 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
     print("[creative-pdf] Groq failed, trying Gemini...")
     if _exam_genai_client is None:
         setup_gemini()
-    if _exam_genai_client is not None:
+    if _exam_genai_client is not None or _gpool.PROXY_ENABLED:
         def _call(p: str):
             img = Image.open(BytesIO(img_bytes))
             resp = _gemini_generate(

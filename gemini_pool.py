@@ -205,3 +205,50 @@ def status() -> List[str]:
                 "cool" if _cooldown_until.get(k, 0) > now else "ok")
             rows.append(f"{label(k)} [{name}] {st} inflight={_inflight.get(k, 0)}")
     return rows
+
+
+# ─────────────────────────────────────────────────────────────
+# REMOTE POOL: use QuizBot's key pool through its /api/gemini-proxy
+# (keys live ONLY in QuizBot; AtlasBot just sends the request).
+#   QUIZBOT_URL       = https://<quizbot-host>
+#   LMS_API_SECRET    = same secret QuizBot uses for /api/gemini-proxy
+#   GEMINI_PROXY_FIRST= 1 (default) proxy first, local keys as fallback
+# ─────────────────────────────────────────────────────────────
+QUIZBOT_URL = (os.getenv("QUIZBOT_URL") or "").strip().rstrip("/")
+PROXY_SECRET = (os.getenv("LMS_API_SECRET") or os.getenv("GEMINI_PROXY_SECRET") or "").strip()
+PROXY_ENABLED = bool(QUIZBOT_URL and PROXY_SECRET) and os.getenv("GEMINI_PROXY", "1") != "0"
+_proxy_down_until = 0.0
+_proxy_fail_streak = 0
+PROXY_CONCURRENCY = int(os.getenv("GEMINI_PROXY_CONCURRENCY", "6"))
+
+
+def proxy_available() -> bool:
+    return PROXY_ENABLED and time.time() >= _proxy_down_until
+
+
+def proxy_mark_ok() -> None:
+    global _proxy_fail_streak, _proxy_down_until
+    _proxy_fail_streak = 0
+    _proxy_down_until = 0.0
+
+
+def proxy_mark_fail(hard: bool = False) -> None:
+    """Circuit breaker: after 2 consecutive failures (or a hard auth/config
+    error) skip the proxy for a while and use local keys / next provider."""
+    global _proxy_fail_streak, _proxy_down_until
+    _proxy_fail_streak += 1
+    if hard:
+        _proxy_down_until = time.time() + 600
+    elif _proxy_fail_streak >= 2:
+        _proxy_down_until = time.time() + min(120, 20 * _proxy_fail_streak)
+
+
+def build_proxy_body(prompt_text: str, image_bytes: Optional[bytes],
+                     max_tokens: int = 8192, temperature: float = 0.7) -> dict:
+    import base64
+    parts = [{"text": prompt_text}]
+    if image_bytes:
+        parts.append({"inline_data": {"mime_type": "image/jpeg",
+                                      "data": base64.b64encode(image_bytes).decode()}})
+    return {"secret": PROXY_SECRET, "parts": parts,
+            "max_tokens": max_tokens, "temperature": temperature}

@@ -336,6 +336,8 @@ _bot_genai_client = None
 
 def setup_gemini():
     global _bot_genai_client
+    if _gpool.PROXY_ENABLED:
+        log(f"✅ Gemini via QuizBot pool: {_gpool.QUIZBOT_URL}/api/gemini-proxy (local keys: {len(GEMINI_KEYS)} fallback)")
     if GEMINI_KEYS:
         _bot_genai_client = _gpool.client(GEMINI_KEYS[0])
         accs = ", ".join(f"{n}({len(k)})" for n, k in _gpool.ACCOUNTS)
@@ -366,12 +368,46 @@ STRICT_SOURCE_RULES_PLAIN = """
 
 RULES: Use ONLY the given source (image/text) — no invented facts. Quality over quantity. No irrelevant content. Output must be plain readable text — no JSON/code/markdown."""
 
+_PROXY_SEM = asyncio.Semaphore(_gpool.PROXY_CONCURRENCY)
+
+
+async def _call_gemini_via_quizbot(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
+    """Call QuizBot's shared Gemini pool. Returns text or None (caller falls
+    back to local keys / next provider). Never raises."""
+    try:
+        body = _gpool.build_proxy_body(prompt_text, image_bytes)
+        t0 = time.time()
+        async with _PROXY_SEM:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(75.0, connect=8.0)) as c:
+                r = await c.post(f"{_gpool.QUIZBOT_URL}/api/gemini-proxy", json=body)
+        if r.status_code == 200:
+            ans = (r.json() or {}).get("answer") or ""
+            if ans.strip():
+                _gpool.proxy_mark_ok()
+                log(f"🤖 [gemini:quizbot-pool] OK in {time.time()-t0:.1f}s ({len(ans)} chars)")
+                return ans
+            _gpool.proxy_mark_fail()
+            return None
+        hard = r.status_code in (400, 403, 404, 503) and "secret" in (r.text or "").lower() or r.status_code in (403, 404)
+        _gpool.proxy_mark_fail(hard=hard)
+        log_error(f"[gemini:quizbot-pool] HTTP {r.status_code}: {(r.text or '')[:120]}")
+    except Exception as e:
+        _gpool.proxy_mark_fail()
+        log_error(f"[gemini:quizbot-pool] {type(e).__name__}: {str(e)[:120]}")
+    return None
+
+
 async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries: Optional[int] = None) -> Optional[str]:
     """Account-wise Gemini pool: each call atomically picks the next healthy,
     least-loaded key (round-robin ACROSS accounts), so concurrent users are
     spread over all keys. A failing key is cooled down / marked dead and the
     next key is tried; every attempt uses its own cached client (no shared
     global -> no race between concurrent users)."""
+    # ── 1) QuizBot's key pool via /api/gemini-proxy (keys live only in QuizBot) ──
+    if _gpool.proxy_available():
+        _txt = await _call_gemini_via_quizbot(prompt_text, image_bytes)
+        if _txt:
+            return _txt
     if not GEMINI_KEYS:
         return None
     if _gpool.all_dead():
@@ -4924,7 +4960,7 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
         prog_task.cancel()
         if prompt_type == 'qbm_extract' and (error or not mcqs):
             diag = []
-            if not GEMINI_KEYS:
+            if not GEMINI_KEYS and not _gpool.PROXY_ENABLED:
                 diag.append("Gemini: কোনো API key কনফিগার করা নেই (GEMINI_KEY env var খালি)")
             elif all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS))):
                 diag.append("Gemini: সবগুলো key আজকের কোটা শেষ")
@@ -5226,7 +5262,7 @@ async def handle_qbm_extract(query, quiz_id: str, user) -> None:
         # message — the generic message is wrong/misleading when the real cause is a
         # provider-level failure, not an actually-empty page.
         diag = []
-        if not GEMINI_KEYS:
+        if not GEMINI_KEYS and not _gpool.PROXY_ENABLED:
             diag.append("Gemini: কোনো API key কনফিগার করা নেই (GEMINI_KEY env var খালি)")
         elif all(_is_key_exhausted_today("gemini", f"gemini#{i+1}") for i in range(len(GEMINI_KEYS))):
             diag.append("Gemini: সবগুলো key আজকের কোটা শেষ")

@@ -106,3 +106,27 @@ Traceback (most recent call last):
 Exception: 429 RESOURCE_EXHAUSTED quota exceeded per day
 
 ==================================================
+[2026-09-21 21:33:03] [gemini:quizbot-pool] HTTP 502: {"error":"no key worked"}
+NoneType: None
+
+==================================================
+[2026-09-21 21:33:03] [gemini:quizbot-pool] HTTP 502: {"error":"no key worked"}
+NoneType: None
+
+==================================================
+[2026-09-21 21:33:03] [gemini:quizbot-pool] HTTP 403: {"error":"unauthorized"}
+NoneType: None
+
+==================================================
+[2026-09-21 21:38:51] [gemini:quizbot-pool] HTTP 502: {"error":"no key worked"}
+NoneType: None
+
+==================================================
+[2026-09-21 21:38:51] [gemini:quizbot-pool] HTTP 502: {"error":"no key worked"}
+NoneType: None
+
+==================================================
+[2026-09-21 21:38:51] [gemini:quizbot-pool] HTTP 403: {"error":"unauthorized"}
+NoneType: None
+
+==================================================
