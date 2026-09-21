@@ -216,7 +216,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
 # SECTION 5: IN-MEMORY EXAM STORE + REHYDRATE
 # ============================================================
 exam_store: Dict[str, Dict] = {}
-_EXAM_STORE_MAX = 300  # v-RAM-fix: each entry holds a full mcqs list (can be large) — cap hard
+_EXAM_STORE_MAX = 100  # v-RAM-fix: each entry holds a full mcqs list (can be large) — cap hard
 
 def store_exam(quiz_id: str, mcqs: List[Dict], topic: str = "", page: int = 1,
                tag: str = "", image_file_id: str = "", is_new_gen: bool = False,
@@ -813,7 +813,7 @@ async def _precache_solve_pdf(cache_id: str):
             return
         pdf_bytes = await _render_pdf(html, data.get("mcqs"))
         if cache_id in exam_store:
-            exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
+            pass  # PDF bytes no longer cached in RAM
             print(f"[solve-pdf] pre-cached for {cache_id[:8]} ({len(pdf_bytes)} bytes)")
     except Exception as e:
         print(f"[solve-pdf] pre-cache error: {e}")
@@ -867,7 +867,7 @@ async def api_solve_pdf_direct(cache_id: str):
         await notify_owner(f"/api/solve-pdf-direct failed for cache_id={cache_id}: {e}")
         return JSONResponse({"ok": False, "message": "PDF সুবিধা সাময়িকভাবে বন্ধ আছে।" if not PDF_RENDER_ENABLED else "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     if cache_id in exam_store:
-        exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
+        pass  # PDF bytes no longer cached in RAM
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

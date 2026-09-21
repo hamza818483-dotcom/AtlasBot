@@ -556,6 +556,36 @@ def _b64_data_url(image_bytes: bytes) -> str:
         mime = "image/webp"
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
+def _ingest_shrink(image_bytes: bytes, max_dim: int = 1600, quality: int = 85) -> bytes:
+    """RAM guard: shrink oversized uploads (phone photos / image documents)
+    ONCE at ingest so every later PIL/Gemini/Groq step works on a small image.
+    Uses draft() for JPEG so the full-size bitmap is never decoded. Falls back
+    to the original bytes on any error."""
+    try:
+        if len(image_bytes) < 350_000:
+            return image_bytes
+        im = Image.open(BytesIO(image_bytes))
+        try:
+            im.draft("RGB", (max_dim, max_dim))
+        except Exception:
+            pass
+        w, h = im.size
+        if max(w, h) <= max_dim and len(image_bytes) < 1_500_000:
+            im.close()
+            return image_bytes
+        im = im.convert("RGB")
+        if max(im.size) > max_dim:
+            sc = max_dim / max(im.size)
+            im = im.resize((max(1, int(im.size[0] * sc)), max(1, int(im.size[1] * sc))), Image.LANCZOS)
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=quality)
+        im.close()
+        return buf.getvalue()
+    except Exception as e:
+        log_error(f"_ingest_shrink failed, using original: {e}")
+        return image_bytes
+
+
 def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 640, jpeg_quality: int = 50) -> bytes:
     """v5.5: Groq's TPM limit (8000 for qwen3.6-27b) counts image tokens
     proportional to resolution — a full-resolution phone photo (e.g.
@@ -2910,7 +2940,7 @@ def _qbm_answer_letter_to_index(mcqs: list) -> list:
 
 # v-RAM-fix: caps how many images (across ALL users) run the extraction
 # pipeline at once, protecting RAM under high concurrent load on 512MB free tier.
-_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(20)
+_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(3)
 
 async def _qbm_ram_aware_acquire():
     """Blocks until (a) a hard-cap slot is free AND (b) live RSS has headroom."""
@@ -3108,7 +3138,15 @@ async def qbm_extract_from_image(image_bytes: bytes) -> list:
         _QBM_EXTRACT_HARD_CAP.release()
 
 
+_GEN_SEM = asyncio.Semaphore(int(os.getenv("GEN_CONCURRENCY", "2")))  # RAM guard: max concurrent image->MCQ pipelines
+
+
 async def generate_mcq_from_image(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
+    async with _GEN_SEM:
+        return await _generate_mcq_from_image_inner(image_bytes, prompt_type)
+
+
+async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 'prompt_1') -> Tuple[List[Dict], Optional[str]]:
     """Generate MCQs from an image — Gemini→NVIDIA→OpenRouter chain + cache."""
     try:
         # v4.0: instant cache hit for same image+prompt_type
@@ -4397,7 +4435,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         )
                         return
                     raise
-                image_bytes = bytes(await file.download_as_bytearray())
+                image_bytes = _ingest_shrink(bytes(await file.download_as_bytearray()))
             elif update.message.document and (update.message.document.mime_type or "").startswith("image"):
                 doc = update.message.document
                 if doc.file_size and doc.file_size > TELEGRAM_MAX_FILE_SIZE:
@@ -4416,7 +4454,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         )
                         return
                     raise
-                image_bytes = bytes(await file.download_as_bytearray())
+                image_bytes = _ingest_shrink(bytes(await file.download_as_bytearray()))
             else:
                 await update.message.reply_text("❌ দয়া করে একটি Image পাঠান (PDF collection mode চালু আছে)।")
                 return
