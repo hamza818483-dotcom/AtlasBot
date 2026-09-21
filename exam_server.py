@@ -782,7 +782,7 @@ async def api_solve_pdf(request: Request):
         print(f"PDF render error: {e}")
         traceback.print_exc()
         await notify_owner(f"/api/solve-pdf failed for cache_id={cache_id}: {e}")
-        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
+        return JSONResponse({"ok": False, "message": "PDF সুবিধা সাময়িকভাবে বন্ধ আছে।" if not PDF_RENDER_ENABLED else "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     b64 = base64.b64encode(pdf_bytes).decode("ascii")
     return {"ok": True, "pdf_b64": b64, "filename": f"ATLAS_Solve_{cache_id[:8]}.pdf"}
 
@@ -809,6 +809,8 @@ async def _precache_solve_pdf(cache_id: str):
             return
         answers = data.get("last_answers", {}) or {}
         html = generate_solve_pdf_html(data, answers)
+        if not PDF_RENDER_ENABLED:
+            return
         pdf_bytes = await _render_pdf(html, data.get("mcqs"))
         if cache_id in exam_store:
             exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
@@ -863,7 +865,7 @@ async def api_solve_pdf_direct(cache_id: str):
         print(f"Solve PDF direct render error: {e}")
         traceback.print_exc()
         await notify_owner(f"/api/solve-pdf-direct failed for cache_id={cache_id}: {e}")
-        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
+        return JSONResponse({"ok": False, "message": "PDF সুবিধা সাময়িকভাবে বন্ধ আছে।" if not PDF_RENDER_ENABLED else "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     if cache_id in exam_store:
         exam_store[cache_id]["cached_solve_pdf"] = pdf_bytes
     return Response(
@@ -960,7 +962,7 @@ async def _do_premium_pdf(cache_id: str, header_label: str = "") -> JSONResponse
     except Exception as e:
         print(f"Premium PDF render error: {e}")
         traceback.print_exc()
-        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
+        return JSONResponse({"ok": False, "message": "PDF সুবিধা সাময়িকভাবে বন্ধ আছে।" if not PDF_RENDER_ENABLED else "PDF তৈরি ব্যর্থ হয়েছে।"}, status_code=500)
     b64 = base64.b64encode(pdf_bytes).decode("ascii")
     return JSONResponse({"ok": True, "pdf_b64": b64, "filename": f"ATLAS_Practice_Sheet_{cache_id[:8]}.pdf"})
 
@@ -1175,7 +1177,7 @@ async def api_creative_pdf(cache_id: str, ctype: str = "knowledge"):
             print(f"[creative-pdf] PDF render error: {e}")
             traceback.print_exc()
             await notify_owner(f"/api/creative-pdf ({ctype}) failed for cache_id={cache_id}: {e}")
-            return JSONResponse({"ok": False, "reason": f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}"}, status_code=500)
+            return JSONResponse({"ok": False, "reason": ("PDF সুবিধা সাময়িকভাবে বন্ধ আছে।" if isinstance(e, PdfRenderDisabled) else f"PDF তৈরি ব্যর্থ হয়েছে: {str(e)[:120]}")}, status_code=500)
         fname = ("ATLAS_Gyanmulok_" if ctype == "knowledge" else "ATLAS_Onudhabonmulok_") + cache_id[:8] + ".pdf"
         print(f"[creative-pdf] success, pdf size={len(pdf_bytes)}")
         return Response(
@@ -1197,6 +1199,8 @@ async def notify_owner(text: str):
     """Best-effort Telegram alert to admin. Never raises."""
     if not BOT_TOKEN or not OWNER_ID:
         return
+    if not PDF_RENDER_ENABLED and "PDF generation is currently disabled" in text:
+        return  # expected while PDF render is off — don't spam owner
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(
@@ -1207,7 +1211,18 @@ async def notify_owner(text: str):
         pass
 
 
+# Server-side PDF rendering (weasyprint/Chromium) is OFF by default — it
+# spikes RAM past the 512MB limit. Set PDF_RENDER_ENABLED=1 to re-enable.
+PDF_RENDER_ENABLED = os.getenv("PDF_RENDER_ENABLED", "0") == "1"
+
+
+class PdfRenderDisabled(Exception):
+    pass
+
+
 async def _render_pdf(html: str, mcqs_ref: Optional[List[Dict]] = None) -> bytes:
+    if not PDF_RENDER_ENABLED:
+        raise PdfRenderDisabled("PDF generation is currently disabled")
     async with _PDF_RENDER_SEMAPHORE:
         return await _render_pdf_inner(html, mcqs_ref)
 
