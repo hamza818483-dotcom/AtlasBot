@@ -1,25 +1,11 @@
-name: Sync to Hugging Face Space
+name: Sync to Hugging Face Space (DISABLED - HF accounts banned)
 
+# HF deploy disabled. Render is the live host.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
-  sync-to-hf:
+  noop:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          lfs: true
-
-      - name: Push to HF Space (HF04/quizbot-backup)
-        env:
-          HF_TOKEN_HF04: ${{ secrets.HF_TOKEN_HF04 }}
-        run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
-          git remote add hf https://HF04:${HF_TOKEN_HF04}@huggingface.co/spaces/HF04/quizbot-backup
-          git push hf main:main --force
+      - run: echo "HF deploy disabled"
