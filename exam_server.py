@@ -230,7 +230,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
             [PROMPT_NEW_EXAM, img],
             types.GenerateContentConfig(
                 temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=8192,
-                thinking_config=types.ThinkingConfig(thinking_budget=1024)))
+                thinking_config=types.ThinkingConfig(thinking_budget=0)))
         best = _parse_new_exam_json(resp.text if resp else "")
         if len(best) >= min_count:
             return best
@@ -238,7 +238,7 @@ def _gen_new_exam_mcqs(img: "Image.Image", min_count: int = 10) -> List[Dict]:
             [PROMPT_NEW_EXAM + "\n\n\u26a0\ufe0f \u0995\u09ae\u09aa\u0995\u09cd\u09b7\u09c7 \u09e7\u09e6\u099f\u09bf MCQ \u09a6\u09be\u0993\u0964 \u09b6\u09c1\u09a7\u09c1 JSON array \u09a6\u09be\u0993\u0964", img],
             types.GenerateContentConfig(
                 temperature=0.8, top_p=0.95, top_k=40, max_output_tokens=8192,
-                thinking_config=types.ThinkingConfig(thinking_budget=1024)))
+                thinking_config=types.ThinkingConfig(thinking_budget=0)))
         mcqs2 = _parse_new_exam_json(resp2.text if resp2 else "")
         if len(mcqs2) > len(best):
             best = mcqs2
@@ -1145,7 +1145,7 @@ async def _generate_creative_items(img_bytes: bytes, ctype: str) -> Dict:
                 types.GenerateContentConfig(
                     temperature=0.6, top_p=0.95, top_k=40,
                     max_output_tokens=8192,
-                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ))
             txt = (resp.text or "").strip()
             for tag in ['```json', '```']:

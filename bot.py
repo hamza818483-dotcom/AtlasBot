@@ -444,6 +444,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                     config=types.GenerateContentConfig(
                         temperature=0.7, top_p=0.95, top_k=40,
                         max_output_tokens=8192,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     )
                 )),
                 timeout=GEMINI_ATTEMPT_TIMEOUT
@@ -899,8 +900,10 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     every key again, since a second full multi-key chain on top of the
     first one was needlessly doubling key/quota spend for a bonus attempt
     that isn't essential."""
-    rules = STRICT_SOURCE_RULES if expect_json else STRICT_SOURCE_RULES_PLAIN
-    full_prompt = prompt_text + rules
+    if expect_json:
+        full_prompt = prompt_text if 'RULES (strict):' in prompt_text else prompt_text + STRICT_SOURCE_RULES
+    else:
+        full_prompt = prompt_text + STRICT_SOURCE_RULES_PLAIN
 
     _t_gem = time.time()
     # 1) Gemini (PRIMARY -- all keys with rotation, full-resolution image, no downscale)
@@ -2461,120 +2464,16 @@ async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: 
 # mixed languages (e.g. English scientific terms inside a Bengali paragraph). This is now a
 # zero-tolerance, explicitly-prioritized rule block instead of one soft sentence.
 # ============================================================
-ACCURACY_AND_COUNT_LOCK = """
+COMPACT_MCQ_RULES = """
 
-================================
-🎯 ACCURACY + IMAGE INFO USAGE + COUNT — ABSOLUTE RULE
-================================
-বানান (SPELLING): প্রতিটি প্রশ্ন, অপশন ও ব্যাখ্যার বানান/স্পেলিং ১০০% নির্ভুল হতে হবে। লেখার আগে
-প্রতিটি শব্দ দুইবার চেক করবে। সোর্সে ভুল বানান থাকলেও নিজের আউটপুটে শুদ্ধ বানান লিখবে (মূল
-তথ্য/অর্থ পরিবর্তন না করে)।
-
-তথ্য নির্ভুলতা: ছবিতে/সোর্সে যা লেখা আছে তার বাইরে কোনো ভুল তথ্য বা অনুমান দেওয়া যাবে না।
-
-🚫🚫 HANDWRITING/হাতের লেখা সংক্রান্ত ABSOLUTE নিয়ম: ছবিতে যদি হাতে লেখা (handwritten) নোট থাকে এবং কোনো অংশ অস্পষ্ট/অপাঠ্য মনে হয়, তাহলে সেই অংশ নিয়ে MCQ বানানো থেকে বিরত থাকবে — কক্ষনো নিজের মেমোরি/প্রশিক্ষণ থেকে "এরকম টপিকে সাধারণত যা থাকে" ধরনের পরিচিত/মুখস্থ তথ্য (যেমন পরিচিত রাসায়নিক পরীক্ষা, বিখ্যাত টেবিল/সূত্র) বসিয়ে MCQ বানানো যাবে না। প্রতিটি MCQ-এর প্রতিটি শব্দ শুধু এই নির্দিষ্ট ছবিতে সরাসরি দৃশ্যমান/পাঠযোগ্য টেক্সট থেকেই আসবে। ছবির বিষয়বস্তু সম্পূর্ণ ভিন্ন কোনো টপিক (যা ছবিতে নেই) দিয়ে MCQ বানানো একটি গুরুতর ভুল — এটা কখনোই করা যাবে না।
-
-ইমেজের সর্বোচ্চ তথ্য ব্যবহার (image হলে): ছবির প্রতিটি অংশ — মূল লেখা, ছক/টেবিল, ডায়াগ্রাম/ছবির
-ভিতরের লেবেল, ফুটনোট, মার্জিনে লেখা, হাইলাইট/আন্ডারলাইন করা অংশ — সব কিছু থেকে MCQ বানানোর
-সুযোগ খুঁজে বের করবে।
-
-MCQ সংখ্যা: গড়ে ১০ থেকে ২০টি MCQ বানাবে। তথ্য কম থাকলে ১০-১২টি, তথ্য বেশি থাকলে ১৫-২০টি।
-Quality সবসময় Quantity এর আগে।
-
-🔴 অপশন সংখ্যা (ABSOLUTE, প্রতিটি MCQ-তে): প্রতিটি MCQ-তে ঠিক ৪টি (৪টিই, কম না বেশি না) অপশন
-থাকতেই হবে — A, B, C, D। কখনো ২টি বা ৩টি অপশন দিয়ে থামবে না (যেমন শুধু হ্যাঁ/না জোড়া)। ৪টি
-সম্পূর্ণ, তথ্যপূর্ণ, ভিন্ন অপশন ছাড়া MCQ output-এ দেওয়া নিষেধ।
-
-🔴 সঠিক উত্তরের পজিশন: সঠিক উত্তর সবসময় B বা C তে বসিও না — A, B, C, D এর মধ্যে randomly/সমানভাবে
-ছড়িয়ে দাও (প্রতিটি MCQ আলাদাভাবে চিন্তা করে, কোনো fixed pattern অনুসরণ না করে)।
-
-🔴 দৈর্ঘ্য সীমা (ABSOLUTE, Telegram Poll limit — কখনো ভাঙা যাবে না):
-- প্রশ্ন (question): সর্বোচ্চ ২৮০ ক্যারেক্টার (কখনো ৩০০ ছাড়াবে না, নিরাপদ মার্জিন রাখো)।
-- প্রতিটি অপশন (A/B/C/D প্রতিটি আলাদাভাবে): সর্বোচ্চ ৯৫ ক্যারেক্টার (কখনো ১০০ ছাড়াবে না)।
-- ব্যাখ্যা (explanation): সর্বোচ্চ ১৮০ ক্যারেক্টার (কখনো ২০০ ছাড়াবে না)।
-এই সীমার মধ্যে থাকার জন্য প্রয়োজনে প্রশ্ন/অপশন/ব্যাখ্যা সংক্ষিপ্ত ও ঘনীভূতভাবে লিখবে (মূল অর্থ
-ঠিক রেখে), কখনো মাঝপথে কেটে অসম্পূর্ণ বাক্য দেবে না — সবসময় সম্পূর্ণ, ছোট বাক্যে শেষ করবে।
-"""
-
-STRICT_LANGUAGE_LOCK = """
-
-════════════════════════════════
-🌐 SOURCE LANGUAGE — ABSOLUTE, ZERO-TOLERANCE RULE (read this before generating anything)
-════════════════════════════════
-STEP 1 (mandatory, before writing a single MCQ): identify the language the source content is
-actually written in. Do this per distinct block of content if the source mixes languages in
-different sections — do not assume the whole source is one language from a quick glance.
-
-STEP 2: generate the question, all options, AND the explanation for each MCQ 100% in that
-SAME source language — matching script and language exactly, with these absolute rules:
-❌ NEVER translate the source content into a different language, under any circumstance.
-❌ NEVER default to Bengali (or any other language) out of habit — the source's actual
-   language always wins, even if it's English, Bangla, Hindi, Arabic, or anything else.
-❌ NEVER blend two languages within a single MCQ unless the source ITSELF genuinely mixes
-   them (e.g. an English technical term inside a Bengali sentence, exactly as written in the
-   source) — copy that exact mixing pattern faithfully, don't "clean it up" into one language.
-❌ If the source has multiple sections in different languages, each MCQ must match the
-   language of the SPECIFIC section/content it was built from — not a single language picked
-   for the whole output.
-✅ Numerals: preserve the digit script the source used for that specific content (Bengali
-   ১২৩ stays Bengali, English 123 stays English) — do not let language handling cause a
-   digit-script switch.
-This rule has the HIGHEST priority in this entire prompt and overrides any language default,
-example, or instruction stated anywhere else — if anything above conflicts, this rule wins."""
-
-MNEMONIC_TABLE_LOCK = """
-
-════════════════════════════════
-🔤 MNEMONIC / ছন্দ TABLE SOURCE — VERBATIM PAIRING RULE
-════════════════════════════════
-সোর্সে যদি "মনে রাখার ছন্দ/কৌশল" টেবিল থাকে (একটা ছন্দের শব্দ ↔ একটা নির্দিষ্ট রোগ/টার্ম/তথ্যের
-পেয়ার, যেমন "হিমুর → হিমোফিলিয়া", "রূপা → রেটিনোব্লাস্টোমা"), তাহলে:
-✅ প্রতিটি mnemonic শব্দের সাথে যুক্ত রোগ/টার্মের নাম টেবিল থেকে হুবহু (verbatim, exact spelling)
-   কপি করতে হবে — নিজে থেকে সংক্ষেপ, বানান পরিবর্তন, বা ভিন্ন নাম বসানো যাবে না।
-✅ যদি একটি mnemonic শব্দের সাথে একাধিক রোগ/টার্ম যুক্ত থাকে (যেমন "কে → সিকল সেল অ্যানিমিয়া,
-   সিস্টিক ফাইব্রোসিস"), option-এ সবগুলো টার্মই রাখতে হবে — একটা বাদ দেওয়া বা কাটছাঁট করা নিষেধ।
-❌ ভুল pairing করা (এক mnemonic শব্দের সাথে অন্য শব্দের রোগ জুড়ে দেওয়া) সম্পূর্ণ নিষিদ্ধ — এটা
-   সবচেয়ে বড় ভুল যা এই টাইপের সোর্সে হয়ে থাকে, তাই MCQ লেখার আগে টেবিলের প্রতিটি সারি আবার
-   দেখে pairing যাচাই করবে।
-❌ mnemonic শব্দ (হিমুর/বা/সার/পাশে/কে/ই/থা/রূপা টাইপ ছোট শব্দ) একা কখনো option হবে না —
-   অবশ্যই "[mnemonic শব্দ] + [তার সাথে যুক্ত পূর্ণ, সঠিক রোগ/টার্মের নাম]" এই ফরম্যাটে option লিখতে হবে।
-
-════════════════════════════════
-🔠 VERBATIM SPELLING RULE (সব ধরনের সোর্সের জন্য, শুধু mnemonic টেবিল না)
-════════════════════════════════
-সোর্সে (টেবিল/টেক্সট/ছবি যেকোনো জায়গায়) যেকোনো নাম/টার্ম/শব্দ যেভাবে বানানে লেখা আছে, MCQ-র
-প্রশ্ন ও অপশনেও ঠিক সেই বানানেই হুবহু লিখতে হবে — একটি অক্ষরও পরিবর্তন, সংক্ষেপ, বা কাছাকাছি
-বানানে বদলানো যাবে না। MCQ লেখার পর প্রতিটি টার্ম সোর্সের সাথে অক্ষরে-অক্ষরে মিলিয়ে
-self-check করবে — সামান্য মিল থাকা ভিন্ন বানান (যেমন সোর্সে "ব্র্যাকিফ্যালাঞ্জি" থাকলে output-এ
-"ব্র্যাকিফ্যাংগিয়া" লেখা) সম্পূর্ণ নিষিদ্ধ।
-
-════════════════════════════════
-📋 SOURCE TERMS EXTRACTION (JSON output-এ শেষে একটি extra object দিতে হবে)
-════════════════════════════════
-MCQ array এর শেষ element হিসেবে এই object টি অবশ্যই যোগ করবে:
-{"_source_terms": ["সোর্সে থাকা গুরুত্বপূর্ণ নাম/টার্ম/রোগ/শব্দ", "..."]}
-এখানে সোর্সে যত গুরুত্বপূর্ণ বিশেষ্য/টার্ম/নাম আছে (রোগের নাম, টেকনিক্যাল টার্ম, mnemonic শব্দ
-ইত্যাদি) সবগুলো তাদের EXACT সোর্স বানানে (হুবহু) লিস্ট করে দিবে — এটা spell-check এর জন্য ব্যবহার হবে।"""
-
-
-SELF_VERIFY_THOUGHT_LOCK = """
-
-================================
-🧠 INTERNAL MULTI-STEP VERIFICATION — DO THIS SILENTLY BEFORE WRITING FINAL JSON
-================================
-এই পুরো verification একটাই call/response এর ভিতরে, নিজের ভাবনায় (internal reasoning), আউটপুটে না
-দেখিয়ে করবে। শুধু চূড়ান্ত JSON output দিবে — verification steps output এ লিখবে না।
-
-THOUGHT 1 — RULE RECAP: উপরের prompt এর প্রতিটি নিয়ম (MCQ type, count, language, source-only
-rule, spelling rule) নিজের মনে একবার পুনরাবৃত্তি করো।
-THOUGHT 2 — DRAFT: সোর্স থেকে MCQ গুলোর একটি draft বানাও।
-THOUGHT 3 — SELF-CHECK: প্রতিটি draft MCQ কে THOUGHT 1 এর নিয়মের বিপরীতে যাচাই করো — ভুল বানান,
-ভুল তথ্য, ভাষা মিসম্যাচ, prompt type না মানা, বা source এর বাইরের তথ্য আছে কিনা চেক করো।
-THOUGHT 4 — FIX: THOUGHT 3 তে যা ভুল পেয়েছো তা ঠিক করো, প্রয়োজনে অগ্রহণযোগ্য MCQ বাদ দাও।
-THOUGHT 5 — FINAL: শুধুমাত্র THOUGHT 4 এর পর যে MCQ গুলো সব নিয়ম ১০০% মেনেছে সেগুলোই চূড়ান্ত JSON
-আকারে আউটপুট দাও।
-এই ৫টি thought একই call এ, অতিরিক্ত API call ছাড়াই সম্পন্ন করবে।
-"""
+RULES (strict):
+- Use ONLY what is visible/written in the source; no outside knowledge, no guessing unclear (esp. handwritten) parts.
+- Write question, options and explanation in the SAME language & digit script as the source; never translate. Copy terms/names with exact source spelling; fix only obvious typos.
+- Mnemonic/pair tables: copy each pair verbatim; never mix pairs; a mnemonic word never stands alone as an option.
+- 10-20 MCQs (10-12 if little content, 15-20 if rich). Quality over quantity; cover all key info; no weak MCQs.
+- Exactly 4 distinct options (A-D), exactly one correct; spread the correct answer evenly across A/B/C/D.
+- Limits: question <=280 chars, each option <=95 chars, explanation <=180 chars; always complete sentences.
+- OUTPUT: ONLY a valid JSON array, nothing else. Last element: {"_source_terms": ["key terms/names in exact source spelling"]}"""
 
 QBM_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract ONLY MCQs that already exist on this page. Never invent new ones.
 
@@ -3232,7 +3131,7 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
 
         prompts = (await _db(get_prompts_from_db))
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK + SELF_VERIFY_THOUGHT_LOCK + STRICT_SOURCE_RULES
+        prompt_text = prompt_text + COMPACT_MCQ_RULES
 
         _t0 = time.time()
         response_text, provider = await ai_generate(prompt_text, image_bytes)
@@ -3262,7 +3161,7 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         while 0 < len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1 and not is_plain_text_explanation:
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
-            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।" + STRICT_SOURCE_RULES
+            retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার অবশ্যই কমপক্ষে {MIN_MCQ}টি ভিন্ন, নির্ভুল বানানের MCQ বানাও, source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করো। JSON array তে {MIN_MCQ}+ object থাকতেই হবে।"
             rt = await _call_gemini(retry_prompt, image_bytes, max_tries=1)
             rp = "gemini" if rt else ""
             if rt:
@@ -3303,7 +3202,7 @@ async def generate_mcq_from_text(text: str, prompt_type: str = 'prompt_1', maxim
 
         prompts = (await _db(get_prompts_from_db))
         prompt_text = prompts.get(prompt_type, PROMPT_MAP.get(prompt_type, PROMPT_MAP['prompt_1']))['text']
-        prompt_text = prompt_text + ACCURACY_AND_COUNT_LOCK + STRICT_LANGUAGE_LOCK + MNEMONIC_TABLE_LOCK
+        prompt_text = prompt_text + COMPACT_MCQ_RULES
         if maximize:
             prompt_text += TEXT_MAX_MCQ_EXTRA
         full_prompt = f"{prompt_text}\n\n📄 INPUT TEXT:\n{text}"
