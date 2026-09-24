@@ -397,22 +397,21 @@ async def _call_gemini_via_quizbot(prompt_text: str, image_bytes: Optional[bytes
     return None
 
 
+async def _gemini_proxy_fallback(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
+    """QuizBot proxy pool is used ONLY after local Render-env keys fail."""
+    if _gpool.proxy_available():
+        return await _call_gemini_via_quizbot(prompt_text, image_bytes)
+    return None
+
+
 async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries: Optional[int] = None) -> Optional[str]:
     """Account-wise Gemini pool: each call atomically picks the next healthy,
     least-loaded key (round-robin ACROSS accounts), so concurrent users are
     spread over all keys. A failing key is cooled down / marked dead and the
     next key is tried; every attempt uses its own cached client (no shared
     global -> no race between concurrent users)."""
-    # ── 1) QuizBot's key pool via /api/gemini-proxy (keys live only in QuizBot) ──
-    if _gpool.proxy_available():
-        _txt = await _call_gemini_via_quizbot(prompt_text, image_bytes)
-        if _txt:
-            return _txt
-    if not GEMINI_KEYS:
-        return None
-    if _gpool.all_dead():
-        log("⏭️ [gemini] all keys exhausted for today — skipping straight to next provider")
-        return None
+    if not GEMINI_KEYS or _gpool.all_dead():
+        return await _gemini_proxy_fallback(prompt_text, image_bytes)
     tries = len(GEMINI_KEYS) if max_tries is None else max(1, min(max_tries, len(GEMINI_KEYS)))
     GEMINI_ATTEMPT_TIMEOUT = float(os.getenv("GEMINI_ATTEMPT_TIMEOUT", "22"))
     GEMINI_HEDGE_AFTER = float(os.getenv("GEMINI_HEDGE_AFTER", "5"))   # slow key -> race a 2nd account's key
@@ -505,7 +504,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
     finally:
         for t in running:          # losers: don't wait, let them finish & release themselves
             t.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-    return None
+    return await _gemini_proxy_fallback(prompt_text, image_bytes)
 
 # ── permanent Gemini key bans: saved in Supabase table `gemini_banned_keys` (key_hash, reason) ──
 # SQL (run once):  create table if not exists gemini_banned_keys (key_hash text primary key, key_tail text, reason text, banned_at timestamptz default now());
