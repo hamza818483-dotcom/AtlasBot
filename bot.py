@@ -103,7 +103,7 @@ if GROQ_MODEL not in GROQ_MODELS:
     GROQ_MODELS.insert(0, GROQ_MODEL)
 
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
-OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "google/gemma-4-31b-it:free")
+OPENROUTER_QWEN_MODEL = os.getenv("OPENROUTER_QWEN_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free")
 NEMOTRON_MODEL = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
 GEMMA_MODEL = os.getenv("GEMMA_MODEL", "google/gemma-3-27b-it")
 
