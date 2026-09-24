@@ -378,7 +378,7 @@ async def _call_gemini_via_quizbot(prompt_text: str, image_bytes: Optional[bytes
         body = _gpool.build_proxy_body(prompt_text, image_bytes)
         t0 = time.time()
         async with _PROXY_SEM:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(75.0, connect=8.0)) as c:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=5.0)) as c:
                 r = await c.post(f"{_gpool.QUIZBOT_URL}/api/gemini-proxy", json=body)
         if r.status_code == 200:
             ans = (r.json() or {}).get("answer") or ""
@@ -414,8 +414,8 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
         log("⏭️ [gemini] all keys exhausted for today — skipping straight to next provider")
         return None
     tries = len(GEMINI_KEYS) if max_tries is None else max(1, min(max_tries, len(GEMINI_KEYS)))
-    GEMINI_ATTEMPT_TIMEOUT = float(os.getenv("GEMINI_ATTEMPT_TIMEOUT", "45"))
-    GEMINI_HEDGE_AFTER = float(os.getenv("GEMINI_HEDGE_AFTER", "8"))   # slow key -> race a 2nd account's key
+    GEMINI_ATTEMPT_TIMEOUT = float(os.getenv("GEMINI_ATTEMPT_TIMEOUT", "22"))
+    GEMINI_HEDGE_AFTER = float(os.getenv("GEMINI_HEDGE_AFTER", "5"))   # slow key -> race a 2nd account's key
     GEMINI_TIME_BUDGET = 100.0
     _budget_start = time.time()
     tried: set = set()
@@ -441,7 +441,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                         contents=contents,
                         config=types.GenerateContentConfig(
                             temperature=0.7, top_p=0.95, top_k=40,
-                            max_output_tokens=16384,
+                            max_output_tokens=8192,
                             thinking_config=types.ThinkingConfig(thinking_budget=0),
                         ))),
                     timeout=GEMINI_ATTEMPT_TIMEOUT)
@@ -3096,7 +3096,7 @@ async def qbm_extract_from_image(image_bytes: bytes) -> list:
 _GEN_SEM = asyncio.Semaphore(int(os.getenv("GEN_CONCURRENCY", "6")))  # RAM guard: max concurrent image->MCQ pipelines
 
 
-async def _wait_for_ram_headroom(ceiling_mb: int = 400, max_wait: float = 45.0) -> None:
+async def _wait_for_ram_headroom(ceiling_mb: int = 400, max_wait: float = 8.0) -> None:
     """Back-pressure: if process RSS is near the 512MB limit, wait (bounded)
     for it to drop before starting another heavy pipeline, instead of OOM."""
     try:
