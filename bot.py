@@ -357,7 +357,7 @@ def rotate_gemini_key():
 
 STRICT_SOURCE_RULES = """
 
-RULES: Use the given source (image/text) as the base; cover as much of its information as possible. One correct answer per question. Output ONLY valid JSON."""
+RULES: Use ONLY the given source (image/text) — no outside knowledge. Cover all key info as MCQs (quality over quantity). No weak/irrelevant MCQs. Exactly one correct answer per question. Output ONLY valid JSON, no extra text."""
 
 # Plain-text variant (no "Output: ONLY valid JSON" instruction) — used for
 # explanation-style calls (/atlas, handle_explain_from_pending) which must
@@ -1451,18 +1451,29 @@ def parse_mcq_json(response_text: str, source_text: str = "", prompt_type: str =
             mcq['question'] = q_text
             opts = [_autocorrect_option_spelling(o, source_terms) for o in opts]
             mcq['options'] = opts
+        if _violates_lethal_gene_mnemonic(mcq):
+            continue  # 🔒 Lethal gene mnemonic word paired with wrong/incomplete disease name after autocorrect
         if _mcq_violates_word_fidelity(mcq, source_text):
             continue  # 🔒 word-fidelity violation — question still uses words not found in source after autocorrect (invented/misspelled)
+        if prompt_type == 'prompt_2' and _mcq_options_violate_word_fidelity(mcq, source_text):
+            continue  # 🔒 True/False style: an option contains invented/hallucinated info not grounded in source
         if prompt_type == 'prompt_2' and any(_is_tf_banned_option(o) for o in opts):
             continue  # 🔒 True/False style: bare হ্যাঁ/না/সত্য/মিথ্যা option not allowed
+        if prompt_type == 'prompt_2' and not _is_tf_style_question(q_text):
+            continue  # 🔒 True/False style: question must use the required "বললে ভুল হবে (না)" phrasing
         # 🔒 Reject meaningless mnemonic/rhyme-fragment options (e.g. "রূপা","পাশে","থাকে","সার")
         # — single Bangla word ≤3 chars with no digits/punctuation, when ALL 4 options are like this,
         # strongly indicates a rhyme-word leak from a mnemonic table rather than real MCQ content.
         def _is_bare_fragment(o: str) -> bool:
             stripped = re.sub(r'[^\u0980-\u09FF]', '', o)
             return 1 <= len(stripped) <= 4 and stripped == o.strip()
+        if all(_is_bare_fragment(o) for o in opts):
+            continue  # 🔒 all 4 options are bare 1-3 char fragments — likely mnemonic leak, not real MCQ
         # 🔒 Reject if the question's own subject term is repeated verbatim as one of the options
         # (self-referential/contradictory, common in "X এর সাথে সম্পর্কিত নয়" style questions)
+        q_words = re.findall(r'[\u0980-\u09FF]{4,}', q_text)
+        if q_words and any(any(w == opt.strip() for w in q_words) for opt in opts):
+            continue  # 🔒 question subject reused as its own option
         seen_questions.add(q_norm)
         valid.append(mcq)
     return valid
@@ -1482,38 +1493,53 @@ def clean_option_prefix(opt: str, idx: int = 0) -> str:
 
 PROMPT_01 = """MCQ TYPE: Standard Easy
 
-পেইজ/টেক্সটের সব তথ্য (ছক/table, হাইলাইট, দাগানো, বক্স, আন্ডারলাইন, হাতে লেখা এক্সট্রা নোট সহ) কাজে লাগিয়ে যতগুলো সম্ভব ভালো MCQ বানাও; সংখ্যার সীমা নেই, তথ্য শেষ হলে থামো।
--প্রশ্ন ছোট ও সহজ; নানা ধরনের (তথ্য, সংজ্ঞা, তুলনা, কারণ-ফল, \"কোনটি নয়\")।
--৪টি অপশন, ঠিক একটি সঠিক; সঠিক উত্তর A/B/C/D-তে ছড়ানো; distractor সোর্সের কাছাকাছি তথ্য থেকে নাও।
--ব্যাখ্যা বাংলা, ছোট: কেন সঠিক, অন্যগুলো কেন ভুল।
--JSON: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]  (answer=0-3)
+-সোর্সে (ছবি/টেক্সট) MCQ বা তথ্য যাই থাকুক, সব জায়গা থেকে প্রশ্ন; ছক/table-এ অগ্রাধিকার; সব তথ্য কাজে লাগিয়ে যতগুলো সম্ভব MCQ (সংখ্যার সীমা নেই)।
+-MUST: হাইলাইট/রঙ-দাগ, বক্স, আন্ডারলাইন, হাতে দেওয়া এক্সট্রা মার্ক — এসব লাইন থেকে অবশ্যই MCQ।
+-টপিক/অধ্যায়ের নাম, হেডলাইন, পেইজ নম্বর থেকে MCQ নয়।
+-🚫 মনে রাখার ছন্দ/mnemonic-এর অর্থহীন শব্দ (রূপা/পাশে/থাকে/সার) প্রশ্ন/অপশনে নয়; শুধু সংযুক্ত আসল তথ্য (রোগ, লক্ষণ, সংজ্ঞা) নিয়ে MCQ।
+-হাবিজাবি/পুনরাবৃত্ত নয়; বেশি দরকার হলে একই তথ্য ঘুরিয়ে জিজ্ঞেস করো।
+-প্রশ্ন: ১-২ লাইন, সহজ, সব ধরনের (তথ্য, সংজ্ঞা, তুলনা, কারণ-ফল, "কোনটি নয়")।
+-অপশন: ৪টি, এক শব্দের ছোট বা ~২০% বড়; সোর্সের মিশ্র তথ্য থেকে, প্রশ্নের অংশের কাছাকাছি তথ্য থেকে distractor; ৪টিই তথ্যপূর্ণ (হ্যাঁ/না/সত্য/মিথ্যা নয়); প্রশ্নের X নিজে অপশনে নয়।
+-উত্তর: ঠিক একটি; A/B/C/D-তে ছড়ানো।
+-ব্যাখ্যা: বাংলা, max 180 char; কেন সঠিক + অন্যগুলো কেন ভুল; সব তথ্য সোর্স থেকে।
+-JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
 
 PROMPT_02 = """MCQ TYPE: True/False Style
 
-পেইজ/টেক্সটের সব তথ্য ব্যবহার করে যতগুলো সম্ভব MCQ বানাও (তথ্য শেষ হলে থামো)।
--প্রশ্নের ধরন (মিশিয়ে): \"নিচের কোনটিকে সত্য/মিথ্যা বললে ভুল হবে (না)?\" — সত্য-বললে-ভুল-হবে-না ও মিথ্যা-বললে-ভুল-হবে → উত্তর সত্য option; সত্য-বললে-ভুল-হবে ও মিথ্যা-বললে-ভুল-হবে-না → উত্তর মিথ্যা option।
--অপশন সোর্সের তথ্য-ভিত্তিক বাক্য/phrase; মিথ্যা অপশন = সোর্সের তথ্য সামান্য বদলে (সংখ্যা/নাম/negate)।
--ঠিক একটি উত্তর, A/B/C/D-তে ছড়ানো। ব্যাখ্যা বাংলা, ছোট: কোনটা সত্য/মিথ্যা ও কেন।
--JSON: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]  (answer=0-3)
+-সোর্সের সব তথ্য ব্যবহার করে যতগুলো সম্ভব MCQ (সংখ্যার সীমা নেই; তথ্য শেষ হলে থামো)।
+🚫 MANDATORY: প্রতিটি প্রশ্নে হুবহু "বললে ভুল হবে" (বা "বললে ভুল হবে না") + একই বাক্যে "সত্য"/"মিথ্যা"। শুধু এই ৪ কাঠামো, মিশিয়ে (প্যারাফ্রেজ নয়):
+- "নিচের কোনটিকে সত্য বললে ভুল হবে না?" → উত্তর আসল সত্য option
+- "নিচের কোনটিকে সত্য বললে ভুল হবে?" → উত্তর আসল মিথ্যা option
+- "নিচের কোনটিকে মিথ্যা বললে ভুল হবে?" → উত্তর আসল সত্য option
+- "নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?" → উত্তর আসল মিথ্যা option
+লেখার পর যাচাই: phrase হুবহু ও mapping ঠিক — নইলে আবার লেখো।
+-অপশন: ছোট বা বড়; সোর্সের real তথ্য থেকে; "মিথ্যা" অপশন = real তথ্য সামান্য বদলে (সংখ্যা/নাম অদলবদল/negate), কাল্পনিক নয়; ৪টিই তথ্যপূর্ণ (হ্যাঁ/না/সত্য/মিথ্যা নয়)। সত্য-চাইলে ১ সত্য+৩ মিথ্যা; মিথ্যা-চাইলে ১ মিথ্যা+৩ সত্য।
+-উত্তর: ঠিক একটি; A/B/C/D-তে ছড়ানো।
+-ব্যাখ্যা: বাংলা, max 165 char; কোনটা সত্য/মিথ্যা ও কেন; সব তথ্য সোর্স থেকে।
+-JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
 
 PROMPT_03 = """MCQ TYPE: Short Question, Long Options
 
-পেইজ/টেক্সটের সব তথ্য ব্যবহার করে যতগুলো সম্ভব MCQ বানাও (তথ্য শেষ হলে থামো)।
--প্রশ্ন ছোট, এক লাইন; অপশন ৪টি বড় বাক্য/phrase, সবই তথ্যপূর্ণ।
--ঠিক একটি সঠিক, A/B/C/D-তে ছড়ানো। ব্যাখ্যা বাংলা, ছোট: কেন সঠিক, অন্যগুলো কেন ভুল।
--JSON: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]  (answer=0-3)
+-প্রশ্ন: ছোট, এক লাইন। অপশন: ৪টি বড় (বাক্য/phrase), সবই তথ্যপূর্ণ (হ্যাঁ/না নয়)।
+-ঠিক একটি সঠিক; A/B/C/D-তে ছড়ানো।
+-ব্যাখ্যা: বাংলা, max 165 char; কেন সঠিক + অন্যগুলো কেন ভুল; সব তথ্য সোর্স থেকে।
+-সংখ্যার সীমা নেই — তথ্য যত আছে তত।
+-JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
 
-PROMPT_MIXED = """MCQ TYPE: Mixed
+PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Options)
 
-পেইজ/টেক্সটের সব তথ্য (ছক, হাইলাইট, দাগানো অংশ সহ) ব্যবহার করে যতগুলো সম্ভব MCQ বানাও; ৩ ধরন প্রায় সমান ভাগে, interleave:
- 1) Standard Easy: সহজ প্রশ্ন, ৪ অপশন।
- 2) True/False: \"নিচের কোনটিকে সত্য/মিথ্যা বললে ভুল হবে (না)?\" — সত্য-বললে-ভুল-হবে-না ও মিথ্যা-বললে-ভুল-হবে → উত্তর সত্য option; বাকি দুটি → উত্তর মিথ্যা option।
- 3) Short Q + Long Options: এক লাইনের প্রশ্ন, ৪টি বড় বাক্য/phrase অপশন।
--ঠিক একটি সঠিক, A/B/C/D-তে ছড়ানো; ব্যাখ্যা বাংলা, ছোট।
--JSON: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]  (answer=0-3)
+-সোর্সের সব তথ্য ব্যবহার করে যতগুলো সম্ভব MCQ (সংখ্যার সীমা নেই)। ৩ ধরন প্রায় সমান ভাগে, interleave (১,২,৩,১,২,৩...):
+ Type 1 (Standard Easy): সহজ প্রশ্ন, ৪ অপশন।
+ Type 2 (True/False): "নিচের কোনটিকে সত্য/মিথ্যা বললে ভুল হবে (না)?" — "সত্য বললে ভুল হবে না"→আসল সত্য option; "সত্য বললে ভুল হবে"→আসল মিথ্যা option; "মিথ্যা বললে ভুল হবে"→আসল সত্য option; "মিথ্যা বললে ভুল হবে না"→আসল মিথ্যা option।
+ Type 3 (Short Q + Long Options): এক লাইনের প্রশ্ন, ৪টি বড় বাক্য/phrase অপশন।
+-৪টি অপশনই তথ্যপূর্ণ (হ্যাঁ/না/সত্য/মিথ্যা নয়); ঠিক একটি সঠিক; A/B/C/D-তে ছড়ানো।
+-হাইলাইট/রঙ-মার্ক/আন্ডারলাইন ও ছক/table অগ্রাধিকার।
+-টপিক/অধ্যায়ের নাম, পেইজ নম্বর থেকে MCQ নয়; সব তথ্য সোর্স থেকে।
+-ব্যাখ্যা: বাংলা, max 180 char; কেন সঠিক + অন্যগুলো কেন ভুল।
+-JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
 
 PROMPT_MAP = {
@@ -2452,9 +2478,9 @@ async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: 
 COMPACT_MCQ_RULES = """
 
 RULES:
-- Base on the source only; skip unclear/unreadable parts.
-- Same language & digit script as the source; keep source spelling of terms/names.
-- 4 distinct options, one correct. Keep question, options, explanation short.
+- Use ONLY what is visible/written in the source; no outside knowledge; never guess unclear (esp. handwritten) parts.
+- Same language & digit script as the source (never translate); copy terms/names with exact source spelling.
+- Exactly 4 distinct options, one correct. Limits: question <=280, option <=95, explanation <=180 chars; complete sentences.
 - Output ONLY a valid JSON array; last element: {"_source_terms": ["key terms in exact source spelling"]}"""
 
 QBM_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract ONLY MCQs that already exist on this page. Never invent new ones.
