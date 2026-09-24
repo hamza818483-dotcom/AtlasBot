@@ -441,7 +441,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                         contents=contents,
                         config=types.GenerateContentConfig(
                             temperature=0.5, top_p=0.95, top_k=40,
-                            max_output_tokens=8192,
+                            max_output_tokens=16384,
                             thinking_config=types.ThinkingConfig(thinking_budget=0),
                             **({"response_mime_type": "application/json"} if _want_json else {}),
                         ))),
@@ -3166,6 +3166,17 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         # two more, nearly doubling total latency (52.5s for only 4 MCQs)
         # for marginal benefit. 4 MCQs is already a usable result; only
         # retry when the count is genuinely too thin (1-2) to be useful.
+        # Continuation: if output was likely cut off (dense page hit token limit), ask for the REST of the info.
+        _rt = (response_text or "").rstrip()
+        _cut = len(valid_mcqs) >= 12 and not _rt.endswith("]") and not _rt.endswith("```")
+        if _cut:
+            _done_q = "; ".join((m.get("question", "")[:40]) for m in valid_mcqs)
+            _cp = prompt_text + "\n\nএই প্রশ্নগুলো ইতিমধ্যে বানানো হয়েছে (এগুলোর তথ্য বাদ দাও): " + _done_q + "\nএবার পেইজের বাকি সব অব্যবহৃত তথ্য থেকে নতুন MCQ বানাও।"
+            _ct = await _call_gemini(_cp, image_bytes, max_tries=1)
+            if _ct:
+                _more = _dedupe_mcqs(parse_mcq_json(_ct, prompt_type=prompt_type))
+                _seen = {re.sub(r"\s+", " ", m.get("question", "")).lower() for m in valid_mcqs}
+                valid_mcqs += [m for m in _more if re.sub(r"\s+", " ", m.get("question", "")).lower() not in _seen]
         RETRY_THRESHOLD = 3  # only retry the whole AI call if genuinely too few
         attempts = 0
         # v5.11: if the AI returned 0 MCQs with a plain-text explanation
