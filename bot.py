@@ -455,7 +455,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                 _dt = time.time() - _t0
                 if resp and resp.text:
                     _gpool.mark_ok(key)
-                    _track_attempt("gemini", klabel, ok=True, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
+                    _track_attempt("gemini", klabel, ok=True, extra=f"acc={_gpool.account(key)} | asked={_GEMINI_MODEL} | served={getattr(resp, 'model_version', None) or '?'}")
                     log(f"🤖 [gemini:{klabel}|{_gpool.account(key)}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
                     return resp.text
                 _gpool.mark_cooldown(key, 20)
