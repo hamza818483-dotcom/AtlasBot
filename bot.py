@@ -459,11 +459,11 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                     log(f"🤖 [gemini:{klabel}|{_gpool.account(key)}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
                     return resp.text
                 _gpool.mark_cooldown(key, 20)
-                _track_attempt("gemini", klabel, ok=False, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
+                _track_attempt("gemini", klabel, ok=False, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL} | empty resp {_dt:.0f}s")
                 log_error(f"[gemini:{klabel}] empty response after {_dt:.1f}s")
             except asyncio.TimeoutError:
                 _gpool.mark_cooldown(key, 45)
-                _track_attempt("gemini", klabel, ok=False, exhausted=False, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
+                _track_attempt("gemini", klabel, ok=False, exhausted=False, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL} | timeout {_tmo:.0f}s")
                 log_error(f"[gemini:{klabel}] TimeoutError after {time.time()-_t0:.1f}s (limit {_tmo:.0f}s)")
             except Exception as e:
                 kind = _gpool.classify_error(e)
@@ -476,7 +476,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                     _gpool.mark_cooldown(key, 60)
                 else:
                     _gpool.mark_cooldown(key, 15)
-                _track_attempt("gemini", klabel, ok=False, exhausted=(kind == "dead"), extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
+                _track_attempt("gemini", klabel, ok=False, exhausted=(kind == "dead"), extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL} | {kind} {type(e).__name__} " + str(e)[:90].replace("\n", " "))
                 log_error(f"[gemini:{klabel}] {type(e).__name__} after {time.time()-_t0:.1f}s ({kind}): {e}")
             finally:
                 _gpool.release(key)
@@ -607,7 +607,11 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
         all_exhausted = all(
             _is_key_exhausted_today("groq", f"groq#{i+1}:{model_label}") for i in range(n_keys)
         )
+        _consec = 0   # v5.30: 3 fails in a row on same model => model-wide problem, skip remaining keys
         for k_attempt in range(n_keys):
+            if _consec >= 3:
+                log_error(f"[groq] {model_label}: 3 consecutive fails -> skipping remaining keys")
+                break
             if time.time() - _budget_start > GROQ_TIME_BUDGET:
                 return None
             key_i = (_groq_key_idx + k_attempt) % n_keys
@@ -624,6 +628,7 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
                 _groq_key_idx = key_i
                 _groq_model_idx = (_groq_model_idx + m_attempt) % n_models
                 return txt
+            _consec += 1
         # all keys tried for this model -- rotate model on next outer loop
     return None
 
@@ -661,7 +666,11 @@ async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes]
         n_keys = len(keys)
         start_k = _or_key_idx.get(name, 0)
         all_exhausted = all(_is_key_exhausted_today(name, f"{name}#{i+1}") for i in range(n_keys))
+        _consec = 0
         for k_attempt in range(n_keys):
+            if _consec >= 3:
+                log_error(f"[{name}] 3 consecutive fails -> skipping remaining keys")
+                break
             if time.time() - _or_budget_start > OR_TIME_BUDGET:
                 return None, ""
             key_i = (start_k + k_attempt) % n_keys
@@ -682,6 +691,7 @@ async def _call_openrouter_family(prompt_text: str, image_bytes: Optional[bytes]
                 _or_dead_until[name] = time.time() + 6 * 3600
                 log_error(f"[{name}] model {model} 404 (endpoint gone) -> skipping for 6h")
                 break
+            _consec += 1
         # all keys tried for this model -- rotate model on next outer loop
     return None, ""
 
@@ -914,6 +924,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                         _track_attempt(provider, key_label, ok=True, extra=f"model={model}")
                         log(f"⏱️ [{provider}:{key_label}] OK in {_dt:.1f}s ({len(txt)} chars)")
                         return txt, False
+                    _track_attempt(provider, key_label, ok=False, extra=f"model={model} | 200 empty content")
                     log_error(f"[{provider}:{key_label}] 200 but empty content after {_dt:.1f}s")
                     return None, False
                 if r.status_code == 429:
@@ -927,16 +938,16 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                     if is_tpm:
                         m = re.search(r"try again in ([\d.]+)\s*s", body_preview, re.I)
                         retry_after = float(m.group(1)) if m else 10.0
-                        _track_attempt(provider, key_label, ok=False, exhausted=False, tpm_retry_after=retry_after, extra=f"model={model}")
+                        _track_attempt(provider, key_label, ok=False, exhausted=False, tpm_retry_after=retry_after, extra=f"model={model} | 429 TPM")
                         log_error(f"[{provider}:{key_label}] 429 TPM-only (not quota exhaustion), retry in {retry_after}s: {body_preview}")
                     else:
-                        _track_attempt(provider, key_label, ok=False, exhausted=True, extra=f"model={model}")
+                        _track_attempt(provider, key_label, ok=False, exhausted=True, extra=f"model={model} | 429 " + body_preview[:70].replace("\n", " "))
                         log_error(f"[{provider}:{key_label}] 429 rate-limited/exhausted after {_dt:.1f}s: {body_preview}")
                     return None, True
                 if r.status_code in (500, 502, 503) and attempt < max_retries - 1:
                     await asyncio.sleep(0.5)
                     continue
-                _track_attempt(provider, key_label, ok=False, extra=f"model={model}")
+                _track_attempt(provider, key_label, ok=False, extra=f"model={model} | HTTP {r.status_code} " + (r.text or "")[:70].replace("\n", " "))
                 _last_http_status[key_label] = r.status_code
                 log_error(f"[{provider}:{key_label}] HTTP {r.status_code} after {_dt:.1f}s: {r.text[:200]}")
         except (httpx.TimeoutException, httpx.ConnectError) as e:
@@ -944,11 +955,11 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5)
                 continue
-            _track_attempt(provider, key_label, ok=False, extra=f"model={model}")
+            _track_attempt(provider, key_label, ok=False, extra=f"model={model} | {type(e).__name__} {_dt:.0f}s")
             log_error(f"[{provider}:{key_label}] {type(e).__name__} after {_dt:.1f}s: {e}")
         except Exception as e:
             _dt = time.time() - _t0
-            _track_attempt(provider, key_label, ok=False, extra=f"model={model}")
+            _track_attempt(provider, key_label, ok=False, extra=f"model={model} | {type(e).__name__} " + str(e)[:60].replace("\n", " "))
             log_error(f"[{provider}:{key_label}] {type(e).__name__} after {_dt:.1f}s: {e}")
             break
     return None, False
