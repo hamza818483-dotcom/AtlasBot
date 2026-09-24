@@ -2478,6 +2478,8 @@ async def _send_challenge_comparison(receiver_id: int, sender_id: int, quiz_id: 
 # ============================================================
 COMPACT_MCQ_RULES = """
 
+COVERAGE: পেইজের উপর থেকে নিচ, প্রতিটি লাইন/বাক্য/ছক-সারি/লেবেল/সংখ্যা/নাম/উদাহরণ ক্রমানুসারে পড়ো; কোনো তথ্য অব্যবহৃত রেখো না। একটি তথ্য থেকে দরকারে একাধিক ভিন্ন MCQ। সব তথ্য শেষ না হওয়া পর্যন্ত থামবে না।
+
 RULES:
 - Use ONLY what is visible/written in the source; no outside knowledge; never guess unclear (esp. handwritten) parts.
 - Same language & digit script as the source (never translate); copy terms/names with exact source spelling.
@@ -3168,10 +3170,10 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         # retry when the count is genuinely too thin (1-2) to be useful.
         # Continuation: if output was likely cut off (dense page hit token limit), ask for the REST of the info.
         _rt = (response_text or "").rstrip()
-        _cut = len(valid_mcqs) >= 12 and not _rt.endswith("]") and not _rt.endswith("```")
+        _cut = len(valid_mcqs) >= 8  # coverage pass: model often stops at 10-20 leaving info unused
         if _cut:
             _done_q = "; ".join((m.get("question", "")[:40]) for m in valid_mcqs)
-            _cp = prompt_text + "\n\nএই প্রশ্নগুলো ইতিমধ্যে বানানো হয়েছে (এগুলোর তথ্য বাদ দাও): " + _done_q + "\nএবার পেইজের বাকি সব অব্যবহৃত তথ্য থেকে নতুন MCQ বানাও।"
+            _cp = prompt_text + "\n\nএই প্রশ্নগুলো ইতিমধ্যে বানানো হয়েছে (এগুলোর তথ্য বাদ দাও): " + _done_q + "\nএবার পেইজের বাকি সব অব্যবহৃত তথ্য থেকে নতুন MCQ বানাও। যদি সত্যিই কোনো তথ্য বাকি না থাকে তবে শুধু [] দাও।"
             _ct = await _call_gemini(_cp, image_bytes, max_tries=1)
             if _ct:
                 _more = _dedupe_mcqs(parse_mcq_json(_ct, prompt_type=prompt_type))
