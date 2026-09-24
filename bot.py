@@ -405,6 +405,7 @@ async def _gemini_proxy_fallback(prompt_text: str, image_bytes: Optional[bytes])
 
 
 async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries: Optional[int] = None) -> Optional[str]:
+    _want_json = "valid JSON" in prompt_text or "JSON only" in prompt_text or "JSON array" in prompt_text
     """Account-wise Gemini pool: each call atomically picks the next healthy,
     least-loaded key (round-robin ACROSS accounts), so concurrent users are
     spread over all keys. A failing key is cooled down / marked dead and the
@@ -442,6 +443,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                             temperature=0.5, top_p=0.95, top_k=40,
                             max_output_tokens=8192,
                             thinking_config=types.ThinkingConfig(thinking_budget=0),
+                            **({"response_mime_type": "application/json"} if _want_json else {}),
                         ))),
                     timeout=GEMINI_ATTEMPT_TIMEOUT)
                 _dt = time.time() - _t0
