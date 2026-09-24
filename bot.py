@@ -384,12 +384,15 @@ async def _call_gemini_via_quizbot(prompt_text: str, image_bytes: Optional[bytes
             ans = (r.json() or {}).get("answer") or ""
             if ans.strip():
                 _gpool.proxy_mark_ok()
+                _trace_add("gemini", "quizbot-pool", True, "acc=QuizBot proxy")
                 log(f"🤖 [gemini:quizbot-pool] OK in {time.time()-t0:.1f}s ({len(ans)} chars)")
                 return ans
             _gpool.proxy_mark_fail()
+            _trace_add("gemini", "quizbot-pool", False, "empty")
             return None
         hard = r.status_code in (400, 403, 404, 503) and "secret" in (r.text or "").lower() or r.status_code in (403, 404)
         _gpool.proxy_mark_fail(hard=hard)
+        _trace_add("gemini", "quizbot-pool", False, f"HTTP {r.status_code}")
         log_error(f"[gemini:quizbot-pool] HTTP {r.status_code}: {(r.text or '')[:120]}")
     except Exception as e:
         _gpool.proxy_mark_fail()
@@ -414,9 +417,11 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
     if not GEMINI_KEYS or _gpool.all_dead():
         return await _gemini_proxy_fallback(prompt_text, image_bytes)
     tries = len(GEMINI_KEYS) if max_tries is None else max(1, min(max_tries, len(GEMINI_KEYS)))
-    GEMINI_ATTEMPT_TIMEOUT = float(os.getenv("GEMINI_ATTEMPT_TIMEOUT", "22"))
-    GEMINI_HEDGE_AFTER = float(os.getenv("GEMINI_HEDGE_AFTER", "5"))   # slow key -> race a 2nd account's key
-    GEMINI_TIME_BUDGET = 100.0
+    GEMINI_ATTEMPT_TIMEOUT = float(os.getenv("GEMINI_ATTEMPT_TIMEOUT", "13"))
+    GEMINI_HEDGE_AFTER = float(os.getenv("GEMINI_HEDGE_AFTER", "4"))   # slow key -> race a 2nd account's key
+    GEMINI_TIME_BUDGET = float(os.getenv("GEMINI_TIME_BUDGET", "18"))
+    GEMINI_MAX_HEDGE = int(os.getenv("GEMINI_MAX_HEDGE", "2"))
+    _hedges = 0
     _budget_start = time.time()
     tried: set = set()
     img_obj = None
@@ -434,10 +439,11 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
         async def _run():
             _t0 = time.time()
             klabel = _gpool.label(key)
+            _tmo = max(6.0, min(GEMINI_ATTEMPT_TIMEOUT, GEMINI_TIME_BUDGET - (_t0 - _budget_start)))
             try:
                 resp = await asyncio.wait_for(
                     loop.run_in_executor(None, lambda: cli.models.generate_content(
-                        model="gemini-3.6-flash",
+                        model=_GEMINI_MODEL,
                         contents=contents,
                         config=types.GenerateContentConfig(
                             temperature=0.5, top_p=0.95, top_k=40,
@@ -445,20 +451,20 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                             thinking_config=types.ThinkingConfig(thinking_budget=0),
                             **({"response_mime_type": "application/json"} if _want_json else {}),
                         ))),
-                    timeout=GEMINI_ATTEMPT_TIMEOUT)
+                    timeout=_tmo)
                 _dt = time.time() - _t0
                 if resp and resp.text:
                     _gpool.mark_ok(key)
-                    _track_attempt("gemini", klabel, ok=True)
+                    _track_attempt("gemini", klabel, ok=True, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
                     log(f"🤖 [gemini:{klabel}|{_gpool.account(key)}] OK in {_dt:.1f}s ({len(resp.text)} chars)")
                     return resp.text
                 _gpool.mark_cooldown(key, 20)
-                _track_attempt("gemini", klabel, ok=False)
+                _track_attempt("gemini", klabel, ok=False, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
                 log_error(f"[gemini:{klabel}] empty response after {_dt:.1f}s")
             except asyncio.TimeoutError:
                 _gpool.mark_cooldown(key, 45)
-                _track_attempt("gemini", klabel, ok=False, exhausted=False)
-                log_error(f"[gemini:{klabel}] TimeoutError after {time.time()-_t0:.1f}s (limit {GEMINI_ATTEMPT_TIMEOUT}s)")
+                _track_attempt("gemini", klabel, ok=False, exhausted=False, extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
+                log_error(f"[gemini:{klabel}] TimeoutError after {time.time()-_t0:.1f}s (limit {_tmo:.0f}s)")
             except Exception as e:
                 kind = _gpool.classify_error(e)
                 if _gpool.is_permanent_error(e):
@@ -470,7 +476,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                     _gpool.mark_cooldown(key, 60)
                 else:
                     _gpool.mark_cooldown(key, 15)
-                _track_attempt("gemini", klabel, ok=False, exhausted=(kind == "dead"))
+                _track_attempt("gemini", klabel, ok=False, exhausted=(kind == "dead"), extra=f"acc={_gpool.account(key)} | model={_GEMINI_MODEL}")
                 log_error(f"[gemini:{klabel}] {type(e).__name__} after {time.time()-_t0:.1f}s ({kind}): {e}")
             finally:
                 _gpool.release(key)
@@ -496,7 +502,8 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                 res = t.result()
                 if res:
                     return res
-            if not done and launched < tries:
+            if not done and launched < tries and _hedges < GEMINI_MAX_HEDGE:
+                _hedges += 1
                 # slow: race one more key (different account thanks to pick()'s round-robin)
                 key = _gpool.pick(exclude=tried)
                 if key is not None:
@@ -743,6 +750,38 @@ def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 640, jpeg_qualit
 # Tracks per-key success/fail/exhausted counts for the current BD-day.
 # In-memory (resets on restart) + reset daily at BD midnight.
 # ============================================================
+import contextvars as _cv
+_CALL_TRACE = _cv.ContextVar("_call_trace", default=None)   # admin debug: per-request AI call log
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
+def _trace_add(provider: str, key_label: str, ok: bool, extra: str = "") -> None:
+    try:
+        tr = _CALL_TRACE.get()
+        if tr is not None and provider:
+            tr["calls"].append({"p": provider, "k": key_label or "", "ok": ok, "x": extra or "",
+                                "t": time.time() - tr["t0"]})
+    except Exception:
+        pass
+
+def _format_call_trace(tr: dict, total: float) -> str:
+    calls = tr.get("calls", [])
+    ok = [c for c in calls if c["ok"]]
+    lines = ["🛠 Admin Debug", f"⏱ Total: {total:.1f}s"]
+    if not calls:
+        lines.append("⚡ Cache hit — কোনো AI call হয়নি")
+        return "\n".join(lines)
+    w = ok[-1] if ok else None
+    if w:
+        lines.append(f"✅ Final: {w['p']} | {w['k']}" + (f" | {w['x']}" if w['x'] else ""))
+    else:
+        lines.append("❌ কোনো call সফল হয়নি")
+    lines.append(f"📞 Calls: {len(calls)} (✅{len(ok)} ❌{len(calls)-len(ok)})")
+    for i, c in enumerate(calls[:20], 1):
+        lines.append(f"{i}. {'✅' if c['ok'] else '❌'} {c['p']} · {c['k']}" + (f" · {c['x']}" if c['x'] else "") + f" · @{c['t']:.1f}s")
+    if len(calls) > 20:
+        lines.append(f"... +{len(calls)-20} more")
+    return "\n".join(lines)
+
 _provider_stats: Dict[str, Dict] = {}
 _provider_stats_day = datetime.now(BD_TZ).strftime('%Y-%m-%d')
 
@@ -764,9 +803,10 @@ def _reset_provider_stats_if_new_day():
         _provider_stats = {}
         _provider_stats_day = today
 
-def _track_attempt(provider: str, key_label: str, ok: bool, exhausted: bool = False, tpm_retry_after: float = None):
+def _track_attempt(provider: str, key_label: str, ok: bool, exhausted: bool = False, tpm_retry_after: float = None, extra: str = ""):
     if not provider:
         return
+    _trace_add(provider, key_label, ok, extra)
     _reset_provider_stats_if_new_day()
     p = _provider_stats.setdefault(provider, {})
     k = p.setdefault(key_label or provider, {"ok": 0, "fail": 0, "exhausted": False, "last": "", "consec_fail": 0, "cooldown_until": 0.0})
@@ -871,7 +911,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                     data = r.json()
                     txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     if txt:
-                        _track_attempt(provider, key_label, ok=True)
+                        _track_attempt(provider, key_label, ok=True, extra=f"model={model}")
                         log(f"⏱️ [{provider}:{key_label}] OK in {_dt:.1f}s ({len(txt)} chars)")
                         return txt, False
                     log_error(f"[{provider}:{key_label}] 200 but empty content after {_dt:.1f}s")
@@ -887,16 +927,16 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
                     if is_tpm:
                         m = re.search(r"try again in ([\d.]+)\s*s", body_preview, re.I)
                         retry_after = float(m.group(1)) if m else 10.0
-                        _track_attempt(provider, key_label, ok=False, exhausted=False, tpm_retry_after=retry_after)
+                        _track_attempt(provider, key_label, ok=False, exhausted=False, tpm_retry_after=retry_after, extra=f"model={model}")
                         log_error(f"[{provider}:{key_label}] 429 TPM-only (not quota exhaustion), retry in {retry_after}s: {body_preview}")
                     else:
-                        _track_attempt(provider, key_label, ok=False, exhausted=True)
+                        _track_attempt(provider, key_label, ok=False, exhausted=True, extra=f"model={model}")
                         log_error(f"[{provider}:{key_label}] 429 rate-limited/exhausted after {_dt:.1f}s: {body_preview}")
                     return None, True
                 if r.status_code in (500, 502, 503) and attempt < max_retries - 1:
                     await asyncio.sleep(0.5)
                     continue
-                _track_attempt(provider, key_label, ok=False)
+                _track_attempt(provider, key_label, ok=False, extra=f"model={model}")
                 _last_http_status[key_label] = r.status_code
                 log_error(f"[{provider}:{key_label}] HTTP {r.status_code} after {_dt:.1f}s: {r.text[:200]}")
         except (httpx.TimeoutException, httpx.ConnectError) as e:
@@ -904,11 +944,11 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5)
                 continue
-            _track_attempt(provider, key_label, ok=False)
+            _track_attempt(provider, key_label, ok=False, extra=f"model={model}")
             log_error(f"[{provider}:{key_label}] {type(e).__name__} after {_dt:.1f}s: {e}")
         except Exception as e:
             _dt = time.time() - _t0
-            _track_attempt(provider, key_label, ok=False)
+            _track_attempt(provider, key_label, ok=False, extra=f"model={model}")
             log_error(f"[{provider}:{key_label}] {type(e).__name__} after {_dt:.1f}s: {e}")
             break
     return None, False
@@ -940,7 +980,7 @@ async def _call_cf_workers_ai(prompt_text: str, image_bytes: Optional[bytes]) ->
                 data = r.json()
                 txt = (data.get("result") or {}).get("response", "")
                 if txt:
-                    _track_attempt("cf-workers-ai", "cf#1", ok=True)
+                    _track_attempt("cf-workers-ai", "cf#1", ok=True, extra="model=llama-3.2-vision")
                     log(f"⏱️ [cf-workers-ai:cf#1] OK in {_dt:.1f}s ({len(txt)} chars)")
                     return txt
                 log_error(f"[cf-workers-ai:cf#1] 200 but empty response after {_dt:.1f}s: {str(data)[:200]}")
@@ -3180,7 +3220,7 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
             len(response_text.strip()) < 500 and
             '{' not in response_text and '[' not in response_text
         )
-        while 0 < len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1 and not is_plain_text_explanation:
+        while 0 < len(valid_mcqs) < RETRY_THRESHOLD and attempts < 1 and not is_plain_text_explanation and (time.time() - _T0) < 10:
             attempts += 1
             log(f"⚠️ Only {len(valid_mcqs)} MCQs (attempt {attempts}) — retrying for more (prompt: {prompt_type})")
             retry_prompt = prompt_text + f"\n\n🔴 আগের চেষ্টায় খুব কম প্রশ্ন এসেছে (মাত্র {len(valid_mcqs)}টি)। এবার source (ছবির প্রতিটি অংশ) থেকে যথাসম্ভব বেশি তথ্য ব্যবহার করে যতগুলো সম্ভব ভিন্ন, নির্ভুল বানানের MCQ বানাও।"
@@ -4873,8 +4913,16 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
     async def _edit_cap(t):
         await query.message.edit_caption(caption=t)
     type_label = (await _db(get_prompt_display_name, prompt_type))
-    prog_task = asyncio.create_task(live_progress_task(_edit_cap, "Image", total_eta=8, type_label=type_label))
+    prog_task = asyncio.create_task(live_progress_task(_edit_cap, "Image", total_eta=12, type_label=type_label))
     _gen_start = time.time()
+    _tr = {"t0": _gen_start, "calls": []}
+    _CALL_TRACE.set(_tr)
+    async def _admin_trace():
+        if is_admin(user_id):
+            try:
+                await query.message.chat.send_message(_format_call_trace(_tr, time.time() - _gen_start))
+            except Exception as _e:
+                log_error(f"admin trace send failed: {_e}")
     try:
         mcqs, error = await generate_mcq_from_image(image_bytes, prompt_type)
         gen_elapsed = time.time() - _gen_start
@@ -4951,6 +4999,9 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
             await query.message.edit_caption(caption=BUSY_MSG)
         except Exception:
             pass
+    finally:
+        if is_admin(user_id):
+            asyncio.create_task(_admin_trace())
 
 # ── v4.0: Creative (জ্ঞানমূলক/অনুধাবনমূলক) from fresh image ──
 EXPLAIN_IMAGE_PROMPT = """তুমি একজন অভিজ্ঞ শিক্ষক। এই ছবিতে যা আছে (টপিক/প্যারাগ্রাফ অথবা MCQ প্রশ্ন) তা বিস্তারিতভাবে ব্যাখ্যা করো।
