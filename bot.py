@@ -440,7 +440,7 @@ async def _call_gemini(prompt_text: str, image_bytes: Optional[bytes], max_tries
                         model="gemini-3.6-flash",
                         contents=contents,
                         config=types.GenerateContentConfig(
-                            temperature=0.7, top_p=0.95, top_k=40,
+                            temperature=0.5, top_p=0.95, top_k=40,
                             max_output_tokens=8192,
                             thinking_config=types.ThinkingConfig(thinking_budget=0),
                         ))),
@@ -685,7 +685,7 @@ def _b64_data_url(image_bytes: bytes) -> str:
         mime = "image/webp"
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
-def _ingest_shrink(image_bytes: bytes, max_dim: int = 1600, quality: int = 85) -> bytes:
+def _ingest_shrink(image_bytes: bytes, max_dim: int = 1200, quality: int = 80) -> bytes:
     """RAM guard: shrink oversized uploads (phone photos / image documents)
     ONCE at ingest so every later PIL/Gemini/Groq step works on a small image.
     Uses draft() for JPEG so the full-size bitmap is never decoded. Falls back
@@ -1501,7 +1501,7 @@ PROMPT_01 = """MCQ TYPE: Standard Easy
 -প্রশ্ন: ১-২ লাইন, সহজ, সব ধরনের (তথ্য, সংজ্ঞা, তুলনা, কারণ-ফল, "কোনটি নয়")।
 -অপশন: ৪টি, এক শব্দের ছোট বা ~২০% বড়; সোর্সের মিশ্র তথ্য থেকে, প্রশ্নের অংশের কাছাকাছি তথ্য থেকে distractor; ৪টিই তথ্যপূর্ণ (হ্যাঁ/না/সত্য/মিথ্যা নয়); প্রশ্নের X নিজে অপশনে নয়।
 -উত্তর: ঠিক একটি; A/B/C/D-তে ছড়ানো।
--ব্যাখ্যা: বাংলা, max 180 char; কেন সঠিক + অন্যগুলো কেন ভুল; সব তথ্য সোর্স থেকে।
+-ব্যাখ্যা: বাংলা, খুব ছোট (১ লাইন, max 90 char); শুধু কেন সঠিক; সব তথ্য সোর্স থেকে।
 -JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
 
@@ -1516,7 +1516,7 @@ PROMPT_02 = """MCQ TYPE: True/False Style
 লেখার পর যাচাই: phrase হুবহু ও mapping ঠিক — নইলে আবার লেখো।
 -অপশন: ছোট বা বড়; সোর্সের real তথ্য থেকে; "মিথ্যা" অপশন = real তথ্য সামান্য বদলে (সংখ্যা/নাম অদলবদল/negate), কাল্পনিক নয়; ৪টিই তথ্যপূর্ণ (হ্যাঁ/না/সত্য/মিথ্যা নয়)। সত্য-চাইলে ১ সত্য+৩ মিথ্যা; মিথ্যা-চাইলে ১ মিথ্যা+৩ সত্য।
 -উত্তর: ঠিক একটি; A/B/C/D-তে ছড়ানো।
--ব্যাখ্যা: বাংলা, max 165 char; কোনটা সত্য/মিথ্যা ও কেন; সব তথ্য সোর্স থেকে।
+-ব্যাখ্যা: বাংলা, খুব ছোট (১ লাইন, max 90 char); সব তথ্য সোর্স থেকে।
 -JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
 
@@ -1524,7 +1524,7 @@ PROMPT_03 = """MCQ TYPE: Short Question, Long Options
 
 -প্রশ্ন: ছোট, এক লাইন। অপশন: ৪টি বড় (বাক্য/phrase), সবই তথ্যপূর্ণ (হ্যাঁ/না নয়)।
 -ঠিক একটি সঠিক; A/B/C/D-তে ছড়ানো।
--ব্যাখ্যা: বাংলা, max 165 char; কেন সঠিক + অন্যগুলো কেন ভুল; সব তথ্য সোর্স থেকে।
+-ব্যাখ্যা: বাংলা, খুব ছোট (১ লাইন, max 90 char); শুধু কেন সঠিক; সব তথ্য সোর্স থেকে।
 -সংখ্যার সীমা নেই — তথ্য যত আছে তত।
 -JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
@@ -1538,7 +1538,7 @@ PROMPT_MIXED = """MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Opt
 -৪টি অপশনই তথ্যপূর্ণ (হ্যাঁ/না/সত্য/মিথ্যা নয়); ঠিক একটি সঠিক; A/B/C/D-তে ছড়ানো।
 -হাইলাইট/রঙ-মার্ক/আন্ডারলাইন ও ছক/table অগ্রাধিকার।
 -টপিক/অধ্যায়ের নাম, পেইজ নম্বর থেকে MCQ নয়; সব তথ্য সোর্স থেকে।
--ব্যাখ্যা: বাংলা, max 180 char; কেন সঠিক + অন্যগুলো কেন ভুল।
+-ব্যাখ্যা: বাংলা, খুব ছোট (১ লাইন, max 90 char); শুধু কেন সঠিক।
 -JSON only: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":0,"explanation":"..."}] (answer=0-3)
 """
 
@@ -2480,8 +2480,8 @@ COMPACT_MCQ_RULES = """
 RULES:
 - Use ONLY what is visible/written in the source; no outside knowledge; never guess unclear (esp. handwritten) parts.
 - Same language & digit script as the source (never translate); copy terms/names with exact source spelling.
-- Exactly 4 distinct options, one correct. Limits: question <=280, option <=95, explanation <=180 chars; complete sentences.
-- Output ONLY a valid JSON array; last element: {"_source_terms": ["key terms in exact source spelling"]}"""
+- Exactly 4 distinct options, one correct. Limits: question <=280, option <=95, explanation <=90 chars; complete sentences.
+- Output ONLY a valid JSON array."""
 
 QBM_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract ONLY MCQs that already exist on this page. Never invent new ones.
 
