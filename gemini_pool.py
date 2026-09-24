@@ -196,7 +196,9 @@ _banned: set = set()
 _ban_persist_cb = None        # set by bot.py: fn(key, reason) -> saves to DB (best effort)
 _PERM_MARKERS = ("consumer_suspended", "has been suspended", "suspended",
                  "permission_denied", "api key not valid", "api_key_invalid",
-                 "api key expired", "key has been disabled", "project has been denied")
+                 "api key expired", "key has been disabled", "project has been denied",
+                 "account_state_invalid", "bound service account is deleted",
+                 "bound service account is disabled", "service account is deleted or disabled")
 
 
 def is_banned(key: str) -> bool:
@@ -237,7 +239,8 @@ def classify_error(err: Exception) -> str:
     """'dead' (quota/suspended for the day) | 'cool' (rate limit / transient) | 'other'."""
     es = str(err).lower()
     if any(s in es for s in ("suspended", "permission_denied", "consumer_suspended",
-                              "api key not valid", "api_key_invalid")):
+                              "api key not valid", "api_key_invalid",
+                              "account_state_invalid", "bound service account")):
         return "dead"
     if any(s in es for s in ("per day", "daily", "quota", "resource_exhausted", "429")):
         # per-minute limits look the same; treat short-window ones as cooldown
