@@ -3168,17 +3168,6 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         # two more, nearly doubling total latency (52.5s for only 4 MCQs)
         # for marginal benefit. 4 MCQs is already a usable result; only
         # retry when the count is genuinely too thin (1-2) to be useful.
-        # Continuation: if output was likely cut off (dense page hit token limit), ask for the REST of the info.
-        _rt = (response_text or "").rstrip()
-        _cut = len(valid_mcqs) >= 8  # coverage pass: model often stops at 10-20 leaving info unused
-        if _cut:
-            _done_q = "; ".join((m.get("question", "")[:40]) for m in valid_mcqs)
-            _cp = prompt_text + "\n\nএই প্রশ্নগুলো ইতিমধ্যে বানানো হয়েছে (এগুলোর তথ্য বাদ দাও): " + _done_q + "\nএবার পেইজের বাকি সব অব্যবহৃত তথ্য থেকে নতুন MCQ বানাও। যদি সত্যিই কোনো তথ্য বাকি না থাকে তবে শুধু [] দাও।"
-            _ct = await _call_gemini(_cp, image_bytes, max_tries=1)
-            if _ct:
-                _more = _dedupe_mcqs(parse_mcq_json(_ct, prompt_type=prompt_type))
-                _seen = {re.sub(r"\s+", " ", m.get("question", "")).lower() for m in valid_mcqs}
-                valid_mcqs += [m for m in _more if re.sub(r"\s+", " ", m.get("question", "")).lower() not in _seen]
         RETRY_THRESHOLD = 3  # only retry the whole AI call if genuinely too few
         attempts = 0
         # v5.11: if the AI returned 0 MCQs with a plain-text explanation
