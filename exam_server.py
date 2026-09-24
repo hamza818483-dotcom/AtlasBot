@@ -134,7 +134,7 @@ def _rotate_exam_key():
     """Legacy no-op: rotation is per-call inside gemini_pool."""
     return None
 
-def _gemini_generate(contents, config, model="gemini-2.5-flash"):
+def _gemini_generate(contents, config, model="gemini-3.5-flash"):
     """One Gemini call through the account-wise pool with automatic failover
     to the next healthy key. Blocking (call from a worker thread)."""
     # 1) QuizBot's shared pool via /api/gemini-proxy (keys live only in QuizBot)
