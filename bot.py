@@ -736,13 +736,19 @@ def _ingest_shrink(image_bytes: bytes, max_dim: int = 1200, quality: int = 80) -
         return image_bytes
 
 
-def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 640, jpeg_quality: int = 50) -> bytes:
-    """v5.5/v5.31: Groq's TPM limit (18,000 tokens/min for qwen3.8-27b, free
-    tier) — a flat 2,000 input tokens per image regardless of resolution,
-    so downscaling doesn't cut token cost. It's kept to avoid literal
-    oversized-payload 413s and reduce upload time; the real per-minute
-    ceiling is tokens (18,000 / 2,000 ≈ 8-9 images/minute), not payload
-    size. Falls back to the original bytes if anything goes wrong."""
+def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 1600, jpeg_quality: int = 82) -> bytes:
+    """v5.5/v5.31/v5.33: Groq's TPM limit (18,000 tokens/min for qwen3.8-27b,
+    free tier) charges a FLAT 2,000 input tokens per image regardless of
+    resolution — so the old aggressive 640px/50%q downscale bought nothing
+    on token cost and instead made dense Bangla text illegible, causing the
+    model to hallucinate content instead of reading the actual page
+    (confirmed real-world failure: asbestos-formula/Aqua-Regia/rose-pink-
+    crystal MCQs generated from a page that was actually about lab heating
+    equipment). Now that Groq is PRIMARY, this bit hard on every request.
+    Raised to 1600px/82%q — still caps literal payload size (avoids 413s)
+    and keeps upload fast, but keeps small/handwritten Bangla text legible
+    for accurate OCR/MCQ extraction. Falls back to the original bytes if
+    anything goes wrong."""
     try:
         img = Image.open(BytesIO(image_bytes))
         img = img.convert("RGB")
