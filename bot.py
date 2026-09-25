@@ -560,7 +560,7 @@ def _speed_record(**kw):
 _groq_key_idx = 0
 _groq_model_idx = 0
 
-async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional[str]:
+async def _call_groq(prompt_text: str, image_bytes: Optional[bytes], mcq_count_hint: Optional[int] = None, key_offset: int = 0) -> Optional[str]:
     """v4.2: Groq PRIMARY provider — smooth key rotation x model rotation.
     On rate-limit/failure, tries the next key; once all keys are exhausted for
     the current model, rotates to the next model and retries all keys again.
@@ -624,7 +624,7 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
                 break
             if time.time() - _budget_start > GROQ_TIME_BUDGET:
                 return None
-            key_i = (_groq_key_idx + k_attempt) % n_keys
+            key_i = (_groq_key_idx + key_offset + k_attempt) % n_keys
             k = GROQ_KEYS[key_i]
             klabel = f"groq#{key_i+1}:{model_label}"
             if not all_exhausted and _is_key_exhausted_today("groq", klabel):
@@ -632,7 +632,7 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
             txt, exhausted = await _call_openai_compat(
                 "https://api.groq.com/openai/v1", k, model,
                 prompt_text, groq_image_bytes, provider="groq", key_label=klabel,
-                mcq_count_hint=MAX_MCQ
+                mcq_count_hint=(mcq_count_hint if mcq_count_hint is not None else MAX_MCQ)
             )
             if txt:
                 _groq_key_idx = key_i
@@ -907,7 +907,7 @@ async def _call_openai_compat(base_url: str, api_key: str, model: str,
     # ones. ~175 tokens per MCQ (Bangla question + 4 options + explanation)
     # plus a fixed buffer, clamped to a safe range.
     if mcq_count_hint:
-        max_tok = max(900, min(3800, int(mcq_count_hint) * 175 + 300))
+        max_tok = max(300, min(3800, int(mcq_count_hint) * 175 + 300))
     else:
         max_tok = 4096
     payload = {
@@ -1108,10 +1108,10 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     return None, ""
 
 
-SPLIT3_MCQ_CAP = 4  # v6.0: per-sub-request MCQ cap so each Groq call's
-# max_tokens (~4*175+300=1000) stays comfortably inside low-tier TPM/output
-# limits; the 3 parallel calls collectively cover more ground per image
-# than one large call would under the same per-request output ceiling.
+SPLIT3_MCQ_CAP = 3  # v6.1: Groq's actual limit is OTPM (output tokens/min)
+# = 1000, not a per-request max_tokens cap. 3*175+300=825 tokens/request,
+# leaving headroom so 3 near-simultaneous calls on the SAME key don't each
+# individually exceed the shared 1000 OTPM/minute budget.
 
 
 async def ai_generate_split3(prompt_text: str, image_bytes: Optional[bytes]) -> Tuple[Optional[str], str, List[str]]:
@@ -1131,11 +1131,13 @@ async def ai_generate_split3(prompt_text: str, image_bytes: Optional[bytes]) -> 
     ]
     cap_note = f"\n\nSPLIT MODE: এই কলে সর্বোচ্চ {SPLIT3_MCQ_CAP}টি MCQ দাও। শুধু {{FOCUS}} থেকে। বাকি অংশ অন্য কল কভার করছে, তাই ওভারল্যাপ এড়াও।"
     tasks = []
-    for focus_instr, focus_label in parts:
+    for idx, (focus_instr, focus_label) in enumerate(parts):
         part_prompt = prompt_text + cap_note.replace("{FOCUS}", focus_label) + f"\n{focus_instr}"
         tasks.append(_call_groq(
             part_prompt if 'RULES (strict):' in part_prompt else part_prompt + STRICT_SOURCE_RULES,
             image_bytes,
+            mcq_count_hint=SPLIT3_MCQ_CAP,
+            key_offset=idx,
         ))
     results = await asyncio.gather(*tasks, return_exceptions=True)
     all_texts: List[str] = []
