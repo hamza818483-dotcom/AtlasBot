@@ -4871,11 +4871,11 @@ async def handle_text_mcq_generation(query, mode: str, context: ContextTypes.DEF
         mcqs, error = await generate_mcq_from_text(text, 'prompt_1', maximize=is_max)
         prog_task.cancel()
         if error:
-            retry_kb = [[InlineKeyboardButton("🔄 আবার চেষ্টা করুন", callback_data=f"txtmcq_{mode}")]]
+            retry_kb = [[InlineKeyboardButton("🔄 Send Again", callback_data=f"txtmcq_{mode}")]]
             await query.message.edit_text(f"❌ MCQ বানাতে সমস্যা হয়েছে: {error}", reply_markup=InlineKeyboardMarkup(retry_kb))
             return
         if not mcqs:
-            retry_kb = [[InlineKeyboardButton("🔄 আবার চেষ্টা করুন", callback_data=f"txtmcq_{mode}")]]
+            retry_kb = [[InlineKeyboardButton("🔄 Send Again", callback_data=f"txtmcq_{mode}")]]
             await query.message.edit_text("❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।", reply_markup=InlineKeyboardMarkup(retry_kb))
             return
         src_hash = hashlib.md5(text.encode('utf-8')).hexdigest() + f"_prompt_1_{'max' if is_max else 'sel'}"
@@ -4981,11 +4981,11 @@ async def handle_mcq_generation(query, prompt_type: str, context: ContextTypes.D
                 )
             return
         if error:
-            retry_kb = [[InlineKeyboardButton("🔄 আবার চেষ্টা করুন", callback_data=f"genmcq_{prompt_type}")]]
+            retry_kb = [[InlineKeyboardButton("🔄 Send Again", callback_data=f"genmcq_{prompt_type}")]]
             await query.message.edit_caption(caption=f"❌ {error}", reply_markup=InlineKeyboardMarkup(retry_kb))
             return
         if not mcqs:
-            retry_kb = [[InlineKeyboardButton("🔄 আবার চেষ্টা করুন", callback_data=f"genmcq_{prompt_type}")]]
+            retry_kb = [[InlineKeyboardButton("🔄 Send Again", callback_data=f"genmcq_{prompt_type}")]]
             await query.message.edit_caption(caption="❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য দিন।", reply_markup=InlineKeyboardMarkup(retry_kb))
             return
         image_file_id = context.user_data.get('pending_image_file_id', '')
@@ -5675,7 +5675,7 @@ async def handle_new_practice(query, user, mode: str, quiz_id: str) -> None:
         if error or not mcqs:
             err_msg = error or "MCQ তৈরি করতে সমস্যা হয়েছে।"
             retry_prefix = "newq_" if mode == "quiz" else "newp_"
-            retry_kb = [[InlineKeyboardButton("🔄 আবার চেষ্টা করুন", callback_data=f"{retry_prefix}{quiz_id}")]]
+            retry_kb = [[InlineKeyboardButton("🔄 Send Again", callback_data=f"{retry_prefix}{quiz_id}")]]
             await wait_msg.edit_text(f"❌ {err_msg}", reply_markup=InlineKeyboardMarkup(retry_kb))
             return
         random.shuffle(mcqs)
