@@ -1295,6 +1295,25 @@ def _is_tf_style_question(q: str) -> bool:
 
 _BN_WORD_RE = re.compile(r'[\u0980-\u09FF]+')
 
+def _ocr_ground_truth(image_bytes: bytes) -> str:
+    """v5.35: cheap local OCR (pytesseract, zero AI cost, ~1-2s) to get
+    independent ground-truth text from the source image, so generated MCQs
+    can be checked against what's ACTUALLY on the page — catches the model
+    inventing/hallucinating content instead of reading the real image.
+    Returns '' on any failure (missing binary, unreadable image, etc) so
+    callers safely skip the fidelity check rather than false-flagging."""
+    try:
+        import pytesseract
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")
+        try:
+            return pytesseract.image_to_string(img, lang="ben+eng")
+        except Exception:
+            return pytesseract.image_to_string(img, lang="eng")
+    except Exception as e:
+        log_error(f"_ocr_ground_truth failed (skipping fidelity check): {e}")
+        return ""
+
+
 def _mcq_violates_word_fidelity(mcq: Dict, source_text: str) -> bool:
     """v5.1: if OCR ground-truth text is available, flag MCQs whose question
     contains Bengali words that don't appear anywhere in the source — catches
@@ -3231,6 +3250,20 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         _tp = time.time()
         valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
+        # v5.35: code-level fidelity check — run OCR on the source image
+        # (independent of the AI) and drop any MCQ whose question/options
+        # are mostly words NOT present in the actual page. Runs off the
+        # main event loop since pytesseract is blocking/CPU-bound.
+        _ocr_text = await asyncio.to_thread(_ocr_ground_truth, image_bytes)
+        if _ocr_text and len(_ocr_text.strip()) >= 10:
+            _before = len(valid_mcqs)
+            valid_mcqs = [
+                m for m in valid_mcqs
+                if not _mcq_violates_word_fidelity(m, _ocr_text)
+                and not _mcq_options_violate_word_fidelity(m, _ocr_text)
+            ]
+            if len(valid_mcqs) < _before:
+                log_error(f"[genmcq] fidelity check dropped {_before - len(valid_mcqs)} hallucinated MCQ(s) (image, prompt={prompt_type})")
         log(f"⏱️ [genmcq] parse={time.time()-_tp:.2f}s mcqs={len(valid_mcqs)}")
         _speed_record(kind=prompt_type, db=_T_DB, ai=_T_AI, prov=(provider or "NONE"),
                       img=len(image_bytes)//1024, plen=len(prompt_text), n=len(valid_mcqs),

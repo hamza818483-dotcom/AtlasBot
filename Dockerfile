@@ -5,6 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-color-emoji \
     curl \
     ca-certificates \
+    tesseract-ocr \
+    tesseract-ocr-ben \
+    tesseract-ocr-eng \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

@@ -10,5 +10,6 @@ certifi
 pytz
 psutil
 telethon
+pytesseract
 # PDF features disabled (RAM). To re-enable set PDF_FEATURES_ENABLED=1 + PDF_RENDER_ENABLED=1
 # and add back: pypdf pdf2image reportlab weasyprint playwright (+ chromium/poppler in Dockerfile)
