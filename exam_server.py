@@ -978,6 +978,25 @@ async def api_premium_pdf_post(request: Request):
 # ============================================================
 # SECTION 11.3: Premium PDF API — GET (bot.py)
 # ============================================================
+@app.get("/api/premium-pdf-html/{cache_id}")
+async def api_premium_pdf_html(cache_id: str):
+    """Browser-side Premium PDF: returns raw HTML instantly (no chromium/
+    weasyprint, works even with PDF_RENDER_ENABLED=0). Client renders this
+    via html2pdf.js in-browser, same pattern as /api/solve-pdf-html."""
+    try:
+        data = (await _db(_get_exam, cache_id))
+        if not data:
+            return JSONResponse({"ok": False, "message": "Exam পাওয়া যায়নি।"}, status_code=404)
+        mcqs = data.get("mcqs", [])
+        if not mcqs:
+            return JSONResponse({"ok": False, "message": "কোনো MCQ নেই।"}, status_code=404)
+        html = generate_premium_pdf_html(mcqs, "ATLAS Practice Sheet")
+        return HTMLResponse(html)
+    except Exception as e:
+        print(f"premium-pdf-html error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "message": "PDF তৈরি ব্যর্থ হয়েছে। আবার চেষ্টা করুন।"}, status_code=500)
+
 @app.get("/api/premium-pdf/{cache_id}")
 async def api_premium_pdf_get(cache_id: str):
     try:

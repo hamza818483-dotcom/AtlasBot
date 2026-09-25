@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATLAS Practice Sheet PDF</title>
+<style>
+  body{font-family:sans-serif;background:#f4f4f8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;color:#1a237e;}
+  .box{text-align:center;padding:24px;}
+  .spinner{width:40px;height:40px;border:4px solid #c5cae9;border-top-color:#1a237e;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 14px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .msg{font-size:14px;}
+  .err{color:#c62828;font-weight:700;}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="spinner" id="spinner"></div>
+  <div class="msg" id="msg">📄 PDF তৈরি হচ্ছে...</div>
+</div>
+<script>
+function getParam(name){
+  return new URLSearchParams(window.location.search).get(name);
+}
+var RENDER = 'https://atlasbot-q4f4.onrender.com';
+var cacheId = getParam('id');
+
+function showError(text){
+  document.getElementById('spinner').style.display='none';
+  var m = document.getElementById('msg');
+  m.className = 'msg err';
+  m.textContent = text;
+}
+
+function loadHtml2Pdf(cb){
+  if (window.html2pdf) { cb(); return; }
+  var s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+  s.onload = cb;
+  s.onerror = function(){ showError('❌ PDF লাইব্রেরি লোড ব্যর্থ হয়েছে।'); };
+  document.head.appendChild(s);
+}
+
+if (!cacheId) {
+  showError('❌ ID পাওয়া যায়নি।');
+} else {
+  fetch(RENDER + '/api/premium-pdf-html/' + cacheId).then(function(r){
+    if (!r.ok) return r.text().then(function(t){
+      var msg = 'PDF তৈরি ব্যর্থ হয়েছে।';
+      try { var j = JSON.parse(t); if (j && j.message) msg = j.message; } catch(e){}
+      throw new Error(msg);
+    });
+    return r.text();
+  }).then(function(html){
+    loadHtml2Pdf(function(){
+      var iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.left = '-9999px';
+      iframe.style.top = '0';
+      iframe.style.width = '794px';
+      iframe.style.height = '1123px';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+      iframe.onload = function(){
+        var target = iframe.contentDocument.body;
+        var opt = {
+          margin: 0,
+          filename: 'ATLAS_Practice_Sheet_' + cacheId.slice(0, 8) + '.pdf',
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+        };
+        window.html2pdf().set(opt).from(target).save().then(function(){
+          document.body.removeChild(iframe);
+          document.getElementById('msg').textContent = '✅ PDF ডাউনলোড হয়েছে। এই ট্যাব বন্ধ করতে পারেন।';
+          document.getElementById('spinner').style.display = 'none';
+        }).catch(function(e){
+          document.body.removeChild(iframe);
+          showError('❌ PDF তৈরি ব্যর্থ: ' + (e && e.message ? e.message : 'Unknown error'));
+        });
+      };
+      iframe.srcdoc = html;
+    });
+  }).catch(function(e){
+    showError('❌ PDF তৈরি ব্যর্থ: ' + (e && e.message ? e.message : 'Unknown error'));
+  });
+}
+</script>
+</body>
+</html>
