@@ -1034,14 +1034,11 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     first one was needlessly doubling key/quota spend for a bonus attempt
     that isn't essential.
 
-    v5.26: MCQ generation (expect_json=True) is Gemini-ONLY — no fallback
-    to Groq/OpenRouter/CF/NVIDIA at all. Those providers downscale/compress
-    images or use weaker vision models, which risks hallucinated MCQs from
-    misread source pages (see v5.24 note above); for actual MCQ output,
-    accuracy matters more than uptime, so a failed Gemini chain means no
-    MCQs for that page rather than a wrong one from a fallback provider.
-    Fallback chain (Groq -> OpenRouter -> CF -> NVIDIA) is still used for
-    non-MCQ plain-text calls (expect_json=False, e.g. /atlas explain)."""
+    v5.26: MCQ generation (expect_json=True) previously was Gemini-only.
+    v5.27: reverted — MCQ now also falls back to Groq/OpenRouter/CF/NVIDIA
+    when Gemini is exhausted/down (e.g. widespread 503s), same as non-MCQ
+    calls, since a full Gemini outage otherwise leaves users with no MCQs
+    at all."""
     if expect_json:
         full_prompt = prompt_text if 'RULES (strict):' in prompt_text else prompt_text + STRICT_SOURCE_RULES
     else:
@@ -1056,13 +1053,7 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
         if _dt_gem > 8:
             log(f"[ai_generate] gemini SLOW SUCCESS: {_dt_gem:.1f}s (target <8s)", "WARNING")
         return txt, "gemini"
-    log_error(f"[ai_generate] gemini exhausted after {_dt_gem:.1f}s")
-
-    if expect_json:
-        # MCQ generation is Gemini-only — no fallback to weaker/downscaled
-        # vision providers (see v5.26 note above).
-        log_error("[ai_generate] MCQ call: gemini-only policy, not trying fallback providers")
-        return None, ""
+    log_error(f"[ai_generate] gemini exhausted after {_dt_gem:.1f}s, trying groq")
 
     if light_retry:
         # Bonus attempt — don't also burn a full Groq key-pool scan on top;
