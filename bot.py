@@ -592,11 +592,14 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     if 0 < healthy_count < MIN_HEALTHY_KEYS:
         log(f"⏭️ [groq] only {healthy_count}/{n_keys} healthy keys for {first_model_label} — skipping straight to Gemini")
         return None
-    # v5.5: downscale once here (not per-key) — Groq's TPM limit is tight
-    # enough that a full-resolution image alone can exceed it (HTTP 413)
+    # v5.5: downscale once here (not per-key) — avoids literal oversized-
+    # payload 413s (Groq's real per-minute budget is TOKENS: 18,000 TPM,
+    # flat 2,000 tokens/image on qwen3.8-27b, i.e. ~8-9 images/min; also
+    # capped at 30 RPM regardless of tokens).
     groq_image_bytes = _downscale_image_for_tpm(image_bytes) if image_bytes else image_bytes
-    # v5.6: TPM 8000 is tight even after image downscale if prompt is long —
-    # cap prompt text too so image+prompt together stay under budget.
+    # v5.6: TPM 18000 (free tier) is still tight if the prompt text itself is
+    # long — cap prompt text too so image (2000 flat) + prompt together
+    # stay comfortably under budget.
     if len(prompt_text) > 2200:
         prompt_text = prompt_text[:2200]
     _budget_start = time.time()
@@ -734,13 +737,12 @@ def _ingest_shrink(image_bytes: bytes, max_dim: int = 1200, quality: int = 80) -
 
 
 def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 640, jpeg_quality: int = 50) -> bytes:
-    """v5.5: Groq's TPM limit (8000 for qwen3.6-27b) counts image tokens
-    proportional to resolution — a full-resolution phone photo (e.g.
-    3000x4000) can alone exceed the whole per-minute budget, causing 413
-    'Request too large' before the model even sees the prompt text. Downscale
-    to a reasonable max dimension and re-encode as JPEG to keep requests
-    comfortably under the limit while preserving readability for OCR/MCQ
-    extraction. Falls back to the original bytes if anything goes wrong."""
+    """v5.5/v5.31: Groq's TPM limit (18,000 tokens/min for qwen3.8-27b, free
+    tier) — a flat 2,000 input tokens per image regardless of resolution,
+    so downscaling doesn't cut token cost. It's kept to avoid literal
+    oversized-payload 413s and reduce upload time; the real per-minute
+    ceiling is tokens (18,000 / 2,000 ≈ 8-9 images/minute), not payload
+    size. Falls back to the original bytes if anything goes wrong."""
     try:
         img = Image.open(BytesIO(image_bytes))
         img = img.convert("RGB")
