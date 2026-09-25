@@ -1007,8 +1007,8 @@ async def _call_cf_workers_ai(prompt_text: str, image_bytes: Optional[bytes]) ->
     return None
 
 async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, expect_json: bool = True, light_retry: bool = False) -> Tuple[Optional[str], str]:
-    """v5.24: Full fallback chain. Returns (text, provider_name) or (None, '').
-    Order: Gemini (PRIMARY) -> Groq -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
+    """v5.32: Full fallback chain. Returns (text, provider_name) or (None, '').
+    Order: Groq (PRIMARY) -> Gemini -> OpenRouter (Qwen VL -> Nemotron -> Gemma)
     -> Cloudflare Workers AI -> NVIDIA Vision.
     Every provider/key with all-key rotation; missing keys silently skipped.
     expect_json=True (default, for MCQ generation) appends the JSON-only output
@@ -1017,37 +1017,42 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
     so the model replies in natural readable Bengali/English text instead of
     JSON that would otherwise leak straight to the user unconverted.
 
-    v5.24: Gemini is now PRIMARY for everything (text and image), not just
-    image-priority. Groq downscales every image to 640px/50%q to fit its
-    tight TPM budget, which makes dense handwritten Bangla notes illegible
-    and causes the model to hallucinate similar-looking textbook content
-    instead of reading the actual page (confirmed real-world failure:
-    asbestos-formula/Aqua-Regia/rose-pink-crystal MCQs generated from a page
-    that was actually about lab heating equipment — happened twice, two
-    different hallucinated topics, same root cause). Gemini receives the
-    original full-resolution image (no downscale), so accuracy matters more
-    than Groq's raw speed here. Groq remains the first fallback if Gemini's
-    keys are exhausted/failing.
+    v5.32: Groq made PRIMARY (was Gemini). Gemini's free tier is capped at
+    only 20 requests/day per key/model (GenerateRequestsPerDayPerProjectPerModel
+    -FreeTier), which was exhausting fast and pushing most real traffic into
+    fallback anyway. Groq's free tier (qwen/qwen3.8-27b) allows far more
+    daily volume (14,400 RPD, 18,000 TPM), so it now goes first; Gemini is
+    the fallback when Groq's keys are exhausted/failing.
 
     v5.25: light_retry=True — for "MCQ count was too low, try once more"
-    bonus calls that already had one full successful pass. Caps Gemini to
-    a SINGLE key attempt (no full key-pool rotation) instead of re-scanning
-    every key again, since a second full multi-key chain on top of the
-    first one was needlessly doubling key/quota spend for a bonus attempt
-    that isn't essential.
+    bonus calls that already had one full successful pass. Skips a repeat
+    full multi-key Groq scan for a bonus attempt that isn't essential —
+    goes straight to a single-key Gemini attempt instead.
 
     v5.26: MCQ generation (expect_json=True) previously was Gemini-only.
-    v5.27: reverted — MCQ now also falls back to Groq/OpenRouter/CF/NVIDIA
-    when Gemini is exhausted/down (e.g. widespread 503s), same as non-MCQ
-    calls, since a full Gemini outage otherwise leaves users with no MCQs
-    at all."""
+    v5.27: reverted — MCQ falls back across all providers when the primary
+    is exhausted/down, same as non-MCQ calls, since a full outage otherwise
+    leaves users with no MCQs at all."""
     if expect_json:
         full_prompt = prompt_text if 'RULES (strict):' in prompt_text else prompt_text + STRICT_SOURCE_RULES
     else:
         full_prompt = prompt_text + STRICT_SOURCE_RULES_PLAIN
 
+    if not light_retry:
+        log_error("[ai_generate] trying groq")
+        _t_groq = time.time()
+        # 1) Groq (PRIMARY -- smooth key x model rotation) -- tracked inside _call_groq
+        txt = await _call_groq(full_prompt, image_bytes)
+        _dt_groq = time.time() - _t_groq
+        if txt:
+            log(f"⏱️ [ai_generate] groq succeeded in {_dt_groq:.1f}s")
+            if _dt_groq > 8:
+                log(f"[ai_generate] groq SLOW SUCCESS: {_dt_groq:.1f}s (target <8s)", "WARNING")
+            return txt, "groq"
+        log_error(f"[ai_generate] groq exhausted after {_dt_groq:.1f}s, trying gemini")
+
     _t_gem = time.time()
-    # 1) Gemini (PRIMARY -- all keys with rotation, full-resolution image, no downscale)
+    # 2) Gemini (fallback -- all keys with rotation, full-resolution image, no downscale)
     txt = await _call_gemini(full_prompt, image_bytes, max_tries=(1 if light_retry else None))
     _dt_gem = time.time() - _t_gem
     if txt:
@@ -1055,24 +1060,14 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
         if _dt_gem > 8:
             log(f"[ai_generate] gemini SLOW SUCCESS: {_dt_gem:.1f}s (target <8s)", "WARNING")
         return txt, "gemini"
-    log_error(f"[ai_generate] gemini exhausted after {_dt_gem:.1f}s, trying groq")
+    log_error(f"[ai_generate] gemini exhausted after {_dt_gem:.1f}s")
 
     if light_retry:
-        # Bonus attempt — don't also burn a full Groq key-pool scan on top;
-        # the first full pass already tried everything. Stop here.
+        # Bonus attempt — don't also burn a full OpenRouter/CF/NVIDIA scan
+        # on top; the first full pass already tried everything. Stop here.
         return None, ""
 
-    log_error("[ai_generate] trying groq")
-    _t_groq = time.time()
-    # 2) Groq (fallback -- smooth key x model rotation) -- tracked inside _call_groq
-    txt = await _call_groq(full_prompt, image_bytes)
-    _dt_groq = time.time() - _t_groq
-    if txt:
-        log(f"⏱️ [ai_generate] groq succeeded in {_dt_groq:.1f}s")
-        if _dt_groq > 8:
-            log(f"[ai_generate] groq SLOW SUCCESS: {_dt_groq:.1f}s (target <8s)", "WARNING")
-        return txt, "groq"
-    log_error(f"[ai_generate] groq exhausted after {_dt_groq:.1f}s, trying openrouter family")
+    log_error("[ai_generate] trying openrouter family")
     or_headers = {"HTTP-Referer": PUBLIC_BASE_URL, "X-Title": "ATLAS MCQ Bot"}
     _t_or = time.time()
     # 3) OpenRouter family: Qwen VL 72B / Nemotron / Gemma -- smooth model x key
