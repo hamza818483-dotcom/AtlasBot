@@ -1002,7 +1002,7 @@ async def api_premium_pdf_get(cache_id: str):
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="ATLAS_Practice_Sheet_{cache_id[:8]}.pdf"'}
+            headers={"Content-Disposition": f'inline; filename="ATLAS_Practice_Sheet_{cache_id[:8]}.pdf"'}
         )
     except Exception as e:
         print(f"[premium-pdf] UNHANDLED EXCEPTION: {type(e).__name__}: {e}")
