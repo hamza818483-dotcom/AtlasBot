@@ -357,7 +357,7 @@ def rotate_gemini_key():
 
 STRICT_SOURCE_RULES = """
 
-RULES: Use ONLY the given source (image/text) — no outside knowledge. Cover all key info as MCQs (quality over quantity). No weak/irrelevant MCQs. Exactly one correct answer per question. Output ONLY valid JSON, no extra text."""
+RULES: Read the ENTIRE given source (image/text) carefully before answering. Use ONLY facts, terms, numbers and topics that are ACTUALLY VISIBLE/PRESENT in the source — no outside knowledge, no invented/guessed/similar-sounding content. If any part of the image is unclear or unreadable, base MCQs only on the parts you can clearly read — never fabricate a plausible-sounding topic to fill in for unclear text. Cover all key info as MCQs (quality over quantity). No weak/irrelevant MCQs. Exactly one correct answer per question. Output ONLY valid JSON, no extra text."""
 
 # Plain-text variant (no "Output: ONLY valid JSON" instruction) — used for
 # explanation-style calls (/atlas, handle_explain_from_pending) which must
@@ -592,11 +592,18 @@ async def _call_groq(prompt_text: str, image_bytes: Optional[bytes]) -> Optional
     if 0 < healthy_count < MIN_HEALTHY_KEYS:
         log(f"⏭️ [groq] only {healthy_count}/{n_keys} healthy keys for {first_model_label} — skipping straight to Gemini")
         return None
-    # v5.5: downscale once here (not per-key) — avoids literal oversized-
-    # payload 413s (Groq's real per-minute budget is TOKENS: 18,000 TPM,
-    # flat 2,000 tokens/image on qwen3.8-27b, i.e. ~8-9 images/min; also
-    # capped at 30 RPM regardless of tokens).
-    groq_image_bytes = _downscale_image_for_tpm(image_bytes) if image_bytes else image_bytes
+    # v5.5/v5.34: no forced downscale — image token cost on Groq is FLAT
+    # (2,000 tokens/image regardless of resolution), so shrinking bought
+    # nothing and was hurting OCR accuracy on dense/small Bangla text
+    # (real hallucination incidents, see _downscale_image_for_tpm docstring).
+    # Only shrink if the raw bytes are large enough to risk Groq's own
+    # 20MB/image limit or a slow upload — otherwise send full original
+    # quality untouched so the model actually reads the real page.
+    groq_image_bytes = (
+        _downscale_image_for_tpm(image_bytes, max_dim=2400, jpeg_quality=92)
+        if image_bytes and len(image_bytes) > 8 * 1024 * 1024
+        else image_bytes
+    )
     # v5.6: TPM 18000 (free tier) is still tight if the prompt text itself is
     # long — cap prompt text too so image (2000 flat) + prompt together
     # stay comfortably under budget.
