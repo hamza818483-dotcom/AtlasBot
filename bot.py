@@ -1107,6 +1107,56 @@ async def ai_generate(prompt_text: str, image_bytes: Optional[bytes] = None, exp
             return txt, "nvidia"
     return None, ""
 
+
+SPLIT3_MCQ_CAP = 4  # v6.0: per-sub-request MCQ cap so each Groq call's
+# max_tokens (~4*175+300=1000) stays comfortably inside low-tier TPM/output
+# limits; the 3 parallel calls collectively cover more ground per image
+# than one large call would under the same per-request output ceiling.
+
+
+async def ai_generate_split3(prompt_text: str, image_bytes: Optional[bytes]) -> Tuple[Optional[str], str, List[str]]:
+    """v6.0: send the same image as 3 parallel AI requests instead of one,
+    each instructed to cap itself at SPLIT3_MCQ_CAP MCQs (keeps each
+    request's output under Groq's low max_tokens ceiling) and to focus on a
+    different portion of the page, so the 3 results combined cover more of
+    the image than a single capped-output call could.
+    Returns (first_successful_text, provider_of_first_success, all_texts)
+    where all_texts is every non-empty response text collected (for the
+    caller to parse+merge+dedupe). Falls back to a single normal call if
+    only one part succeeds or on any unexpected issue."""
+    parts = [
+        ("উপরের ১/৩ অংশ (top third) থেকে MCQ বানাও।", "টপ অংশ (উপরের ১/৩)"),
+        ("মাঝের ১/৩ অংশ (middle third) থেকে MCQ বানাও।", "মধ্য অংশ (মাঝের ১/৩)"),
+        ("নিচের ১/৩ অংশ (bottom third) থেকে MCQ বানাও।", "নিচের অংশ (নিচের ১/৩)"),
+    ]
+    cap_note = f"\n\nSPLIT MODE: এই কলে সর্বোচ্চ {SPLIT3_MCQ_CAP}টি MCQ দাও। শুধু {{FOCUS}} থেকে। বাকি অংশ অন্য কল কভার করছে, তাই ওভারল্যাপ এড়াও।"
+    tasks = []
+    for focus_instr, focus_label in parts:
+        part_prompt = prompt_text + cap_note.replace("{FOCUS}", focus_label) + f"\n{focus_instr}"
+        tasks.append(_call_groq(
+            part_prompt if 'RULES (strict):' in part_prompt else part_prompt + STRICT_SOURCE_RULES,
+            image_bytes,
+        ))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    all_texts: List[str] = []
+    first_provider = ""
+    for r in results:
+        if isinstance(r, Exception):
+            log_error(f"[ai_generate_split3] part failed: {type(r).__name__} {r}")
+            continue
+        if r:
+            all_texts.append(r)
+            if not first_provider:
+                first_provider = "groq"
+    if all_texts:
+        return all_texts[0], first_provider, all_texts
+    # all 3 split calls failed (e.g. Groq exhausted) -- fall back to the
+    # normal single full-chain call (Groq->Gemini->OpenRouter->CF->NVIDIA)
+    log_error("[ai_generate_split3] all 3 groq parts failed, falling back to ai_generate")
+    txt, provider = await ai_generate(prompt_text, image_bytes)
+    return txt, provider, ([txt] if txt else [])
+
+
 def _fix_json_str(t: str) -> str:
     """Fix common AI JSON issues: trailing commas, missing values, unquoted keys, truncation."""
     t = re.sub(r',\s*([}\]])', r'\1', t)
@@ -3241,14 +3291,16 @@ async def _generate_mcq_from_image_inner(image_bytes: bytes, prompt_type: str = 
         prompt_text = prompt_text + COMPACT_MCQ_RULES
 
         _t0 = time.time()
-        response_text, provider = await ai_generate(prompt_text, image_bytes)
+        response_text, provider, all_texts = await ai_generate_split3(prompt_text, image_bytes)
         _T_AI = time.time() - _t0
-        log(f"⏱️ [genmcq] db={_T_DB:.1f}s ai={_T_AI:.1f}s (provider={provider or 'NONE'}, img={len(image_bytes)//1024}KB, prompt={len(prompt_text)}ch)")
+        log(f"⏱️ [genmcq] db={_T_DB:.1f}s ai={_T_AI:.1f}s (provider={provider or 'NONE'}, img={len(image_bytes)//1024}KB, prompt={len(prompt_text)}ch, parts={len(all_texts)})")
         if not response_text:
             return [], "সব AI Provider ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
         _tp = time.time()
-        valid_mcqs = parse_mcq_json(response_text, prompt_type=prompt_type)
+        valid_mcqs = []
+        for _part_txt in all_texts:
+            valid_mcqs.extend(parse_mcq_json(_part_txt, prompt_type=prompt_type))
         valid_mcqs = _dedupe_mcqs(valid_mcqs)
         # v5.35: code-level fidelity check — run OCR on the source image
         # (independent of the AI) and drop any MCQ whose question/options
