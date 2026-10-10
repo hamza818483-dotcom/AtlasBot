@@ -6862,35 +6862,7 @@ async def _memory_cleanup_task() -> None:
         await asyncio.sleep(1800)
 
 
-async def _ram_guard_task() -> None:
-    """Proactive RSS watchdog for 512MB Render instances: checks own process
-    RSS every 60s. On free tier, hitting the OS memory limit means Render
-    hard-kills the process with no cleanup/logging -- this self-restarts
-    cleanly at 85% (~435MB) BEFORE that happens.
-    Auto-failover: right before self-restarting, if RENDER_URL_2 (secondary
-    instance) is configured, switches Telegram's webhook to it FIRST -- so
-    users get zero downtime instead of waiting for this instance to restart."""
-    try:
-        import psutil
-    except ImportError:
-        log("⚠️ [RAMGuard] psutil not installed -> proactive RAM guard disabled")
-        return
-    proc = psutil.Process(os.getpid())
-    limit_mb = 512
-    threshold_mb = int(limit_mb * 0.85)
-    await asyncio.sleep(60)
-    while True:
-        try:
-            rss_mb = proc.memory_info().rss / (1024 * 1024)
-            if rss_mb >= threshold_mb:
-                log(f"⚠️ [RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> failover + self-restart")
-                # Secondary failover disabled — webhook always stays on Primary
-                pass
-                await asyncio.sleep(1)
-                os._exit(0)
-        except Exception as e:
-            log_error(f"[RAMGuard] check failed: {e}")
-        await asyncio.sleep(60)
+
 
 
 async def _local_health_ok() -> bool:
@@ -7592,7 +7564,7 @@ async def setup_bot() -> None:
     asyncio.create_task(_supervised(daily_reset_scheduler, "daily_reset_scheduler"))
     asyncio.create_task(_supervised(keepalive_task, "keepalive_task"))
     asyncio.create_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
-    asyncio.create_task(_supervised(_ram_guard_task, "_ram_guard_task"))
+
     asyncio.create_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
     asyncio.create_task(_supervised(watchdog_task, "watchdog_task"))
     asyncio.create_task(_supervised(watchdog2_task, "watchdog2_task"))
