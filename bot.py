@@ -6884,21 +6884,8 @@ async def _ram_guard_task() -> None:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
             if rss_mb >= threshold_mb:
                 log(f"⚠️ [RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> failover + self-restart")
-                secondary = (os.environ.get("RENDER_URL_2", "") or "").strip()
-                if secondary and BOT_TOKEN:
-                    try:
-                        webhook_url = secondary.rstrip("/") + "/webhook/" + BOT_TOKEN
-                        async with httpx.AsyncClient(timeout=8) as _c:
-                            r = await _c.post(
-                                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                                json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
-                            )
-                            if r.json().get("ok"):
-                                log(f"✅ [RAMGuard] Webhook switched to SECONDARY: {webhook_url}")
-                            else:
-                                log_error(f"[RAMGuard] Failover webhook switch failed: {r.json().get('description')}")
-                    except Exception as fe:
-                        log_error(f"[RAMGuard] Failover attempt error: {fe}")
+                # Secondary failover disabled — webhook always stays on Primary
+                pass
                 await asyncio.sleep(1)
                 os._exit(0)
         except Exception as e:
