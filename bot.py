@@ -6865,6 +6865,30 @@ async def _memory_cleanup_task() -> None:
 
 
 
+async def _ram_guard_task() -> None:
+    """Proactive RSS watchdog: self-restarts cleanly at 85% RAM (~435MB)
+    before Render hard-kills the process at 512MB limit."""
+    try:
+        import psutil
+    except ImportError:
+        log("⚠️ [RAMGuard] psutil not installed -> proactive RAM guard disabled")
+        return
+    proc = psutil.Process(os.getpid())
+    limit_mb = 512
+    threshold_mb = int(limit_mb * 0.85)
+    await asyncio.sleep(60)
+    while True:
+        try:
+            rss_mb = proc.memory_info().rss / (1024 * 1024)
+            if rss_mb >= threshold_mb:
+                log(f"⚠️ [RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> self-restart")
+                await asyncio.sleep(1)
+                os._exit(0)
+        except Exception as e:
+            log_error(f"[RAMGuard] check failed: {e}")
+        await asyncio.sleep(60)
+
+
 async def _local_health_ok() -> bool:
     """Checks the app's OWN /health via localhost (127.0.0.1:7860) instead of
     the public Render URL. If this succeeds, the FastAPI server itself is
@@ -7572,6 +7596,7 @@ async def setup_bot() -> None:
     # asyncio.create_task(_supervised(cross_bot_watchdog_task, "cross_bot_watchdog_task"))
     asyncio.create_task(_supervised(checkin_scheduler, "checkin_scheduler"))
     asyncio.create_task(_supervised(cf_proxy_health_check_scheduler, "cf_proxy_health_check_scheduler"))
+    asyncio.create_task(_supervised(_ram_guard_task, "_ram_guard_task"))
     log("✅ Bot setup complete!")
 
 # ============================================================
