@@ -777,7 +777,7 @@ def _downscale_image_for_tpm(image_bytes: bytes, max_dim: int = 1600, jpeg_quali
 # ============================================================
 import contextvars as _cv
 _CALL_TRACE = _cv.ContextVar("_call_trace", default=None)   # admin debug: per-request AI call log
-_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 def _trace_add(provider: str, key_label: str, ok: bool, extra: str = "") -> None:
     try:
