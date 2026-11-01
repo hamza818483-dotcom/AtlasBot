@@ -5,8 +5,8 @@ name: Watchdog - Render Primary Health Monitor
 # Required repo secrets: BOT_TOKEN, RENDER_URL, OWNER_ID
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  # schedule disabled — bot intentionally suspended (2026-11-01)
+  # - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:

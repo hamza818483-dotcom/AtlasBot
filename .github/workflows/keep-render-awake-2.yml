@@ -6,8 +6,8 @@ name: Keep Render Awake (Backup)
 # kokhono ekshathe miss howar shombhabona kom.
 
 on:
-  schedule:
-    - cron: '2-59/5 * * * *'   # :02, :07, :12... (Layer 2 of 3, staggered)
+  # schedule disabled — bot intentionally suspended (2026-11-01)
+  # - cron: '2-59/5 * * * *'   # :02, :07, :12... (Layer 2 of 3, staggered)
   workflow_dispatch:
 
 jobs:

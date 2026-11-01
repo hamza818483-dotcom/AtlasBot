@@ -6,10 +6,8 @@ name: Keep Render Awake (Secondary)
 # er failover always-ready thake.
 
 on:
-  schedule:
-    - cron: '4-59/5 * * * *'   # :04, :09, :14... (Layer 3 of 3, staggered)
-  push:
-    branches: [main]
+  # schedule disabled — bot intentionally suspended (2026-11-01)
+  # - cron: '4-59/5 * * * *'   # :04, :09, :14... (Layer 3 of 3, staggered)
   workflow_dispatch:
 
 jobs:
